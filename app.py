@@ -162,7 +162,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
 
             btn.disabled = true;
-            status.innerText = "⏳ Obteniendo resumen de métricas y trayectos de Mapon...";
+            status.innerText = "⏳ Sincronizando métricas y rutas oficiales de Mapon...";
 
             try {
                 const params = new URLSearchParams({
@@ -264,35 +264,47 @@ def format_sec_to_hm(seconds):
     minutes = (secs % 3600) // 60
     return f"{hours}h {minutes}m"
 
-def extraer_puntos_python(route_data):
+def extraer_puntos_y_resumen(route_json):
     points = []
-    if not route_data or not isinstance(route_data, dict):
-        return points
+    dist_km, drive_sec, stop_sec, idle_sec = None, None, None, None
+
+    if not isinstance(route_json, dict):
+        return points, dist_km, drive_sec, stop_sec, idle_sec
+
+    data = route_json.get('data', {})
     
-    data = route_data.get('data', {})
-    units = data.get('units', []) if isinstance(data, dict) else (data if isinstance(data, list) else route_data.get('units', []))
+    # Extraer summary oficial
+    sum_obj = data.get('summary', {}) or route_json.get('summary', {})
+    units = data.get('units', []) if isinstance(data, dict) else []
+    if units and isinstance(units, list) and len(units) > 0 and isinstance(units[0], dict):
+        if 'summary' in units[0] and isinstance(units[0]['summary'], dict):
+            sum_obj = units[0]['summary']
+            
+    if isinstance(sum_obj, dict) and sum_obj:
+        dist_km = float(sum_obj.get('distance', 0) or 0)
+        drive_sec = int(sum_obj.get('drive_time', 0) or sum_obj.get('duration', 0) or 0)
+        stop_sec = int(sum_obj.get('stop_time', 0) or 0)
+        idle_sec = int(sum_obj.get('idle_time', 0) or 0)
 
-    if not isinstance(units, list):
-        return points
+    if dist_km and dist_km > 2000:
+        dist_km = dist_km / 1000.0
 
-    def add_pt(pt):
+    def add_pt(pt, is_stop=False, stop_address=""):
         if not pt or not isinstance(pt, dict):
             return
-        
         ts = parse_point_timestamp(pt)
         if ts is None:
             return
-
         try:
             lat = float(pt.get('lat') or pt.get('latitude') or 0)
             lng = float(pt.get('lng') or pt.get('longitude') or 0)
-            speed = float(pt.get('speed') or pt.get('s') or pt.get('spd') or 0)
+            speed = 0.0 if is_stop else float(pt.get('speed') or pt.get('s') or pt.get('spd') or 0)
         except (ValueError, TypeError):
             return
 
         if lat != 0 and lng != 0:
             params = pt.get('params', {})
-            acc = 1 if speed > 0 else 0
+            acc = 0 if is_stop else (1 if speed > 0 else 1)
             if isinstance(params, dict):
                 if 'acc' in params:
                     try: acc = int(params['acc'])
@@ -309,62 +321,38 @@ def extraer_puntos_python(route_data):
                 'lat': lat,
                 'lng': lng,
                 'speed': speed,
-                'address': pt.get('address') or pt.get('addr') or '',
-                'acc': acc
+                'address': stop_address or pt.get('address') or pt.get('addr') or '',
+                'acc': 0 if is_stop else acc,
+                'is_stop': is_stop
             })
 
-    for u in units:
-        if not isinstance(u, dict): continue
-        if isinstance(u.get('points'), list):
-            for pt in u['points']: add_pt(pt)
-        if isinstance(u.get('routes'), list):
-            for r in u['routes']:
-                if isinstance(r, dict):
-                    if isinstance(r.get('decoded_route'), list):
-                        for pt in r['decoded_route']: add_pt(pt)
-                    if isinstance(r.get('points'), list):
-                        for pt in r['points']: add_pt(pt)
-                    if r.get('start'): add_pt(r['start'])
-                    if r.get('end'): add_pt(r['end'])
-        if isinstance(u.get('tracks'), list):
-            for t in u['tracks']:
-                if isinstance(t, dict) and isinstance(t.get('points'), list):
-                    for pt in t['points']: add_pt(pt)
+    if units and isinstance(units, list):
+        for u in units:
+            if not isinstance(u, dict): continue
+            routes = u.get('routes', [])
+            if isinstance(routes, list):
+                for r in routes:
+                    if not isinstance(r, dict): continue
+                    rtype = r.get('type')
+                    if rtype == 'stop':
+                        # Parada oficial de Mapon
+                        stop_addr = r.get('address') or r.get('addr') or ''
+                        start_pt = r.get('start', {})
+                        end_pt = r.get('end', {})
+                        if start_pt: add_pt(start_pt, is_stop=True, stop_address=stop_addr)
+                        if end_pt: add_pt(end_pt, is_stop=True, stop_address=stop_addr)
+                    else:
+                        dec = r.get('decoded_route', []) or r.get('points', [])
+                        if isinstance(dec, list):
+                            for pt in dec: add_pt(pt)
+                        if r.get('start'): add_pt(r['start'])
+                        if r.get('end'): add_pt(r['end'])
 
-    return points
+            if isinstance(u.get('points'), list):
+                for pt in u['points']: add_pt(pt)
 
-def extraer_resumen_mapon(route_json, summary_json=None):
-    dist_km, drive_sec, stop_sec, idle_sec = None, None, None, None
-
-    # Probar summary_json primero
-    if summary_json and isinstance(summary_json, dict):
-        s_data = summary_json.get('data', {}).get('summary', {}) or summary_json.get('summary', {})
-        if isinstance(s_data, list) and len(s_data) > 0: s_data = s_data[0]
-        if isinstance(s_data, dict) and s_data:
-            dist_km = float(s_data.get('distance', 0) or 0)
-            drive_sec = int(s_data.get('drive_time', 0) or s_data.get('duration', 0) or 0)
-            stop_sec = int(s_data.get('stop_time', 0) or 0)
-            idle_sec = int(s_data.get('idle_time', 0) or 0)
-
-    # Probar route_json
-    if (dist_km is None or dist_km == 0) and route_json and isinstance(route_json, dict):
-        data = route_json.get('data', {})
-        s_obj = data.get('summary', {}) or route_json.get('summary', {})
-        units = data.get('units', []) if isinstance(data, dict) else []
-        if units and isinstance(units, list) and len(units) > 0 and isinstance(units[0], dict):
-            if 'summary' in units[0] and isinstance(units[0]['summary'], dict):
-                s_obj = units[0]['summary']
-        if isinstance(s_obj, dict) and s_obj:
-            dist_km = float(s_obj.get('distance', 0) or 0)
-            drive_sec = int(s_obj.get('drive_time', 0) or s_obj.get('duration', 0) or 0)
-            stop_sec = int(s_obj.get('stop_time', 0) or 0)
-            idle_sec = int(s_obj.get('idle_time', 0) or 0)
-
-    # Si la distancia viene en metros (ej. 865800 m), convertir a km
-    if dist_km and dist_km > 2000:
-        dist_km = dist_km / 1000.0
-
-    return dist_km, drive_sec, stop_sec, idle_sec
+    points.sort(key=lambda x: x['timestamp'])
+    return points, dist_km, drive_sec, stop_sec, idle_sec
 
 @app.route('/')
 def index():
@@ -411,16 +399,7 @@ def generar_excel():
     sec_from = int(start_utc.timestamp())
     sec_till = int(end_utc.timestamp())
 
-    # 1. Resumen Oficial de Mapon / IDT
-    s_json = None
-    try:
-        r_sum = requests.get(f"{BASE_URL}/summary/list.json", params={
-            'key': API_KEY, 'unit_id': unit_id, 'from': str_from, 'till': str_till
-        }, timeout=15)
-        if r_sum.ok: s_json = r_sum.json()
-    except Exception as e: pass
-
-    # 2. Alertas IDT
+    # 1. Alertas IDT
     alertas = []
     try:
         r_alerts = requests.get(f"{BASE_URL}/alert/list.json", params={
@@ -431,45 +410,44 @@ def generar_excel():
             alertas = data_a.get('data', {}).get('alerts', []) or data_a.get('alerts', []) or []
     except Exception as e: pass
 
-    # 3. Puntos GPS con trayectos decodificados de alta densidad
+    # 2. Puntos GPS y Resumen con Mapon API
     raw_points = []
     route_json = None
     url_1 = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={str_from}&till={str_till}&include[]=points&include[]=decoded_route&include[]=stops&include[]=summary"
     try:
         r1 = requests.get(url_1, timeout=25)
-        if r1.ok:
-            route_json = r1.json()
-            raw_points = extraer_puntos_python(route_json)
+        if r1.ok: route_json = r1.json()
     except Exception as e: pass
 
-    if not raw_points:
+    if not route_json:
         url_2 = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={iso_from}&till={iso_till}&include[]=points&include[]=decoded_route&include[]=stops&include[]=summary"
         try:
             r2 = requests.get(url_2, timeout=25)
-            if r2.ok:
-                route_json = r2.json()
-                raw_points = extraer_puntos_python(route_json)
+            if r2.ok: route_json = r2.json()
         except Exception as e: pass
 
-    if not raw_points:
+    if not route_json:
         url_3 = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={sec_from}&till={sec_till}&include[]=points&include[]=decoded_route&include[]=stops&include[]=summary"
         try:
             r3 = requests.get(url_3, timeout=25)
-            if r3.ok:
-                route_json = r3.json()
-                raw_points = extraer_puntos_python(route_json)
+            if r3.ok: route_json = r3.json()
         except Exception as e: pass
+
+    if not route_json:
+        return jsonify({
+            'error': f'No se obtuvo respuesta de rutas para la unidad {unit_name} en el rango seleccionado.'
+        }), 404
+
+    raw_points, official_dist, official_drive, official_stop, official_idle = extraer_puntos_y_resumen(route_json)
 
     if not raw_points:
         return jsonify({
             'error': f'No se obtuvieron posiciones GPS para la unidad {unit_name} en el rango {fecha_inicio} {hora_inicio} a {fecha_fin} {hora_fin}.'
         }), 404
 
-    official_dist, official_drive, official_stop, official_idle = extraer_resumen_mapon(route_json, s_json)
-
     raw_points.sort(key=lambda x: x['timestamp'])
 
-    # Bucle minuto a minuto respetando brechas de parada (gaps > 300 segundos)
+    # Bucle minuto a minuto respetando brechas de parada (> 300 segundos)
     rows = []
     max_velocidad = 0
     minutos_movimiento = 0
@@ -494,8 +472,8 @@ def generar_excel():
         dt_gap = pB['timestamp'] - pA['timestamp']
         dist_gap = haversine(pA['lat'], pA['lng'], pB['lat'], pB['lng'])
 
-        # Si el intervalo entre registros supera 5 minutos o no hay desplazamiento, la unidad estuvo DETENIDA
-        if dt_gap > 300 or dist_gap < 0.05:
+        # Si es un punto de parada oficial de Mapon o la brecha es > 5 minutos sin movimiento
+        if pA.get('is_stop') or dt_gap > 300 or dist_gap < 0.05:
             cur_lat = pA['lat']
             cur_lng = pA['lng']
             speed_final = 0
@@ -573,7 +551,7 @@ def generar_excel():
 
         curr_ts += 60.0
 
-    # Formatear acumulados para el encabezado
+    # Usar métricas oficiales exactas de Mapon
     str_distancia = f"{official_dist:.1f} km" if official_dist and official_dist > 0 else f"{recorrido_total_km:.2f} km"
     str_conduciendo = format_sec_to_hm(official_drive) if official_drive and official_drive > 0 else f"{minutos_movimiento // 60}h {minutos_movimiento % 60}m"
     str_detenido = format_sec_to_hm(official_stop) if official_stop and official_stop > 0 else f"{minutos_detenido // 60}h {minutos_detenido % 60}m"
