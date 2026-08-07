@@ -162,7 +162,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
 
             btn.disabled = true;
-            status.innerText = "⏳ Consultando recorrido GPS en IDT...";
+            status.innerText = "⏳ Obteniendo telemetría del equipo...";
 
             try {
                 const params = new URLSearchParams({
@@ -234,7 +234,7 @@ def haversine(lat1, lon1, lat2, lon2):
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
     a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
-    c = 2 * math.atan2(math.sqrt(a), Math.sqrt(1 - a)) if (1 - a) > 0 else 0
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)) if (1 - a) > 0 else 0
     return R * c
 
 def parse_point_timestamp(pt):
@@ -245,14 +245,12 @@ def parse_point_timestamp(pt):
         return None
     
     if isinstance(time_val, (int, float)):
-        # Si es timestamp Unix en segundos
         return time_val - (7 * 3600) if time_val > 1000000000 else time_val
     
     clean_str = str(time_val).replace('T', ' ').replace('Z', '')[:19]
     try:
         dt = datetime.strptime(clean_str, "%Y-%m-%d %H:%M:%S")
         if 'gmt' in pt and pt['gmt']:
-            # Si el origen es GMT/UTC, ajustar a Sonora (UTC-7)
             dt = dt - timedelta(hours=7)
         return dt.timestamp()
     except Exception:
@@ -287,11 +285,16 @@ def extraer_puntos_python(route_data):
         if lat != 0 and lng != 0:
             params = pt.get('params', {})
             acc = 1 if speed > 0 else 0
-            if isinstance(params, dict) and 'acc' in params:
-                try:
-                    acc = int(params['acc'])
-                except Exception:
-                    pass
+            if isinstance(params, dict):
+                if 'acc' in params:
+                    try: acc = int(params['acc'])
+                    except: pass
+                elif 'din1' in params:
+                    try: acc = int(params['din1'])
+                    except: pass
+                elif 'ignition' in params:
+                    try: acc = int(params['ignition'])
+                    except: pass
 
             points.append({
                 'timestamp': ts,
@@ -367,7 +370,7 @@ def generar_excel():
     sec_from = int(start_utc.timestamp())
     sec_till = int(end_utc.timestamp())
 
-    # 1. Alertas
+    # 1. Notificaciones / Alertas del Servidor IDT
     alertas = []
     try:
         r_alerts = requests.get(f"{BASE_URL}/alert/list.json", params={
@@ -379,42 +382,31 @@ def generar_excel():
     except Exception as e:
         print("Aviso de alertas:", e)
 
-    # 2. Rutas GPS (Estrategias Múltiples)
+    # 2. Telemetría de Puntos del Equipo
     raw_points = []
-    
-    # Estrategia 1: URL String Directa con Texto Plano
     url_1 = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={str_from}&till={str_till}&include[]=points&include[]=decoded_route&include[]=stops"
     try:
         r1 = requests.get(url_1, timeout=25)
-        if r1.ok:
-            raw_points = extraer_puntos_python(r1.json())
-    except Exception as e:
-        print("Error Estrategia 1:", e)
+        if r1.ok: raw_points = extraer_puntos_python(r1.json())
+    except Exception as e: pass
 
-    # Estrategia 2: ISO UTC con corchetes directos
     if not raw_points:
         url_2 = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={iso_from}&till={iso_till}&include[]=points&include[]=decoded_route&include[]=stops"
         try:
             r2 = requests.get(url_2, timeout=25)
-            if r2.ok:
-                raw_points = extraer_puntos_python(r2.json())
-        except Exception as e:
-            print("Error Estrategia 2:", e)
+            if r2.ok: raw_points = extraer_puntos_python(r2.json())
+        except Exception as e: pass
 
-    # Estrategia 3: Timestamps Unix
     if not raw_points:
         url_3 = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={sec_from}&till={sec_till}&include[]=points&include[]=decoded_route&include[]=stops"
         try:
             r3 = requests.get(url_3, timeout=25)
-            if r3.ok:
-                raw_points = extraer_puntos_python(r3.json())
-        except Exception as e:
-            print("Error Estrategia 3:", e)
+            if r3.ok: raw_points = extraer_puntos_python(r3.json())
+        except Exception as e: pass
 
-    # Si tras todas las estrategias no existen puntos de recorrido, notificar al usuario
     if not raw_points:
         return jsonify({
-            'error': f'La API de IDT no devolvió registros de recorrido para la unidad {unit_name} en el rango {fecha_inicio} {hora_inicio} a {fecha_fin} {hora_fin}. Verifica que el vehículo haya registrado eventos en esa fecha.'
+            'error': f'No se obtuvieron posiciones GPS para la unidad {unit_name} en el rango {fecha_inicio} {hora_inicio} a {fecha_fin} {hora_fin}. Verifica que el equipo haya transmitido datos en ese día.'
         }), 404
 
     raw_points.sort(key=lambda x: x['timestamp'])
@@ -441,31 +433,40 @@ def generar_excel():
         dt_item = datetime.fromtimestamp(time_sec)
         fecha_formatted = dt_item.strftime("%Y-%m-%d %H:%M:00")
 
+        # Telemetría del equipo
         speed_int = int(round(last_known.get('speed', 0)))
+        acc_state = last_known.get('acc', 0)
+
         if speed_int > max_velocidad:
             max_velocidad = speed_int
 
-        tiene_alerta = False
+        # Evaluación de Notificación del Servidor IDT
+        alerta_match = None
         for a in alertas:
             a_str = a.get('gmt') or a.get('time') or ''
             a_ts = parse_point_timestamp({'time': a_str, 'gmt': a.get('gmt')})
             if a_ts and abs(a_ts - time_sec) <= 60:
-                tiene_alerta = True
+                alerta_match = a
                 break
 
-        evento = "Apagado"
-        detalle = "-"
-
-        if speed_int > limite_vel or tiene_alerta:
+        # Lógica basada prioritariamente en parámetros del equipo
+        if alerta_match is not None:
             evento = "🚨 Exceso de velocidad"
-            detalle = f"Velocidad: {speed_int} km/h (Límite: {limite_vel} km/h)"
+            msg = alerta_match.get('msg') or alerta_match.get('title') or 'Notificación de exceso de velocidad'
+            v_val = alerta_match.get('value') or speed_int
+            detalle = f"Notificación IDT: {msg} ({v_val} km/h)"
             minutos_movimiento += 1
         elif speed_int > 0:
             evento = "En movimiento"
+            detalle = "-"
             minutos_movimiento += 1
-        elif last_known.get('acc', 0) == 1:
+        elif acc_state == 1:
             evento = "Ralentí / Motor ON"
+            detalle = "-"
             minutos_ralenti += 1
+        else:
+            evento = "Apagado"
+            detalle = "-"
 
         direccion = last_known.get('address', 'Sonora, Mexico')
         ciudad = ""
