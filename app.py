@@ -393,40 +393,26 @@ def generar_excel():
     except Exception as e:
         return jsonify({'error': f'Formato de fecha u hora inválido: {str(e)}'}), 400
 
-    str_from = f"{fecha_inicio} {hora_inicio}:00"
-    str_till = f"{fecha_fin} {hora_fin}:59"
-    sec_from = int(start_dt.timestamp())
-    sec_till = int(end_dt.timestamp())
+    # Usamos formato ISO estándar que la API de IDT / Mapon nunca rechaza
+    iso_from = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+    iso_till = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Alertas IDT
-    alertas = []
-    try:
-        r_alerts = requests.get(f"{BASE_URL}/alert/list.json", params={
-            'key': API_KEY, 'unit_id': unit_id, 'from': sec_from, 'till': sec_till
-        }, timeout=15)
-        if r_alerts.ok:
-            data_a = r_alerts.json()
-            alertas = data_a.get('data', {}).get('alerts', []) or data_a.get('alerts', []) or []
-    except Exception as e: pass
-
-    # Puntos GPS robustecidos con múltiples formatos de fecha aceptados por IDT
-    query = f"key={API_KEY}&unit_id={unit_id}&from={str_from}&till={str_till}&include[]=points&include[]=decoded_route&include[]=stops&include[]=summary"
-    url = f"{BASE_URL}/route/list.json?{query}"
+    # Petición limpia asegurando que los parámetros 'from' y 'till' vayan completos
+    url = f"{BASE_URL}/route/list.json"
+    payload = {
+        'key': API_KEY,
+        'unit_id': unit_id,
+        'from': iso_from,
+        'till': iso_till,
+        'include[]': ['points', 'decoded_route', 'stops', 'summary']
+    }
 
     route_json = None
     try:
-        res = requests.get(url, timeout=30)
+        res = requests.get(url, params=payload, timeout=30)
         if res.ok: 
             route_json = res.json()
     except Exception as e: pass
-
-    # Si la primera forma no trae unidades/puntos, intentamos con formato plano YYYY-MM-DD
-    if not route_json or not route_json.get('data', {}).get('units'):
-        url_alt = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={fecha_inicio}%2000:00:00&till={fecha_fin}%2023:59:59&include[]=points&include[]=decoded_route&include[]=stops&include[]=summary"
-        try:
-            res = requests.get(url_alt, timeout=30)
-            if res.ok: route_json = res.json()
-        except Exception as e: pass
 
     raw_points, official_dist, official_drive, official_stop, official_idle = extraer_puntos_y_resumen(route_json)
 
@@ -504,21 +490,7 @@ def generar_excel():
         dt_item = datetime.fromtimestamp(curr_ts)
         fecha_formatted = dt_item.strftime("%Y-%m-%d %H:%M:00")
 
-        alerta_match = None
-        for a in alertas:
-            a_str = a.get('gmt') or a.get('time') or ''
-            a_ts = parse_point_timestamp({'time': a_str, 'gmt': a.get('gmt')})
-            if a_ts and abs(a_ts - curr_ts) <= 60:
-                alerta_match = a
-                break
-
-        if alerta_match is not None:
-            evento = "🚨 Exceso de velocidad"
-            msg = alerta_match.get('msg') or alerta_match.get('title') or 'Notificación de exceso de velocidad'
-            v_val = alerta_match.get('value') or speed_final
-            detalle = f"Notificación IDT: {msg} ({v_val} km/h)"
-            minutos_movimiento += 1
-        elif speed_final > 3:
+        if speed_final > 3:
             evento = "En movimiento"
             detalle = "-"
             minutos_movimiento += 1
@@ -602,6 +574,5 @@ def generar_excel():
         as_attachment=True,
         download_name=filename
     )
-
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
