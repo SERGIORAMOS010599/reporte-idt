@@ -433,14 +433,12 @@ def generar_excel():
         dt_item = datetime.fromtimestamp(time_sec)
         fecha_formatted = dt_item.strftime("%Y-%m-%d %H:%M:00")
 
-        # Telemetría del equipo
         speed_int = int(round(last_known.get('speed', 0)))
         acc_state = last_known.get('acc', 0)
 
         if speed_int > max_velocidad:
             max_velocidad = speed_int
 
-        # Evaluación de Notificación del Servidor IDT
         alerta_match = None
         for a in alertas:
             a_str = a.get('gmt') or a.get('time') or ''
@@ -449,7 +447,6 @@ def generar_excel():
                 alerta_match = a
                 break
 
-        # Lógica basada prioritariamente en parámetros del equipo
         if alerta_match is not None:
             evento = "🚨 Exceso de velocidad"
             msg = alerta_match.get('msg') or alerta_match.get('title') or 'Notificación de exceso de velocidad'
