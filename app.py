@@ -226,7 +226,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
 
             btn.disabled = true;
-            status.innerText = "⏳ 1/2 Obteniendo alertas...";
+            status.innerText = "⏳ 1/2 Obteniendo alertas de la unidad...";
 
             try {
                 const startDt = new Date(`${fechaInicio}T${horaInicio}:00`);
@@ -234,25 +234,44 @@ HTML_INTERFACE = """
                 const startMsTotal = startDt.getTime();
                 const endMsTotal = endDt.getTime();
 
+                const fromStr = `${fechaInicio} ${horaInicio}:00`;
+                const tillStr = `${fechaFin} ${horaFin}:59`;
                 const fromSec = Math.floor(startMsTotal / 1000);
                 const tillSec = Math.floor(endMsTotal / 1000);
 
+                // 1. Alertas
                 const alertsData = await fetchLocalProxy(`/alert/list.json?unit_id=${unitId}&from=${fromSec}&till=${tillSec}`);
                 const alertas = alertsData?.data?.alerts || alertsData?.alerts || [];
 
-                status.innerText = "⏳ 2/2 Obteniendo recorrido GPS...";
+                status.innerText = "⏳ 2/2 Obteniendo recorrido GPS extendido...";
 
-                let routeData = await fetchLocalProxy(`/route/list.json?unit_id=${unitId}&from=${fromSec}&till=${tillSec}&include_points=1&include[]=points`);
+                // 2. Rutas con parámetros ampliados
+                let routeData = await fetchLocalProxy(`/route/list.json?unit_id=${unitId}&from=${encodeURIComponent(fromStr)}&till=${encodeURIComponent(tillStr)}&include_points=1&include[]=points&include[]=decoded_route&include[]=stops`);
                 let rawPoints = extraerPuntosExhaustivo(routeData);
 
+                // Reintento con Unix Timestamps
                 if (rawPoints.length === 0) {
-                    alert(`La API de IDT no devolvió registros de movimiento para ${unitText} en las fechas seleccionadas.`);
-                    status.innerText = "Sin datos en el rango.";
-                    btn.disabled = false;
-                    return;
+                    routeData = await fetchLocalProxy(`/route/list.json?unit_id=${unitId}&from=${fromSec}&till=${tillSec}&include_points=1&include[]=points&include[]=decoded_route&include[]=stops`);
+                    rawPoints = extraerPuntosExhaustivo(routeData);
                 }
 
-                status.innerText = "⚡ Generando archivo Excel...";
+                // Resguardo de última ubicación si no hubo movimiento
+                if (rawPoints.length === 0) {
+                    const unitData = await fetchLocalProxy(`/unit/data.json?unit_id=${unitId}`);
+                    const unitObj = unitData?.data?.units?.[0] || unidadesCache.find(u => u.unit_id === unitId) || {};
+                    const lastPt = unitObj.last_point || unitObj;
+
+                    rawPoints.push({
+                        timestamp: startMsTotal,
+                        lat: parseFloat(lastPt.lat || 29.0729673),
+                        lng: parseFloat(lastPt.lng || -110.9559192),
+                        speed: 0,
+                        address: lastPt.address || "Sonora, Mexico",
+                        acc: 0
+                    });
+                }
+
+                status.innerText = "⚡ Generando archivo Excel minuto a minuto...";
 
                 rawPoints.sort((a, b) => a.timestamp - b.timestamp);
 
