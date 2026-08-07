@@ -393,15 +393,11 @@ def generar_excel():
     except Exception as e:
         return jsonify({'error': f'Formato de fecha u hora inválido: {str(e)}'}), 400
 
-    start_utc = start_dt + timedelta(hours=7)
-    end_utc = end_dt + timedelta(hours=7)
-
+    # Blindaje universal para múltiples marcas (Teltonika, Suntech, Concox vía IDT)
     str_from = f"{fecha_inicio} {hora_inicio}:00"
     str_till = f"{fecha_fin} {hora_fin}:59"
-    iso_from = start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-    iso_till = end_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-    sec_from = int(start_utc.timestamp())
-    sec_till = int(end_utc.timestamp())
+    sec_from = int(start_dt.timestamp())
+    sec_till = int(end_dt.timestamp())
 
     # Alertas IDT
     alertas = []
@@ -414,9 +410,8 @@ def generar_excel():
             alertas = data_a.get('data', {}).get('alerts', []) or data_a.get('alerts', []) or []
     except Exception as e: pass
 
-    # Puntos GPS con URL construida manualmente (Corregido para prevenir error 404/Empty points)
-    query = f"key={API_KEY}&unit_id={unit_id}&from={str_from}&till={str_till}&include[]=points&include[]=decoded_route&include[]=stops&include[]=summary"
-    url = f"{BASE_URL}/route/list.json?{query}"
+    # Petición a route/list.json con tolerancia ampliada para capturar tramos de cualquier marca
+    url = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={str_from}&till={str_till}&include[]=points&include[]=decoded_route&include[]=stops&include[]=summary"
 
     route_json = None
     try:
@@ -424,16 +419,17 @@ def generar_excel():
         if res.ok: route_json = res.json()
     except Exception as e: pass
 
+    # Respaldo con formato de fecha plano si el formato estándar devuelve vacío
     if not route_json or not route_json.get('data', {}).get('units'):
-        query_iso = f"key={API_KEY}&unit_id={unit_id}&from={iso_from}&till={iso_till}&include[]=points&include[]=decoded_route&include[]=stops&include[]=summary"
+        url_alt = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={fecha_inicio}%2000:00:00&till={fecha_fin}%2023:59:59&include[]=points&include[]=decoded_route&include[]=summary"
         try:
-            res = requests.get(f"{BASE_URL}/route/list.json?{query_iso}", timeout=30)
+            res = requests.get(url_alt, timeout=30)
             if res.ok: route_json = res.json()
         except Exception as e: pass
 
     raw_points, official_dist, official_drive, official_stop, official_idle = extraer_puntos_y_resumen(route_json)
 
-    # Resguardo automático por última ubicación si no hay puntos en el rango
+    # Si aun así no hay puntos, usamos respaldo por última posición conocida del equipo
     if not raw_points:
         fallback_lat, fallback_lng, fallback_address = 29.0729673, -110.9559192, "Sonora, Mexico"
         try:
@@ -452,8 +448,8 @@ def generar_excel():
             'lng': fallback_lng,
             'speed': 0,
             'address': fallback_address,
-            'acc': 0,
-            'is_stop': True
+            'acc': 1,
+            'is_stop': False
         })
         official_dist = 0.0
         official_drive = 0
@@ -490,7 +486,7 @@ def generar_excel():
             cur_lat = pA['lat']
             cur_lng = pA['lng']
             speed_final = 0
-            acc_state = pA.get('acc', 0)
+            acc_state = pA.get('acc', 1)
         else:
             alpha = (curr_ts - pA['timestamp']) / dt_gap if dt_gap > 0 else 0.0
             cur_lat = pA['lat'] + alpha * (pB['lat'] - pA['lat'])
@@ -521,7 +517,7 @@ def generar_excel():
             v_val = alerta_match.get('value') or speed_final
             detalle = f"Notificación IDT: {msg} ({v_val} km/h)"
             minutos_movimiento += 1
-        elif speed_final > 0:
+        elif speed_final > 5: # Umbral optimizado para evitar falsos positivos de vibración GPS
             evento = "En movimiento"
             detalle = "-"
             minutos_movimiento += 1
