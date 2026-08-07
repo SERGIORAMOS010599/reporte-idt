@@ -162,7 +162,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
 
             btn.disabled = true;
-            status.innerText = "⏳ Calculando telemetría de velocidades y trayectos...";
+            status.innerText = "⏳ Obteniendo resumen de métricas y trayectos de Mapon...";
 
             try {
                 const params = new URLSearchParams({
@@ -255,6 +255,14 @@ def parse_point_timestamp(pt):
         return dt.timestamp()
     except Exception:
         return None
+
+def format_sec_to_hm(seconds):
+    if not seconds or seconds <= 0:
+        return "0h 0m"
+    secs = int(seconds)
+    hours = secs // 3600
+    minutes = (secs % 3600) // 60
+    return f"{hours}h {minutes}m"
 
 def extraer_puntos_python(route_data):
     points = []
@@ -370,7 +378,30 @@ def generar_excel():
     sec_from = int(start_utc.timestamp())
     sec_till = int(end_utc.timestamp())
 
-    # 1. Alertas IDT
+    # 1. Resumen Oficial de Mapon / IDT
+    official_distance = None
+    official_drive_time = None
+    official_stop_time = None
+    official_idle_time = None
+    
+    try:
+        r_sum = requests.get(f"{BASE_URL}/summary/list.json", params={
+            'key': API_KEY, 'unit_id': unit_id, 'from': sec_from, 'till': sec_till
+        }, timeout=15)
+        if r_sum.ok:
+            s_json = r_sum.json()
+            s_data = s_json.get('data', {}).get('summary', {}) or s_json.get('summary', {})
+            if isinstance(s_data, list) and len(s_data) > 0:
+                s_data = s_data[0]
+            if isinstance(s_data, dict):
+                official_distance = float(s_data.get('distance', 0))
+                official_drive_time = int(s_data.get('drive_time', 0))
+                official_stop_time = int(s_data.get('stop_time', 0))
+                official_idle_time = int(s_data.get('idle_time', 0))
+    except Exception as e:
+        print("Aviso consulta summary:", e)
+
+    # 2. Alertas IDT
     alertas = []
     try:
         r_alerts = requests.get(f"{BASE_URL}/alert/list.json", params={
@@ -382,32 +413,51 @@ def generar_excel():
     except Exception as e:
         print("Aviso de alertas:", e)
 
-    # 2. Puntos GPS
+    # 3. Puntos GPS
     raw_points = []
+    route_json = None
     url_1 = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={str_from}&till={str_till}&include[]=points&include[]=decoded_route&include[]=stops"
     try:
         r1 = requests.get(url_1, timeout=25)
-        if r1.ok: raw_points = extraer_puntos_python(r1.json())
+        if r1.ok:
+            route_json = r1.json()
+            raw_points = extraer_puntos_python(route_json)
     except Exception as e: pass
 
     if not raw_points:
         url_2 = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={iso_from}&till={iso_till}&include[]=points&include[]=decoded_route&include[]=stops"
         try:
             r2 = requests.get(url_2, timeout=25)
-            if r2.ok: raw_points = extraer_puntos_python(r2.json())
+            if r2.ok:
+                route_json = r2.json()
+                raw_points = extraer_puntos_python(route_json)
         except Exception as e: pass
 
     if not raw_points:
         url_3 = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={sec_from}&till={sec_till}&include[]=points&include[]=decoded_route&include[]=stops"
         try:
             r3 = requests.get(url_3, timeout=25)
-            if r3.ok: raw_points = extraer_puntos_python(r3.json())
+            if r3.ok:
+                route_json = r3.json()
+                raw_points = extraer_puntos_python(route_json)
         except Exception as e: pass
 
     if not raw_points:
         return jsonify({
             'error': f'No se obtuvieron posiciones GPS para la unidad {unit_name} en el rango {fecha_inicio} {hora_inicio} a {fecha_fin} {hora_fin}.'
         }), 404
+
+    # Extraer métricas oficiales de route_json si summary/list no respondió
+    if route_json and official_distance is None:
+        try:
+            sum_obj = route_json.get('data', {}).get('summary', {}) or route_json.get('summary', {})
+            if isinstance(sum_obj, dict):
+                official_distance = float(sum_obj.get('distance', 0))
+                official_drive_time = int(sum_obj.get('drive_time', 0))
+                official_stop_time = int(sum_obj.get('stop_time', 0))
+                official_idle_time = int(sum_obj.get('idle_time', 0))
+        except Exception as e:
+            print("Error parsing route summary:", e)
 
     raw_points.sort(key=lambda x: x['timestamp'])
 
@@ -434,6 +484,7 @@ def generar_excel():
     max_velocidad = 0
     minutos_movimiento = 0
     minutos_ralenti = 0
+    minutos_detenido = 0
     recorrido_total_km = 0.0
 
     curr_ts = start_dt.timestamp()
@@ -460,7 +511,6 @@ def generar_excel():
         pB = active_leg['pB']
         v_leg = active_leg.get('speed_leg', 0.0)
 
-        # Velocidad directa reportada por el sensor o interpolada por la distancia del tramo
         speed_raw = pA.get('speed', 0.0) + alpha * (pB.get('speed', 0.0) - pA.get('speed', 0.0)) if pB.get('speed') is not None else pA.get('speed', 0.0)
 
         if v_leg > 5.0:
@@ -504,8 +554,9 @@ def generar_excel():
             detalle = "-"
             minutos_ralenti += 1
         else:
-            evento = "Apagado"
+            evento = "Apagado / Detenido"
             detalle = "-"
+            minutos_detenido += 1
 
         direccion = pA.get('address', 'Sonora, Mexico')
         ciudad = ""
@@ -536,11 +587,11 @@ def generar_excel():
 
         curr_ts += 60.0
 
-    fmt_mov = f"{minutos_movimiento // 60}h {minutos_movimiento % 60}m"
-    fmt_ral = f"{minutos_ralenti // 60}h {minutos_ralenti % 60}m"
-    min_trab = minutos_movimiento + minutos_ralenti
-    fmt_trab = f"{min_trab // 60}h {min_trab % 60}m"
-    vel_promedio = int(round(recorrido_total_km / (minutos_movimiento / 60.0))) if minutos_movimiento > 0 else 0
+    # Usar métricas oficiales de Mapon si están disponibles, o el acumulado procesado
+    str_distancia = f"{official_distance:.1f} km" if official_distance is not None and official_distance > 0 else f"{recorrido_total_km:.2f} km"
+    str_conduciendo = format_sec_to_hm(official_drive_time) if official_drive_time is not None and official_drive_time > 0 else f"{minutos_movimiento // 60}h {minutos_movimiento % 60}m"
+    str_detenido = format_sec_to_hm(official_stop_time) if official_stop_time is not None and official_stop_time > 0 else f"{minutos_detenido // 60}h {minutos_detenido % 60}m"
+    str_ralenti = format_sec_to_hm(official_idle_time) if official_idle_time is not None and official_idle_time > 0 else f"{minutos_ralenti // 60}h {minutos_ralenti % 60}m"
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -550,9 +601,9 @@ def generar_excel():
     ws.append([])
     ws.append(["", "", unit_name])
     ws.append([])
-    ws.append(["Recorrido Aprox:", f"{recorrido_total_km:.2f} km", "Tiempo en Movimiento:", fmt_mov, "Fecha Inicial:", f"{fecha_inicio} {hora_inicio}"])
-    ws.append(["Velocidad Máxima:", f"{max_velocidad} km/h", "Tiempo Muerto:", fmt_ral, "Fecha Final:", f"{fecha_fin} {hora_fin}"])
-    ws.append(["Velocidad Promedio:", f"{vel_promedio} km/h", "Horas Trabajadas:", fmt_trab, "Consumo Combustible:", "N/A"])
+    ws.append(["Distancia (Mapon):", str_distancia, "Conduciendo:", str_conduciendo, "Fecha Inicial:", f"{fecha_inicio} {hora_inicio}"])
+    ws.append(["Velocidad Máxima:", f"{max_velocidad} km/h", "Detenido:", str_detenido, "Fecha Final:", f"{fecha_fin} {hora_fin}"])
+    ws.append(["Ralentí Excesivo:", str_ralenti, "Horas Trabajadas:", str_conduciendo, "Consumo Combustible:", "N/A"])
     ws.append(["Costo Combustible:", "N/A"])
     ws.append([])
     ws.append(["Vehículo", "Fecha", "Dirección", "Ciudad", "Velocidad (Km/h)", "Evento", "Detalle", "Mapa", "Longitud", "Latitud"])
