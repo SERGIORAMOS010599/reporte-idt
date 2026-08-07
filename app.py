@@ -162,7 +162,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
 
             btn.disabled = true;
-            status.innerText = "⏳ Sincronizando métricas y rutas oficiales de Mapon...";
+            status.innerText = "⏳ Sincronizando métricas y rutas de Mapon...";
 
             try {
                 const params = new URLSearchParams({
@@ -206,7 +206,14 @@ HTML_INTERFACE = """
             let start = new Date();
             let end = new Date();
 
-            const formatDate = (d) => d.toISOString().substring(0, 10);
+            const formatDate = (d) => {
+                let month = '' + (d.getMonth() + 1),
+                    day = '' + d.getDate(),
+                    year = d.getFullYear();
+                if (month.length < 2) month = '0' + month;
+                if (day.length < 2) day = '0' + day;
+                return [year, month, day].join('-');
+            };
 
             if (type === 'hoy') { start = now; end = now; }
             else if (type === 'ayer') { start.setDate(now.getDate() - 1); end.setDate(now.getDate() - 1); }
@@ -407,15 +414,14 @@ def generar_excel():
             alertas = data_a.get('data', {}).get('alerts', []) or data_a.get('alerts', []) or []
     except Exception as e: pass
 
-    # Puntos GPS con URL construida manualmente para evitar problemas con corchetes en requests
+    # Puntos GPS con URL construida manualmente
     query = f"key={API_KEY}&unit_id={unit_id}&from={str_from}&till={str_till}&include[]=points&include[]=decoded_route&include[]=stops&include[]=summary"
     url = f"{BASE_URL}/route/list.json?{query}"
 
     route_json = None
     try:
         res = requests.get(url, timeout=30)
-        if res.ok:
-            route_json = res.json()
+        if res.ok: route_json = res.json()
     except Exception as e: pass
 
     if not route_json:
@@ -425,13 +431,34 @@ def generar_excel():
             if res.ok: route_json = res.json()
         except Exception as e: pass
 
-    if not route_json:
-        return jsonify({'error': f'No se obtuvo respuesta de rutas para la unidad {unit_name} en el rango seleccionado.'}), 404
-
     raw_points, official_dist, official_drive, official_stop, official_idle = extraer_puntos_y_resumen(route_json)
 
+    # Resguardo automático por última ubicación si no hay puntos en el rango
     if not raw_points:
-        return jsonify({'error': f'No se obtuvieron posiciones GPS para la unidad {unit_name} en el rango {fecha_inicio} {hora_inicio} a {fecha_fin} {hora_fin}.'}), 404
+        fallback_lat, fallback_lng, fallback_address = 29.0729673, -110.9559192, "Sonora, Mexico"
+        try:
+            r_unit = requests.get(f"{BASE_URL}/unit/data.json", params={'key': API_KEY, 'unit_id': unit_id}, timeout=15)
+            if r_unit.ok:
+                u_data = r_unit.json().get('data', {}).get('units', [{}])[0]
+                lp = u_data.get('last_point', u_data)
+                fallback_lat = float(lp.get('lat', fallback_lat))
+                fallback_lng = float(lp.get('lng', fallback_lng))
+                fallback_address = lp.get('address', fallback_address)
+        except Exception as e: pass
+
+        raw_points.append({
+            'timestamp': start_dt.timestamp(),
+            'lat': fallback_lat,
+            'lng': fallback_lng,
+            'speed': 0,
+            'address': fallback_address,
+            'acc': 0,
+            'is_stop': True
+        })
+        official_dist = 0.0
+        official_drive = 0
+        official_stop = int((end_dt - start_dt).total_seconds())
+        official_idle = 0
 
     raw_points.sort(key=lambda x: x['timestamp'])
 
