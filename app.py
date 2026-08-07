@@ -320,10 +320,10 @@ def extraer_puntos_python(route_data):
         if isinstance(u.get('routes'), list):
             for r in u['routes']:
                 if isinstance(r, dict):
-                    if isinstance(r.get('points'), list):
-                        for pt in r['points']: add_pt(pt)
                     if isinstance(r.get('decoded_route'), list):
                         for pt in r['decoded_route']: add_pt(pt)
+                    if isinstance(r.get('points'), list):
+                        for pt in r['points']: add_pt(pt)
                     if r.get('start'): add_pt(r['start'])
                     if r.get('end'): add_pt(r['end'])
         if isinstance(u.get('tracks'), list):
@@ -332,6 +332,39 @@ def extraer_puntos_python(route_data):
                     for pt in t['points']: add_pt(pt)
 
     return points
+
+def extraer_resumen_mapon(route_json, summary_json=None):
+    dist_km, drive_sec, stop_sec, idle_sec = None, None, None, None
+
+    # Probar summary_json primero
+    if summary_json and isinstance(summary_json, dict):
+        s_data = summary_json.get('data', {}).get('summary', {}) or summary_json.get('summary', {})
+        if isinstance(s_data, list) and len(s_data) > 0: s_data = s_data[0]
+        if isinstance(s_data, dict) and s_data:
+            dist_km = float(s_data.get('distance', 0) or 0)
+            drive_sec = int(s_data.get('drive_time', 0) or s_data.get('duration', 0) or 0)
+            stop_sec = int(s_data.get('stop_time', 0) or 0)
+            idle_sec = int(s_data.get('idle_time', 0) or 0)
+
+    # Probar route_json
+    if (dist_km is None or dist_km == 0) and route_json and isinstance(route_json, dict):
+        data = route_json.get('data', {})
+        s_obj = data.get('summary', {}) or route_json.get('summary', {})
+        units = data.get('units', []) if isinstance(data, dict) else []
+        if units and isinstance(units, list) and len(units) > 0 and isinstance(units[0], dict):
+            if 'summary' in units[0] and isinstance(units[0]['summary'], dict):
+                s_obj = units[0]['summary']
+        if isinstance(s_obj, dict) and s_obj:
+            dist_km = float(s_obj.get('distance', 0) or 0)
+            drive_sec = int(s_obj.get('drive_time', 0) or s_obj.get('duration', 0) or 0)
+            stop_sec = int(s_obj.get('stop_time', 0) or 0)
+            idle_sec = int(s_obj.get('idle_time', 0) or 0)
+
+    # Si la distancia viene en metros (ej. 865800 m), convertir a km
+    if dist_km and dist_km > 2000:
+        dist_km = dist_km / 1000.0
+
+    return dist_km, drive_sec, stop_sec, idle_sec
 
 @app.route('/')
 def index():
@@ -379,27 +412,13 @@ def generar_excel():
     sec_till = int(end_utc.timestamp())
 
     # 1. Resumen Oficial de Mapon / IDT
-    official_distance = None
-    official_drive_time = None
-    official_stop_time = None
-    official_idle_time = None
-    
+    s_json = None
     try:
         r_sum = requests.get(f"{BASE_URL}/summary/list.json", params={
-            'key': API_KEY, 'unit_id': unit_id, 'from': sec_from, 'till': sec_till
+            'key': API_KEY, 'unit_id': unit_id, 'from': str_from, 'till': str_till
         }, timeout=15)
-        if r_sum.ok:
-            s_json = r_sum.json()
-            s_data = s_json.get('data', {}).get('summary', {}) or s_json.get('summary', {})
-            if isinstance(s_data, list) and len(s_data) > 0:
-                s_data = s_data[0]
-            if isinstance(s_data, dict):
-                official_distance = float(s_data.get('distance', 0))
-                official_drive_time = int(s_data.get('drive_time', 0))
-                official_stop_time = int(s_data.get('stop_time', 0))
-                official_idle_time = int(s_data.get('idle_time', 0))
-    except Exception as e:
-        print("Aviso consulta summary:", e)
+        if r_sum.ok: s_json = r_sum.json()
+    except Exception as e: pass
 
     # 2. Alertas IDT
     alertas = []
@@ -410,13 +429,12 @@ def generar_excel():
         if r_alerts.ok:
             data_a = r_alerts.json()
             alertas = data_a.get('data', {}).get('alerts', []) or data_a.get('alerts', []) or []
-    except Exception as e:
-        print("Aviso de alertas:", e)
+    except Exception as e: pass
 
-    # 3. Puntos GPS
+    # 3. Puntos GPS con trayectos decodificados de alta densidad
     raw_points = []
     route_json = None
-    url_1 = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={str_from}&till={str_till}&include[]=points&include[]=decoded_route&include[]=stops"
+    url_1 = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={str_from}&till={str_till}&include[]=points&include[]=decoded_route&include[]=stops&include[]=summary"
     try:
         r1 = requests.get(url_1, timeout=25)
         if r1.ok:
@@ -425,7 +443,7 @@ def generar_excel():
     except Exception as e: pass
 
     if not raw_points:
-        url_2 = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={iso_from}&till={iso_till}&include[]=points&include[]=decoded_route&include[]=stops"
+        url_2 = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={iso_from}&till={iso_till}&include[]=points&include[]=decoded_route&include[]=stops&include[]=summary"
         try:
             r2 = requests.get(url_2, timeout=25)
             if r2.ok:
@@ -434,7 +452,7 @@ def generar_excel():
         except Exception as e: pass
 
     if not raw_points:
-        url_3 = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={sec_from}&till={sec_till}&include[]=points&include[]=decoded_route&include[]=stops"
+        url_3 = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={sec_from}&till={sec_till}&include[]=points&include[]=decoded_route&include[]=stops&include[]=summary"
         try:
             r3 = requests.get(url_3, timeout=25)
             if r3.ok:
@@ -447,39 +465,11 @@ def generar_excel():
             'error': f'No se obtuvieron posiciones GPS para la unidad {unit_name} en el rango {fecha_inicio} {hora_inicio} a {fecha_fin} {hora_fin}.'
         }), 404
 
-    # Extraer métricas oficiales de route_json si summary/list no respondió
-    if route_json and official_distance is None:
-        try:
-            sum_obj = route_json.get('data', {}).get('summary', {}) or route_json.get('summary', {})
-            if isinstance(sum_obj, dict):
-                official_distance = float(sum_obj.get('distance', 0))
-                official_drive_time = int(sum_obj.get('drive_time', 0))
-                official_stop_time = int(sum_obj.get('stop_time', 0))
-                official_idle_time = int(sum_obj.get('idle_time', 0))
-        except Exception as e:
-            print("Error parsing route summary:", e)
+    official_dist, official_drive, official_stop, official_idle = extraer_resumen_mapon(route_json, s_json)
 
     raw_points.sort(key=lambda x: x['timestamp'])
 
-    # Construcción de tramos para interpolación lineal entre puntos
-    legs = []
-    if len(raw_points) == 1:
-        legs.append({'pA': raw_points[0], 'pB': raw_points[0], 'dt_sec': 1, 'dist_km': 0, 'speed_leg': 0.0})
-    else:
-        for i in range(len(raw_points) - 1):
-            pA = raw_points[i]
-            pB = raw_points[i+1]
-            dt_sec = pB['timestamp'] - pA['timestamp']
-            dist_km = haversine(pA['lat'], pA['lng'], pB['lat'], pB['lng'])
-            speed_leg = (dist_km / (dt_sec / 3600.0)) if dt_sec > 0 else 0.0
-            legs.append({
-                'pA': pA,
-                'pB': pB,
-                'dt_sec': dt_sec,
-                'dist_km': dist_km,
-                'speed_leg': speed_leg
-            })
-
+    # Bucle minuto a minuto respetando brechas de parada (gaps > 300 segundos)
     rows = []
     max_velocidad = 0
     minutos_movimiento = 0
@@ -489,40 +479,36 @@ def generar_excel():
 
     curr_ts = start_dt.timestamp()
     end_ts = end_dt.timestamp()
+
+    p_idx = 0
+    n_pts = len(raw_points)
     prev_lat, prev_lng = None, None
 
     while curr_ts <= end_ts:
-        active_leg = None
-        if curr_ts <= raw_points[0]['timestamp']:
-            active_leg = legs[0]
-            alpha = 0.0
-        elif curr_ts >= raw_points[-1]['timestamp']:
-            active_leg = legs[-1]
-            alpha = 1.0
-        else:
-            for leg in legs:
-                if leg['pA']['timestamp'] <= curr_ts <= leg['pB']['timestamp']:
-                    active_leg = leg
-                    dt_sec = leg['dt_sec']
-                    alpha = (curr_ts - leg['pA']['timestamp']) / dt_sec if dt_sec > 0 else 0.0
-                    break
+        while p_idx < n_pts - 1 and raw_points[p_idx + 1]['timestamp'] <= curr_ts:
+            p_idx += 1
 
-        pA = active_leg['pA']
-        pB = active_leg['pB']
-        v_leg = active_leg.get('speed_leg', 0.0)
+        pA = raw_points[p_idx]
+        pB = raw_points[p_idx + 1] if p_idx < n_pts - 1 else pA
 
-        speed_raw = pA.get('speed', 0.0) + alpha * (pB.get('speed', 0.0) - pA.get('speed', 0.0)) if pB.get('speed') is not None else pA.get('speed', 0.0)
+        dt_gap = pB['timestamp'] - pA['timestamp']
+        dist_gap = haversine(pA['lat'], pA['lng'], pB['lat'], pB['lng'])
 
-        if v_leg > 5.0:
-            cur_lat = pA['lat'] + alpha * (pB['lat'] - pA['lat'])
-            cur_lng = pA['lng'] + alpha * (pB['lng'] - pA['lng'])
-            speed_final = int(round(max(speed_raw, v_leg)))
-        else:
+        # Si el intervalo entre registros supera 5 minutos o no hay desplazamiento, la unidad estuvo DETENIDA
+        if dt_gap > 300 or dist_gap < 0.05:
             cur_lat = pA['lat']
             cur_lng = pA['lng']
-            speed_final = int(round(speed_raw)) if speed_raw > 5 else 0
+            speed_final = 0
+            acc_state = pA.get('acc', 0)
+        else:
+            alpha = (curr_ts - pA['timestamp']) / dt_gap if dt_gap > 0 else 0.0
+            cur_lat = pA['lat'] + alpha * (pB['lat'] - pA['lat'])
+            cur_lng = pA['lng'] + alpha * (pB['lng'] - pA['lng'])
 
-        acc_state = pA.get('acc', 0)
+            speed_leg = (dist_gap / (dt_gap / 3600.0)) if dt_gap > 0 else 0.0
+            speed_raw = pA.get('speed', 0.0) + alpha * (pB.get('speed', 0.0) - pA.get('speed', 0.0)) if pB.get('speed') is not None else pA.get('speed', 0.0)
+            speed_final = int(round(max(speed_raw, speed_leg)))
+            acc_state = 1
 
         if speed_final > max_velocidad:
             max_velocidad = speed_final
@@ -587,11 +573,11 @@ def generar_excel():
 
         curr_ts += 60.0
 
-    # Usar métricas oficiales de Mapon si están disponibles, o el acumulado procesado
-    str_distancia = f"{official_distance:.1f} km" if official_distance is not None and official_distance > 0 else f"{recorrido_total_km:.2f} km"
-    str_conduciendo = format_sec_to_hm(official_drive_time) if official_drive_time is not None and official_drive_time > 0 else f"{minutos_movimiento // 60}h {minutos_movimiento % 60}m"
-    str_detenido = format_sec_to_hm(official_stop_time) if official_stop_time is not None and official_stop_time > 0 else f"{minutos_detenido // 60}h {minutos_detenido % 60}m"
-    str_ralenti = format_sec_to_hm(official_idle_time) if official_idle_time is not None and official_idle_time > 0 else f"{minutos_ralenti // 60}h {minutos_ralenti % 60}m"
+    # Formatear acumulados para el encabezado
+    str_distancia = f"{official_dist:.1f} km" if official_dist and official_dist > 0 else f"{recorrido_total_km:.2f} km"
+    str_conduciendo = format_sec_to_hm(official_drive) if official_drive and official_drive > 0 else f"{minutos_movimiento // 60}h {minutos_movimiento % 60}m"
+    str_detenido = format_sec_to_hm(official_stop) if official_stop and official_stop > 0 else f"{minutos_detenido // 60}h {minutos_detenido % 60}m"
+    str_ralenti = format_sec_to_hm(official_idle) if official_idle and official_idle > 0 else f"{minutos_ralenti // 60}h {minutos_ralenti % 60}m"
 
     wb = openpyxl.Workbook()
     ws = wb.active
