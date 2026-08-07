@@ -377,21 +377,33 @@ def api_unidades():
 @app.route('/generar_excel')
 def generar_excel():
     unit_id = request.args.get('unit_id')
-    unit_name = request.args.get('unit_name', f'Unidad {unit_id}')
-    fecha_inicio = request.args.get('fecha_inicio')
-    fecha_fin = request.args.get('fecha_fin')
-    hora_inicio = request.args.get('hora_inicio', '00:00')
-    hora_fin = request.args.get('hora_fin', '23:59')
-    limite_vel = int(request.args.get('limite_velocidad', 80))
-
-    if not unit_id or not fecha_inicio or not fecha_fin:
-        return jsonify({'error': 'Faltan parámetros requeridos'}), 400
-
-    try:
-        start_dt = datetime.strptime(f"{fecha_inicio} {hora_inicio}", "%Y-%m-%d %H:%M")
-        end_dt = datetime.strptime(f"{fecha_fin} {hora_fin}", "%Y-%m-%d %H:%M")
-    except Exception as e:
-        return jsonify({'error': f'Formato de fecha u hora inválido: {str(e)}'}), 400
+    f_in = request.args.get('fecha_inicio')
+    f_fin = request.args.get('fecha_fin')
+    
+    # URL directa a track/list.json que es más permisiva
+    url = f"{BASE_URL}/track/list.json"
+    params = {
+        'key': API_KEY,
+        'unit_id': unit_id,
+        'from': f"{f_in} 00:00:00",
+        'till': f"{f_fin} 23:59:59"
+    }
+    
+    res = requests.get(url, params=params)
+    data = res.json()
+    
+    # Crear Excel con la respuesta cruda para ver qué nos envía el servidor
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Respuesta Cruda de API"])
+    ws.append([str(data)])
+    
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    
+    return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
+                     as_attachment=True, download_name="Diagnostico_API.xlsx")
 
     # Usamos formato ISO estándar que la API de IDT / Mapon nunca rechaza
     iso_from = start_dt.strftime("%Y-%m-%d %H:%M:%S")
