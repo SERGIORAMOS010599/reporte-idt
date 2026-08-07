@@ -1,5 +1,9 @@
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, send_file
 import requests
+import openpyxl
+import io
+import math
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
@@ -17,7 +21,6 @@ HTML_INTERFACE = """
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
     <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f9; padding: 20px; margin: 0; }
@@ -111,16 +114,6 @@ HTML_INTERFACE = """
     </div>
 
     <script>
-        let unidadesCache = [];
-
-        async function fetchLocalProxy(endpoint) {
-            try {
-                const res = await fetch(`/api_proxy?endpoint=${encodeURIComponent(endpoint)}`);
-                if (res.ok) return await res.json();
-            } catch (e) { console.error(e); }
-            return null;
-        }
-
         async function cargarUnidades() {
             const select = $('#unit_select');
             const btn = document.getElementById('btn_submit');
@@ -129,263 +122,80 @@ HTML_INTERFACE = """
             status.innerText = "⏳ Cargando catálogo de unidades...";
             btn.disabled = true;
 
-            const data = await fetchLocalProxy("/unit/list.json");
-            unidadesCache = data?.data?.units || data?.units || [];
+            try {
+                const res = await fetch('/api_unidades');
+                if (!res.ok) throw new Error();
+                const units = await res.json();
 
-            select.empty();
-            if (unidadesCache.length === 0) {
-                select.append(new Option('No se encontraron unidades', ''));
-                status.innerText = "Error de conexión con la API.";
-                return;
-            }
-
-            select.append(new Option('🔍 Escribe para buscar unidad...', ''));
-            unidadesCache.forEach(u => {
-                const text = `${u.label || ''} ${u.number || ''} (ID: ${u.unit_id})`.trim();
-                select.append(new Option(text, u.unit_id));
-            });
-
-            select.select2({ placeholder: "🔍 Escribe para buscar unidad...", allowClear: true, width: '100%' });
-            btn.disabled = false;
-            status.innerText = "";
-        }
-
-        function haversineKm(lat1, lon1, lat2, lon2) {
-            if (!lat1 || !lon1 || !lat2 || !lon2) return 0;
-            const R = 6371;
-            const dLat = (lat2 - lat1) * Math.PI / 180;
-            const dLon = (lon2 - lon1) * Math.PI / 180;
-            const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-                      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-                      Math.sin(dLon/2) * Math.sin(dLon/2);
-            return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)));
-        }
-
-        function extraerPuntosExhaustivo(routeData) {
-            let points = [];
-            if (!routeData) return points;
-            const units = routeData.data?.units || routeData.units || (Array.isArray(routeData.data) ? routeData.data : []);
-
-            const addPt = (pt) => {
-                if (!pt) return;
-                const timeStr = pt.gmt || pt.time || pt.datetime || pt.t || '';
-                let ts = 0;
-                if (typeof timeStr === 'number') {
-                    ts = timeStr > 10000000000 ? timeStr : timeStr * 1000;
-                } else if (timeStr) {
-                    ts = new Date(String(timeStr).replace(' ', 'T')).getTime();
+                select.empty();
+                if (!units || units.length === 0) {
+                    select.append(new Option('No se encontraron unidades', ''));
+                    status.innerText = "Error al consultar IDT.";
+                    return;
                 }
-                
-                const lat = parseFloat(pt.lat || pt.latitude);
-                const lng = parseFloat(pt.lng || pt.longitude);
-                const speed = parseFloat(pt.speed || pt.s || 0);
 
-                if (!isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0) {
-                    points.push({
-                        timestamp: ts,
-                        lat: lat,
-                        lng: lng,
-                        speed: speed,
-                        address: pt.address || pt.addr || '',
-                        acc: pt.params?.acc !== undefined ? parseInt(pt.params.acc) : (speed > 0 ? 1 : 0)
-                    });
-                }
-            };
-
-            if (Array.isArray(units)) {
+                select.append(new Option('🔍 Escribe para buscar unidad...', ''));
                 units.forEach(u => {
-                    if (Array.isArray(u.points)) u.points.forEach(addPt);
-                    if (Array.isArray(u.routes)) {
-                        u.routes.forEach(r => {
-                            if (Array.isArray(r.points)) r.points.forEach(addPt);
-                            if (r.start) addPt(r.start);
-                            if (r.end) addPt(r.end);
-                        });
-                    }
-                    if (Array.isArray(u.tracks)) {
-                        u.tracks.forEach(t => {
-                            if (Array.isArray(t.points)) t.points.forEach(addPt);
-                        });
-                    }
+                    const text = `${u.label || ''} ${u.number || ''} (ID: ${u.unit_id})`.trim();
+                    select.append(new Option(text, u.unit_id));
                 });
+
+                select.select2({ placeholder: "🔍 Escribe para buscar unidad...", allowClear: true, width: '100%' });
+                btn.disabled = false;
+                status.innerText = "";
+            } catch (e) {
+                status.innerText = "Error de conexión con la API de IDT.";
             }
-            return points;
         }
 
         async function generarReporte() {
             const btn = document.getElementById('btn_submit');
             const status = document.getElementById('status_msg');
-            const unitId = parseInt($('#unit_select').val());
+            const unitId = $('#unit_select').val();
             const unitText = $('#unit_select option:selected').text();
             const fechaInicio = document.getElementById('fecha_inicio').value;
             const fechaFin = document.getElementById('fecha_fin').value;
             const horaInicio = document.getElementById('hora_inicio').value;
             const horaFin = document.getElementById('hora_fin').value;
-            const limiteVel = parseInt(document.getElementById('limite_velocidad').value) || 80;
+            const limiteVel = document.getElementById('limite_velocidad').value || 80;
 
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
 
             btn.disabled = true;
-            status.innerText = "⏳ 1/2 Obteniendo alertas de la unidad...";
+            status.innerText = "⏳ Consultando recorrido GPS en IDT...";
 
             try {
-                const startDt = new Date(`${fechaInicio}T${horaInicio}:00`);
-                const endDt = new Date(`${fechaFin}T${horaFin}:59`);
-                const startMsTotal = startDt.getTime();
-                const endMsTotal = endDt.getTime();
+                const params = new URLSearchParams({
+                    unit_id: unitId,
+                    unit_name: unitText,
+                    fecha_inicio: fechaInicio,
+                    fecha_fin: fechaFin,
+                    hora_inicio: horaInicio,
+                    hora_fin: horaFin,
+                    limite_velocidad: limiteVel
+                });
 
-                const fromStr = `${fechaInicio} ${horaInicio}:00`;
-                const tillStr = `${fechaFin} ${horaFin}:59`;
-                const fromSec = Math.floor(startMsTotal / 1000);
-                const tillSec = Math.floor(endMsTotal / 1000);
-
-                // 1. Alertas
-                const alertsData = await fetchLocalProxy(`/alert/list.json?unit_id=${unitId}&from=${fromSec}&till=${tillSec}`);
-                const alertas = alertsData?.data?.alerts || alertsData?.alerts || [];
-
-                status.innerText = "⏳ 2/2 Obteniendo recorrido GPS extendido...";
-
-                // 2. Rutas con parámetros ampliados
-                let routeData = await fetchLocalProxy(`/route/list.json?unit_id=${unitId}&from=${encodeURIComponent(fromStr)}&till=${encodeURIComponent(tillStr)}&include_points=1&include[]=points&include[]=decoded_route&include[]=stops`);
-                let rawPoints = extraerPuntosExhaustivo(routeData);
-
-                // Reintento con Unix Timestamps
-                if (rawPoints.length === 0) {
-                    routeData = await fetchLocalProxy(`/route/list.json?unit_id=${unitId}&from=${fromSec}&till=${tillSec}&include_points=1&include[]=points&include[]=decoded_route&include[]=stops`);
-                    rawPoints = extraerPuntosExhaustivo(routeData);
+                const res = await fetch(`/generar_excel?${params.toString()}`);
+                if (!res.ok) {
+                    const errData = await res.json();
+                    throw new Error(errData.error || "Error al procesar los datos.");
                 }
 
-                // Resguardo de última ubicación si no hubo movimiento
-                if (rawPoints.length === 0) {
-                    const unitData = await fetchLocalProxy(`/unit/data.json?unit_id=${unitId}`);
-                    const unitObj = unitData?.data?.units?.[0] || unidadesCache.find(u => u.unit_id === unitId) || {};
-                    const lastPt = unitObj.last_point || unitObj;
-
-                    rawPoints.push({
-                        timestamp: startMsTotal,
-                        lat: parseFloat(lastPt.lat || 29.0729673),
-                        lng: parseFloat(lastPt.lng || -110.9559192),
-                        speed: 0,
-                        address: lastPt.address || "Sonora, Mexico",
-                        acc: 0
-                    });
-                }
-
-                status.innerText = "⚡ Generando archivo Excel minuto a minuto...";
-
-                rawPoints.sort((a, b) => a.timestamp - b.timestamp);
-
-                let currentIndex = 0;
-                let lastKnown = rawPoints[0];
-                let rows = [];
-
-                let maxVelocidad = 0;
-                let minutosMovimiento = 0;
-                let minutosRalenti = 0;
-                let recorridoTotalKm = 0;
-
-                for (let timeMs = startMsTotal; timeMs <= endMsTotal; timeMs += 60000) {
-                    while (currentIndex < rawPoints.length && rawPoints[currentIndex].timestamp <= timeMs) {
-                        lastKnown = rawPoints[currentIndex];
-                        currentIndex++;
-                    }
-
-                    const fechaObj = new Date(timeMs);
-                    const fechaFormatted = fechaObj.getFullYear() + '-' +
-                        String(fechaObj.getMonth() + 1).padStart(2, '0') + '-' +
-                        String(fechaObj.getDate()).padStart(2, '0') + ' ' +
-                        String(fechaObj.getHours()).padStart(2, '0') + ':' +
-                        String(fechaObj.getMinutes()).padStart(2, '0') + ':00';
-
-                    const speedInt = Math.round(lastKnown.speed);
-                    if (speedInt > maxVelocidad) maxVelocidad = speedInt;
-
-                    const tieneAlerta = alertas.some(a => {
-                        const aTime = new Date((a.gmt || a.time || '').replace('Z', '')).getTime();
-                        return Math.abs(aTime - timeMs) <= 60000;
-                    });
-
-                    let evento = "Apagado";
-                    let detalle = "-";
-
-                    if (speedInt > limiteVel || tieneAlerta) {
-                        evento = "🚨 Exceso de velocidad";
-                        detalle = `Velocidad: ${speedInt} km/h (Límite: ${limiteVel} km/h)`;
-                        minutosMovimiento++;
-                    } else if (speedInt > 0) {
-                        evento = "En movimiento";
-                        minutosMovimiento++;
-                    } else if (lastKnown.acc === 1) {
-                        evento = "Ralentí / Motor ON";
-                        minutosRalenti++;
-                    }
-
-                    let direccion = lastKnown.address || "Sonora, Mexico";
-                    let ciudad = "";
-                    if (direccion.includes(',')) {
-                        let partes = direccion.split(',');
-                        ciudad = partes[partes.length - 2]?.trim() || "";
-                    }
-
-                    const mapsUrl = `https://www.google.com/maps?q=${lastKnown.lat},${lastKnown.lng}`;
-
-                    if (rows.length > 0) {
-                        const prevLat = rows[rows.length - 1][9];
-                        const prevLng = rows[rows.length - 1][8];
-                        if (prevLat !== lastKnown.lat || prevLng !== lastKnown.lng) {
-                            recorridoTotalKm += haversineKm(prevLat, prevLng, lastKnown.lat, lastKnown.lng);
-                        }
-                    }
-
-                    rows.push([
-                        unitText,
-                        fechaFormatted,
-                        direccion,
-                        ciudad,
-                        speedInt,
-                        evento,
-                        detalle,
-                        { f: `HYPERLINK("${mapsUrl}", "Ver en Mapa")` },
-                        lastKnown.lng,
-                        lastKnown.lat
-                    ]);
-                }
-
-                const fmtHM = (mins) => `${Math.floor(mins / 60)}h ${mins % 60}m`;
-                const horasTrabajadasMins = minutosMovimiento + minutosRalenti;
-                const velocidadPromedio = minutosMovimiento > 0 ? Math.round(recorridoTotalKm / (minutosMovimiento / 60)) : 0;
-
-                let aoa = [
-                    ["", "", "Histórico Minuto a Minuto con Excesos de Velocidad"],
-                    [],
-                    ["", "", unitText],
-                    [],
-                    ["Recorrido Aprox:", `${recorridoTotalKm.toFixed(2)} km`, "Tiempo en Movimiento:", fmtHM(minutosMovimiento), "Fecha Inicial:", `${fechaInicio} ${horaInicio}`],
-                    ["Velocidad Máxima:", `${maxVelocidad} km/h`, "Tiempo Muerto:", fmtHM(minutosRalenti), "Fecha Final:", `${fechaFin} ${horaFin}`],
-                    ["Velocidad Promedio:", `${velocidadPromedio} km/h`, "Horas Trabajadas:", fmtHM(horasTrabajadasMins), "Consumo Combustible:", "N/A"],
-                    ["Costo Combustible:", "N/A"],
-                    [],
-                    ["Vehículo", "Fecha", "Dirección", "Ciudad", "Velocidad (Km/h)", "Evento", "Detalle", "Mapa", "Longitud", "Latitud"]
-                ].concat(rows);
-
-                const ws = XLSX.utils.aoa_to_sheet(aoa);
-                ws['!cols'] = [
-                    { wch: 32 }, { wch: 20 }, { wch: 45 }, { wch: 20 }, 
-                    { wch: 15 }, { wch: 24 }, { wch: 35 }, { wch: 18 }, 
-                    { wch: 15 }, { wch: 15 }
-                ];
-
-                const wb = XLSX.utils.book_new();
-                XLSX.utils.book_append_sheet(wb, ws, "Reporte");
-                
+                const blob = await res.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
                 const safeName = unitText.replace(/[^a-zA-Z0-9]/g, '_');
-                XLSX.writeFile(wb, `Reporte_Minuto_a_Minuto_${safeName}_${fechaInicio}.xlsx`);
+                a.download = `Reporte_Minuto_a_Minuto_${safeName}_${fechaInicio}.xlsx`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
 
                 status.innerText = "¡Reporte generado y descargado con éxito!";
             } catch (err) {
                 console.error(err);
-                alert("Error durante la generación del reporte.");
-                status.innerText = "Error de procesamiento.";
+                alert(err.message || "Error al generar el archivo Excel.");
+                status.innerText = "Error en la generación.";
             }
 
             btn.disabled = false;
@@ -417,26 +227,319 @@ HTML_INTERFACE = """
 </html>
 """
 
+def haversine(lat1, lon1, lat2, lon2):
+    if not lat1 or not lon1 or not lat2 or not lon2:
+        return 0.0
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+    c = 2 * math.atan2(math.sqrt(a), Math.sqrt(1 - a)) if (1 - a) > 0 else 0
+    return R * c
+
+def parse_point_timestamp(pt):
+    if not isinstance(pt, dict):
+        return None
+    time_val = pt.get('gmt') or pt.get('time') or pt.get('datetime') or pt.get('t')
+    if not time_val:
+        return None
+    
+    if isinstance(time_val, (int, float)):
+        # Si es timestamp Unix en segundos
+        return time_val - (7 * 3600) if time_val > 1000000000 else time_val
+    
+    clean_str = str(time_val).replace('T', ' ').replace('Z', '')[:19]
+    try:
+        dt = datetime.strptime(clean_str, "%Y-%m-%d %H:%M:%S")
+        if 'gmt' in pt and pt['gmt']:
+            # Si el origen es GMT/UTC, ajustar a Sonora (UTC-7)
+            dt = dt - timedelta(hours=7)
+        return dt.timestamp()
+    except Exception:
+        return None
+
+def extraer_puntos_python(route_data):
+    points = []
+    if not route_data or not isinstance(route_data, dict):
+        return points
+    
+    data = route_data.get('data', {})
+    units = data.get('units', []) if isinstance(data, dict) else (data if isinstance(data, list) else route_data.get('units', []))
+
+    if not isinstance(units, list):
+        return points
+
+    def add_pt(pt):
+        if not pt or not isinstance(pt, dict):
+            return
+        
+        ts = parse_point_timestamp(pt)
+        if ts is None:
+            return
+
+        try:
+            lat = float(pt.get('lat') or pt.get('latitude') or 0)
+            lng = float(pt.get('lng') or pt.get('longitude') or 0)
+            speed = float(pt.get('speed') or pt.get('s') or 0)
+        except (ValueError, TypeError):
+            return
+
+        if lat != 0 and lng != 0:
+            params = pt.get('params', {})
+            acc = 1 if speed > 0 else 0
+            if isinstance(params, dict) and 'acc' in params:
+                try:
+                    acc = int(params['acc'])
+                except Exception:
+                    pass
+
+            points.append({
+                'timestamp': ts,
+                'lat': lat,
+                'lng': lng,
+                'speed': speed,
+                'address': pt.get('address') or pt.get('addr') or '',
+                'acc': acc
+            })
+
+    for u in units:
+        if not isinstance(u, dict): continue
+        if isinstance(u.get('points'), list):
+            for pt in u['points']: add_pt(pt)
+        if isinstance(u.get('routes'), list):
+            for r in u['routes']:
+                if isinstance(r, dict):
+                    if isinstance(r.get('points'), list):
+                        for pt in r['points']: add_pt(pt)
+                    if isinstance(r.get('decoded_route'), list):
+                        for pt in r['decoded_route']: add_pt(pt)
+                    if r.get('start'): add_pt(r['start'])
+                    if r.get('end'): add_pt(r['end'])
+        if isinstance(u.get('tracks'), list):
+            for t in u['tracks']:
+                if isinstance(t, dict) and isinstance(t.get('points'), list):
+                    for pt in t['points']: add_pt(pt)
+
+    return points
+
 @app.route('/')
 def index():
     return render_template_string(HTML_INTERFACE)
 
-@app.route('/api_proxy')
-def api_proxy():
-    endpoint = request.args.get('endpoint', '')
-    if not endpoint:
-        return jsonify({'error': 'No endpoint specified'}), 400
-    
-    url = f"{BASE_URL}{endpoint}"
-    if 'key=' not in url:
-        sep = '&' if '?' in url else '?'
-        url = f"{url}{sep}key={API_KEY}"
+@app.route('/api_unidades')
+def api_unidades():
+    try:
+        res = requests.get(f"{BASE_URL}/unit/list.json", params={'key': API_KEY}, timeout=15)
+        if res.ok:
+            data = res.json()
+            units = data.get('data', {}).get('units', []) or data.get('units', [])
+            return jsonify(units)
+    except Exception as e:
+        print("Error al cargar unidades:", e)
+    return jsonify([]), 500
+
+@app.route('/generar_excel')
+def generar_excel():
+    unit_id = request.args.get('unit_id')
+    unit_name = request.args.get('unit_name', f'Unidad {unit_id}')
+    fecha_inicio = request.args.get('fecha_inicio')
+    fecha_fin = request.args.get('fecha_fin')
+    hora_inicio = request.args.get('hora_inicio', '00:00')
+    hora_fin = request.args.get('hora_fin', '23:59')
+    limite_vel = int(request.args.get('limite_velocidad', 80))
+
+    if not unit_id or not fecha_inicio or not fecha_fin:
+        return jsonify({'error': 'Faltan parámetros requeridos'}), 400
 
     try:
-        res = requests.get(url, timeout=25)
-        return jsonify(res.json()), res.status_code
+        start_dt = datetime.strptime(f"{fecha_inicio} {hora_inicio}", "%Y-%m-%d %H:%M")
+        end_dt = datetime.strptime(f"{fecha_fin} {hora_fin}", "%Y-%m-%d %H:%M")
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f'Formato de fecha u hora inválido: {str(e)}'}), 400
+
+    start_utc = start_dt + timedelta(hours=7)
+    end_utc = end_dt + timedelta(hours=7)
+
+    str_from = f"{fecha_inicio} {hora_inicio}:00"
+    str_till = f"{fecha_fin} {hora_fin}:59"
+    iso_from = start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    iso_till = end_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    sec_from = int(start_utc.timestamp())
+    sec_till = int(end_utc.timestamp())
+
+    # 1. Alertas
+    alertas = []
+    try:
+        r_alerts = requests.get(f"{BASE_URL}/alert/list.json", params={
+            'key': API_KEY, 'unit_id': unit_id, 'from': sec_from, 'till': sec_till
+        }, timeout=15)
+        if r_alerts.ok:
+            data_a = r_alerts.json()
+            alertas = data_a.get('data', {}).get('alerts', []) or data_a.get('alerts', []) or []
+    except Exception as e:
+        print("Aviso de alertas:", e)
+
+    # 2. Rutas GPS (Estrategias Múltiples)
+    raw_points = []
+    
+    # Estrategia 1: URL String Directa con Texto Plano
+    url_1 = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={str_from}&till={str_till}&include[]=points&include[]=decoded_route&include[]=stops"
+    try:
+        r1 = requests.get(url_1, timeout=25)
+        if r1.ok:
+            raw_points = extraer_puntos_python(r1.json())
+    except Exception as e:
+        print("Error Estrategia 1:", e)
+
+    # Estrategia 2: ISO UTC con corchetes directos
+    if not raw_points:
+        url_2 = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={iso_from}&till={iso_till}&include[]=points&include[]=decoded_route&include[]=stops"
+        try:
+            r2 = requests.get(url_2, timeout=25)
+            if r2.ok:
+                raw_points = extraer_puntos_python(r2.json())
+        except Exception as e:
+            print("Error Estrategia 2:", e)
+
+    # Estrategia 3: Timestamps Unix
+    if not raw_points:
+        url_3 = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={sec_from}&till={sec_till}&include[]=points&include[]=decoded_route&include[]=stops"
+        try:
+            r3 = requests.get(url_3, timeout=25)
+            if r3.ok:
+                raw_points = extraer_puntos_python(r3.json())
+        except Exception as e:
+            print("Error Estrategia 3:", e)
+
+    # Si tras todas las estrategias no existen puntos de recorrido, notificar al usuario
+    if not raw_points:
+        return jsonify({
+            'error': f'La API de IDT no devolvió registros de recorrido para la unidad {unit_name} en el rango {fecha_inicio} {hora_inicio} a {fecha_fin} {hora_fin}. Verifica que el vehículo haya registrado eventos en esa fecha.'
+        }), 404
+
+    raw_points.sort(key=lambda x: x['timestamp'])
+
+    curr_idx = 0
+    last_known = raw_points[0]
+    rows = []
+
+    max_velocidad = 0
+    minutos_movimiento = 0
+    minutos_ralenti = 0
+    recorrido_total_km = 0.0
+
+    curr_ms = int(start_dt.timestamp() * 1000)
+    end_ms = int(end_dt.timestamp() * 1000)
+
+    while curr_ms <= end_ms:
+        time_sec = curr_ms / 1000.0
+
+        while curr_idx < len(raw_points) and raw_points[curr_idx]['timestamp'] <= time_sec:
+            last_known = raw_points[curr_idx]
+            curr_idx += 1
+
+        dt_item = datetime.fromtimestamp(time_sec)
+        fecha_formatted = dt_item.strftime("%Y-%m-%d %H:%M:00")
+
+        speed_int = int(round(last_known.get('speed', 0)))
+        if speed_int > max_velocidad:
+            max_velocidad = speed_int
+
+        tiene_alerta = False
+        for a in alertas:
+            a_str = a.get('gmt') or a.get('time') or ''
+            a_ts = parse_point_timestamp({'time': a_str, 'gmt': a.get('gmt')})
+            if a_ts and abs(a_ts - time_sec) <= 60:
+                tiene_alerta = True
+                break
+
+        evento = "Apagado"
+        detalle = "-"
+
+        if speed_int > limite_vel or tiene_alerta:
+            evento = "🚨 Exceso de velocidad"
+            detalle = f"Velocidad: {speed_int} km/h (Límite: {limite_vel} km/h)"
+            minutos_movimiento += 1
+        elif speed_int > 0:
+            evento = "En movimiento"
+            minutos_movimiento += 1
+        elif last_known.get('acc', 0) == 1:
+            evento = "Ralentí / Motor ON"
+            minutos_ralenti += 1
+
+        direccion = last_known.get('address', 'Sonora, Mexico')
+        ciudad = ""
+        if ',' in direccion:
+            partes = direccion.split(',')
+            if len(partes) >= 2:
+                ciudad = partes[-2].strip()
+
+        maps_url = f"https://www.google.com/maps?q={last_known['lat']},{last_known['lng']}"
+
+        if len(rows) > 0:
+            prev_lat = rows[-1][9]
+            prev_lng = rows[-1][8]
+            if prev_lat != last_known['lat'] or prev_lng != last_known['lng']:
+                recorrido_total_km += haversine(prev_lat, prev_lng, last_known['lat'], last_known['lng'])
+
+        rows.append([
+            unit_name,
+            fecha_formatted,
+            direccion,
+            ciudad,
+            speed_int,
+            evento,
+            detalle,
+            maps_url,
+            last_known['lng'],
+            last_known['lat']
+        ])
+
+        curr_ms += 60000
+
+    fmt_mov = f"{minutos_movimiento // 60}h {minutos_movimiento % 60}m"
+    fmt_ral = f"{minutos_ralenti // 60}h {minutos_ralenti % 60}m"
+    min_trab = minutos_movimiento + minutos_ralenti
+    fmt_trab = f"{min_trab // 60}h {min_trab % 60}m"
+    vel_promedio = int(round(recorrido_total_km / (minutos_movimiento / 60.0))) if minutos_movimiento > 0 else 0
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Reporte"
+
+    ws.append(["", "", "Histórico Minuto a Minuto con Excesos de Velocidad"])
+    ws.append([])
+    ws.append(["", "", unit_name])
+    ws.append([])
+    ws.append(["Recorrido Aprox:", f"{recorrido_total_km:.2f} km", "Tiempo en Movimiento:", fmt_mov, "Fecha Inicial:", f"{fecha_inicio} {hora_inicio}"])
+    ws.append(["Velocidad Máxima:", f"{max_velocidad} km/h", "Tiempo Muerto:", fmt_ral, "Fecha Final:", f"{fecha_fin} {hora_fin}"])
+    ws.append(["Velocidad Promedio:", f"{vel_promedio} km/h", "Horas Trabajadas:", fmt_trab, "Consumo Combustible:", "N/A"])
+    ws.append(["Costo Combustible:", "N/A"])
+    ws.append([])
+    ws.append(["Vehículo", "Fecha", "Dirección", "Ciudad", "Velocidad (Km/h)", "Evento", "Detalle", "Mapa", "Longitud", "Latitud"])
+
+    for r in rows:
+        row_copy = list(r)
+        row_copy[7] = f'=HYPERLINK("{r[7]}", "Ver en Mapa")'
+        ws.append(row_copy)
+
+    col_widths = [32, 20, 45, 20, 15, 24, 35, 18, 15, 15]
+    for col_idx, width in enumerate(col_widths, start=1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = width
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+
+    safe_name = "".join([c if c.isalnum() else "_" for c in unit_name])
+    filename = f"Reporte_Minuto_a_Minuto_{safe_name}_{fecha_inicio}.xlsx"
+
+    return send_file(
+        buffer,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=filename
+    )
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
