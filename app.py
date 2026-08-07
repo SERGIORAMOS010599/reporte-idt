@@ -393,13 +393,12 @@ def generar_excel():
     except Exception as e:
         return jsonify({'error': f'Formato de fecha u hora inválido: {str(e)}'}), 400
 
-    # Blindaje universal para múltiples marcas (Teltonika, Suntech, Concox vía IDT)
     str_from = f"{fecha_inicio} {hora_inicio}:00"
     str_till = f"{fecha_fin} {hora_fin}:59"
     sec_from = int(start_dt.timestamp())
     sec_till = int(end_dt.timestamp())
 
-    # Alertas IDT
+    # 1. Obtener Alertas de IDT
     alertas = []
     try:
         r_alerts = requests.get(f"{BASE_URL}/alert/list.json", params={
@@ -410,8 +409,9 @@ def generar_excel():
             alertas = data_a.get('data', {}).get('alerts', []) or data_a.get('alerts', []) or []
     except Exception as e: pass
 
-    # Petición a route/list.json con tolerancia ampliada para capturar tramos de cualquier marca
-    url = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={str_from}&till={str_till}&include[]=points&include[]=decoded_route&include[]=stops&include[]=summary"
+    # 2. Petición directa a la API de rutas
+    query = f"key={API_KEY}&unit_id={unit_id}&from={str_from}&till={str_till}&include[]=points&include[]=decoded_route&include[]=stops&include[]=summary"
+    url = f"{BASE_URL}/route/list.json?{query}"
 
     route_json = None
     try:
@@ -419,17 +419,30 @@ def generar_excel():
         if res.ok: route_json = res.json()
     except Exception as e: pass
 
-    # Respaldo con formato de fecha plano si el formato estándar devuelve vacío
-    if not route_json or not route_json.get('data', {}).get('units'):
-        url_alt = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={fecha_inicio}%2000:00:00&till={fecha_fin}%2023:59:59&include[]=points&include[]=decoded_route&include[]=summary"
-        try:
-            res = requests.get(url_alt, timeout=30)
-            if res.ok: route_json = res.json()
-        except Exception as e: pass
-
     raw_points, official_dist, official_drive, official_stop, official_idle = extraer_puntos_y_resumen(route_json)
 
-    # Si aun así no hay puntos, usamos respaldo por última posición conocida del equipo
+    # 3. Si Mapon no regresa puntos estructurados, consultamos el endpoint alternativo de tracks directos
+    if not raw_points:
+        try:
+            url_track = f"{BASE_URL}/track/list.json?key={API_KEY}&unit_id={unit_id}&from={str_from}&till={str_till}"
+            res_t = requests.get(url_track, timeout=30)
+            if res_t.ok:
+                t_data = res_t.json().get('data', {}).get('points', [])
+                for tp in t_data:
+                    ts = parse_point_timestamp(tp)
+                    if ts is not None:
+                        raw_points.append({
+                            'timestamp': ts,
+                            'lat': float(tp.get('lat', 0)),
+                            'lng': float(tp.get('lng', 0)),
+                            'speed': float(tp.get('speed', 0)),
+                            'address': tp.get('address', 'Sonora, Mexico'),
+                            'acc': int(tp.get('params', {}).get('acc', 1)),
+                            'is_stop': False
+                        })
+        except Exception as e: pass
+
+    # 4. Resguardo final por última ubicación si de plano no hay rastro
     if not raw_points:
         fallback_lat, fallback_lng, fallback_address = 29.0729673, -110.9559192, "Sonora, Mexico"
         try:
@@ -449,7 +462,7 @@ def generar_excel():
             'speed': 0,
             'address': fallback_address,
             'acc': 1,
-            'is_stop': False
+            'is_stop': True
         })
         official_dist = 0.0
         official_drive = 0
@@ -482,20 +495,10 @@ def generar_excel():
         dt_gap = pB['timestamp'] - pA['timestamp']
         dist_gap = haversine(pA['lat'], pA['lng'], pB['lat'], pB['lng'])
 
-        if pA.get('is_stop') or dt_gap > 300 or dist_gap < 0.05:
-            cur_lat = pA['lat']
-            cur_lng = pA['lng']
-            speed_final = 0
-            acc_state = pA.get('acc', 1)
-        else:
-            alpha = (curr_ts - pA['timestamp']) / dt_gap if dt_gap > 0 else 0.0
-            cur_lat = pA['lat'] + alpha * (pB['lat'] - pA['lat'])
-            cur_lng = pA['lng'] + alpha * (pB['lng'] - pA['lng'])
-
-            speed_leg = (dist_gap / (dt_gap / 3600.0)) if dt_gap > 0 else 0.0
-            speed_raw = pA.get('speed', 0.0) + alpha * (pB.get('speed', 0.0) - pA.get('speed', 0.0)) if pB.get('speed') is not None else pA.get('speed', 0.0)
-            speed_final = int(round(max(speed_raw, speed_leg)))
-            acc_state = 1
+        speed_final = int(round(pA.get('speed', 0)))
+        cur_lat = pA['lat']
+        cur_lng = pA['lng']
+        acc_state = pA.get('acc', 1)
 
         if speed_final > max_velocidad:
             max_velocidad = speed_final
@@ -517,7 +520,7 @@ def generar_excel():
             v_val = alerta_match.get('value') or speed_final
             detalle = f"Notificación IDT: {msg} ({v_val} km/h)"
             minutos_movimiento += 1
-        elif speed_final > 5: # Umbral optimizado para evitar falsos positivos de vibración GPS
+        elif speed_final > 5:
             evento = "En movimiento"
             detalle = "-"
             minutos_movimiento += 1
@@ -601,6 +604,3 @@ def generar_excel():
         as_attachment=True,
         download_name=filename
     )
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
