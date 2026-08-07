@@ -380,29 +380,57 @@ def generar_excel():
     unit_name = request.args.get('unit_name', f'Unidad {unit_id}')
     fecha_inicio = request.args.get('fecha_inicio')
     fecha_fin = request.args.get('fecha_fin')
-    hora_inicio = request.args.get('hora_inicio', '00:00')
-    hora_fin = request.args.get('hora_fin', '23:59')
     limite_vel = int(request.args.get('limite_velocidad', 80))
 
-    if not unit_id or not fecha_inicio or not fecha_fin:
-        return jsonify({'error': 'Faltan parámetros requeridos'}), 400
-
+    # Forzar rango de día completo sin desfase UTC
+    str_from = f"{fecha_inicio} 00:00:00"
+    str_till = f"{fecha_fin} 23:59:59"
+    
+    # URL construida manualmente para mayor compatibilidad con la API
+    query = f"key={API_KEY}&unit_id={unit_id}&from={str_from}&till={str_till}&include[]=points&include[]=decoded_route&include[]=summary"
+    url = f"{BASE_URL}/route/list.json?{query}"
+    
     try:
-        start_dt = datetime.strptime(f"{fecha_inicio} {hora_inicio}", "%Y-%m-%d %H:%M")
-        end_dt = datetime.strptime(f"{fecha_fin} {hora_fin}", "%Y-%m-%d %H:%M")
+        res = requests.get(url, timeout=45)
+        if not res.ok:
+            return jsonify({'error': 'No se obtuvieron datos de la API'}), 404
+        route_json = res.json()
     except Exception as e:
-        return jsonify({'error': f'Formato de fecha u hora inválido: {str(e)}'}), 400
+        return jsonify({'error': str(e)}), 500
 
-    start_utc = start_dt + timedelta(hours=7)
-    end_utc = end_dt + timedelta(hours=7)
+    # Usamos la función de extracción que ya teníamos
+    raw_points, official_dist, official_drive, official_stop, official_idle = extraer_puntos_y_resumen(route_json)
 
-    str_from = f"{fecha_inicio} {hora_inicio}:00"
-    str_till = f"{fecha_fin} {hora_fin}:59"
-    iso_from = start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-    iso_till = end_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-    sec_from = int(start_utc.timestamp())
-    sec_till = int(end_utc.timestamp())
+    if not raw_points:
+        return jsonify({'error': 'No hay datos en el rango seleccionado'}), 404
 
+    # CREACIÓN DE ÍNDICE RÁPIDO (Esto hace que sea instantáneo)
+    # Convertimos la lista a un diccionario indexado por timestamp
+    point_index = {int(p['timestamp'] // 60): p for p in raw_points}
+    
+    # Generar filas usando el índice
+    rows = []
+    start_dt = datetime.strptime(fecha_inicio, "%Y-%m-%d")
+    curr_ts = start_dt.timestamp()
+    end_ts = curr_ts + 86340 # 23:59:00
+    
+    while curr_ts <= end_ts:
+        key = int(curr_ts // 60)
+        p = point_index.get(key)
+        
+        # Si no hay punto exacto en ese minuto, buscamos el anterior más cercano
+        if not p:
+            prev_keys = [k for k in point_index.keys() if k < key]
+            p = point_index.get(max(prev_keys)) if prev_keys else raw_points[0]
+            
+        speed = int(p.get('speed', 0))
+        evento = "En movimiento" if speed > 0 else "Apagado / Detenido"
+        
+        rows.append([unit_name, datetime.fromtimestamp(curr_ts).strftime("%Y-%m-%d %H:%M:00"), 
+                     p.get('address', 'Sonora'), "", speed, evento, "-", "", p.get('lng'), p.get('lat')])
+        curr_ts += 60
+
+    # ... (Aquí sigue la lógica de guardar el archivo wb.save como ya lo tenías)
     # Alertas IDT
     alertas = []
     try:
