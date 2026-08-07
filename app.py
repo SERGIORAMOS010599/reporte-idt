@@ -162,7 +162,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
 
             btn.disabled = true;
-            status.innerText = "⏳ Calculando telemetría de velocidades y rutas...";
+            status.innerText = "⏳ Calculando telemetría de velocidades y trayectos...";
 
             try {
                 const params = new URLSearchParams({
@@ -411,51 +411,81 @@ def generar_excel():
 
     raw_points.sort(key=lambda x: x['timestamp'])
 
-    curr_idx = 0
-    last_known = raw_points[0]
-    prev_point = None
-    rows = []
+    # Construcción de tramos para interpolación lineal entre puntos
+    legs = []
+    if len(raw_points) == 1:
+        legs.append({'pA': raw_points[0], 'pB': raw_points[0], 'dt_sec': 1, 'dist_km': 0, 'speed_leg': 0.0})
+    else:
+        for i in range(len(raw_points) - 1):
+            pA = raw_points[i]
+            pB = raw_points[i+1]
+            dt_sec = pB['timestamp'] - pA['timestamp']
+            dist_km = haversine(pA['lat'], pA['lng'], pB['lat'], pB['lng'])
+            speed_leg = (dist_km / (dt_sec / 3600.0)) if dt_sec > 0 else 0.0
+            legs.append({
+                'pA': pA,
+                'pB': pB,
+                'dt_sec': dt_sec,
+                'dist_km': dist_km,
+                'speed_leg': speed_leg
+            })
 
+    rows = []
     max_velocidad = 0
     minutos_movimiento = 0
     minutos_ralenti = 0
     recorrido_total_km = 0.0
 
-    curr_ms = int(start_dt.timestamp() * 1000)
-    end_ms = int(end_dt.timestamp() * 1000)
+    curr_ts = start_dt.timestamp()
+    end_ts = end_dt.timestamp()
+    prev_lat, prev_lng = None, None
 
-    while curr_ms <= end_ms:
-        time_sec = curr_ms / 1000.0
+    while curr_ts <= end_ts:
+        active_leg = None
+        if curr_ts <= raw_points[0]['timestamp']:
+            active_leg = legs[0]
+            alpha = 0.0
+        elif curr_ts >= raw_points[-1]['timestamp']:
+            active_leg = legs[-1]
+            alpha = 1.0
+        else:
+            for leg in legs:
+                if leg['pA']['timestamp'] <= curr_ts <= leg['pB']['timestamp']:
+                    active_leg = leg
+                    dt_sec = leg['dt_sec']
+                    alpha = (curr_ts - leg['pA']['timestamp']) / dt_sec if dt_sec > 0 else 0.0
+                    break
 
-        while curr_idx < len(raw_points) and raw_points[curr_idx]['timestamp'] <= time_sec:
-            prev_point = last_known
-            last_known = raw_points[curr_idx]
-            curr_idx += 1
+        pA = active_leg['pA']
+        pB = active_leg['pB']
+        v_leg = active_leg.get('speed_leg', 0.0)
 
-        dt_item = datetime.fromtimestamp(time_sec)
-        fecha_formatted = dt_item.strftime("%Y-%m-%d %H:%M:00")
+        # Velocidad directa reportada por el sensor o interpolada por la distancia del tramo
+        speed_raw = pA.get('speed', 0.0) + alpha * (pB.get('speed', 0.0) - pA.get('speed', 0.0)) if pB.get('speed') is not None else pA.get('speed', 0.0)
 
-        # Velocidad directo del GPS o estimada por desplazamiento
-        speed_raw = float(last_known.get('speed', 0))
-        acc_state = int(last_known.get('acc', 0))
+        if v_leg > 5.0:
+            cur_lat = pA['lat'] + alpha * (pB['lat'] - pA['lat'])
+            cur_lng = pA['lng'] + alpha * (pB['lng'] - pA['lng'])
+            speed_final = int(round(max(speed_raw, v_leg)))
+        else:
+            cur_lat = pA['lat']
+            cur_lng = pA['lng']
+            speed_final = int(round(speed_raw)) if speed_raw > 5 else 0
 
-        dist_step = 0.0
-        if prev_point and (prev_point['lat'] != last_known['lat'] or prev_point['lng'] != last_known['lng']):
-            dist_step = haversine(prev_point['lat'], prev_point['lng'], last_known['lat'], last_known['lng'])
-            recorrido_total_km += dist_step
-
-        # Si el GPS reporta speed == 0 pero hubo cambio en coordenadas (desplazamiento en el minuto)
-        speed_calc = (dist_step * 60.0) if dist_step > 0.01 else 0.0
-        speed_final = int(round(max(speed_raw, speed_calc)))
+        acc_state = pA.get('acc', 0)
 
         if speed_final > max_velocidad:
             max_velocidad = speed_final
 
+        dt_item = datetime.fromtimestamp(curr_ts)
+        fecha_formatted = dt_item.strftime("%Y-%m-%d %H:%M:00")
+
+        # Verificación de Alertas del Servidor IDT
         alerta_match = None
         for a in alertas:
             a_str = a.get('gmt') or a.get('time') or ''
             a_ts = parse_point_timestamp({'time': a_str, 'gmt': a.get('gmt')})
-            if a_ts and abs(a_ts - time_sec) <= 60:
+            if a_ts and abs(a_ts - curr_ts) <= 60:
                 alerta_match = a
                 break
 
@@ -477,14 +507,19 @@ def generar_excel():
             evento = "Apagado"
             detalle = "-"
 
-        direccion = last_known.get('address', 'Sonora, Mexico')
+        direccion = pA.get('address', 'Sonora, Mexico')
         ciudad = ""
         if ',' in direccion:
             partes = direccion.split(',')
             if len(partes) >= 2:
                 ciudad = partes[-2].strip()
 
-        maps_url = f"https://www.google.com/maps?q={last_known['lat']},{last_known['lng']}"
+        maps_url = f"https://www.google.com/maps?q={cur_lat},{cur_lng}"
+
+        if prev_lat is not None and (prev_lat != cur_lat or prev_lng != cur_lng):
+            recorrido_total_km += haversine(prev_lat, prev_lng, cur_lat, cur_lng)
+
+        prev_lat, prev_lng = cur_lat, cur_lng
 
         rows.append([
             unit_name,
@@ -495,11 +530,11 @@ def generar_excel():
             evento,
             detalle,
             maps_url,
-            last_known['lng'],
-            last_known['lat']
+            cur_lng,
+            cur_lat
         ])
 
-        curr_ms += 60000
+        curr_ts += 60.0
 
     fmt_mov = f"{minutos_movimiento // 60}h {minutos_movimiento % 60}m"
     fmt_ral = f"{minutos_ralenti // 60}h {minutos_ralenti % 60}m"
