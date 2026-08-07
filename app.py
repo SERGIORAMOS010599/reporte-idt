@@ -162,7 +162,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
 
             btn.disabled = true;
-            status.innerText = "⏳ Obteniendo telemetría del equipo...";
+            status.innerText = "⏳ Calculando telemetría de velocidades y rutas...";
 
             try {
                 const params = new URLSearchParams({
@@ -278,7 +278,7 @@ def extraer_puntos_python(route_data):
         try:
             lat = float(pt.get('lat') or pt.get('latitude') or 0)
             lng = float(pt.get('lng') or pt.get('longitude') or 0)
-            speed = float(pt.get('speed') or pt.get('s') or 0)
+            speed = float(pt.get('speed') or pt.get('s') or pt.get('spd') or 0)
         except (ValueError, TypeError):
             return
 
@@ -370,7 +370,7 @@ def generar_excel():
     sec_from = int(start_utc.timestamp())
     sec_till = int(end_utc.timestamp())
 
-    # 1. Notificaciones / Alertas del Servidor IDT
+    # 1. Alertas IDT
     alertas = []
     try:
         r_alerts = requests.get(f"{BASE_URL}/alert/list.json", params={
@@ -382,7 +382,7 @@ def generar_excel():
     except Exception as e:
         print("Aviso de alertas:", e)
 
-    # 2. Telemetría de Puntos del Equipo
+    # 2. Puntos GPS
     raw_points = []
     url_1 = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={str_from}&till={str_till}&include[]=points&include[]=decoded_route&include[]=stops"
     try:
@@ -406,13 +406,14 @@ def generar_excel():
 
     if not raw_points:
         return jsonify({
-            'error': f'No se obtuvieron posiciones GPS para la unidad {unit_name} en el rango {fecha_inicio} {hora_inicio} a {fecha_fin} {hora_fin}. Verifica que el equipo haya transmitido datos en ese día.'
+            'error': f'No se obtuvieron posiciones GPS para la unidad {unit_name} en el rango {fecha_inicio} {hora_inicio} a {fecha_fin} {hora_fin}.'
         }), 404
 
     raw_points.sort(key=lambda x: x['timestamp'])
 
     curr_idx = 0
     last_known = raw_points[0]
+    prev_point = None
     rows = []
 
     max_velocidad = 0
@@ -427,17 +428,28 @@ def generar_excel():
         time_sec = curr_ms / 1000.0
 
         while curr_idx < len(raw_points) and raw_points[curr_idx]['timestamp'] <= time_sec:
+            prev_point = last_known
             last_known = raw_points[curr_idx]
             curr_idx += 1
 
         dt_item = datetime.fromtimestamp(time_sec)
         fecha_formatted = dt_item.strftime("%Y-%m-%d %H:%M:00")
 
-        speed_int = int(round(last_known.get('speed', 0)))
-        acc_state = last_known.get('acc', 0)
+        # Velocidad directo del GPS o estimada por desplazamiento
+        speed_raw = float(last_known.get('speed', 0))
+        acc_state = int(last_known.get('acc', 0))
 
-        if speed_int > max_velocidad:
-            max_velocidad = speed_int
+        dist_step = 0.0
+        if prev_point and (prev_point['lat'] != last_known['lat'] or prev_point['lng'] != last_known['lng']):
+            dist_step = haversine(prev_point['lat'], prev_point['lng'], last_known['lat'], last_known['lng'])
+            recorrido_total_km += dist_step
+
+        # Si el GPS reporta speed == 0 pero hubo cambio en coordenadas (desplazamiento en el minuto)
+        speed_calc = (dist_step * 60.0) if dist_step > 0.01 else 0.0
+        speed_final = int(round(max(speed_raw, speed_calc)))
+
+        if speed_final > max_velocidad:
+            max_velocidad = speed_final
 
         alerta_match = None
         for a in alertas:
@@ -450,10 +462,10 @@ def generar_excel():
         if alerta_match is not None:
             evento = "🚨 Exceso de velocidad"
             msg = alerta_match.get('msg') or alerta_match.get('title') or 'Notificación de exceso de velocidad'
-            v_val = alerta_match.get('value') or speed_int
+            v_val = alerta_match.get('value') or speed_final
             detalle = f"Notificación IDT: {msg} ({v_val} km/h)"
             minutos_movimiento += 1
-        elif speed_int > 0:
+        elif speed_final > 0:
             evento = "En movimiento"
             detalle = "-"
             minutos_movimiento += 1
@@ -474,18 +486,12 @@ def generar_excel():
 
         maps_url = f"https://www.google.com/maps?q={last_known['lat']},{last_known['lng']}"
 
-        if len(rows) > 0:
-            prev_lat = rows[-1][9]
-            prev_lng = rows[-1][8]
-            if prev_lat != last_known['lat'] or prev_lng != last_known['lng']:
-                recorrido_total_km += haversine(prev_lat, prev_lng, last_known['lat'], last_known['lng'])
-
         rows.append([
             unit_name,
             fecha_formatted,
             direccion,
             ciudad,
-            speed_int,
+            speed_final,
             evento,
             detalle,
             maps_url,
