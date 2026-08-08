@@ -236,55 +236,57 @@ import random
 @app.route('/generar_excel')
 def generar_excel():
     try:
-        # ... (parámetros igual) ...
+        # ... (parámetros iguales) ...
         unit_id = request.args.get('unit_id')
-        unit_name = request.args.get('unit_name', 'Unidad')
+        unit_name = request.args.get('unit_name', 'R-02')
         f_in = request.args.get('fecha_inicio')
         f_fin = request.args.get('fecha_fin', f_in)
-        
-        start_date = datetime.strptime(f_in.strip(), "%Y-%m-%d")
-        end_date = datetime.strptime(f_fin.strip(), "%Y-%m-%d")
-        
+
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "Reporte Eventos"
-        ws.append(["Vehículo", "Fecha", "Latitud", "Longitud", "Velocidad (km/h)", "Eventos"])
+        ws.title = "Reporte"
         
-        base_lat, base_lng = 29.072967, -110.955919
-        estado_anterior = "Apagado"
+        # 1. Encabezado Ejecutivo (Resumen)
+        ws['A1'] = "IDT TECNOLOGÍAS"
+        ws['A1'].font = Font(bold=True)
+        ws['C1'] = "Unidad"
+        ws['D1'] = unit_name
         
-        current_date = start_date
-        while current_date <= end_date:
-            date_str = current_date.strftime("%Y-%m-%d")
-            # Simulamos horas operativas (de 6am a 8pm)
-            for hour in range(0, 24):
-                for minute in range(0, 60):
-                    time_str = f"{date_str} {hour:02d}:{minute:02d}:00"
-                    
-                    # Lógica de operación real
-                    if 6 <= hour <= 20:
-                        if 10 <= hour <= 12: # Periodo de ralentí
-                            speed = 0
-                            evento = "Inicio de Ralentí" if estado_anterior != "Ralentí" else "Ralentí"
-                            estado_anterior = "Ralentí"
-                        else:
-                            # Velocidad variable entre 60 y 90 km/h
-                            speed = random.randint(60, 90)
-                            evento = "Fin de Ralentí" if estado_anterior == "Ralentí" else "Motor Encendido / En Movimiento"
-                            estado_anterior = "Movimiento"
-                            base_lat += 0.0002 # Avance sutil
-                    else:
-                        speed = 0
-                        evento = "Motor Apagado"
-                        estado_anterior = "Apagado"
-                    
-                    ws.append([unit_name, time_str, round(base_lat, 6), round(base_lng, 6), speed, evento])
-            current_date += timedelta(days=1)
+        metrics = [
+            ["Recorrido Aprox:", "", "Tiempo en Movimiento:", "Fecha Inicial:", f"{f_in} 00:00 AM"],
+            ["Velocidad Máxima:", "", "Tiempo Muerto:", "Fecha Final:", f"{f_fin} 04:06 PM"],
+            ["Velocidad Promedio:", "", "Horas Trabajadas:", "Consumo Combustible:"]
+        ]
+        for r, row_data in enumerate(metrics, 2):
+            for c, val in enumerate(row_data, 1):
+                ws.cell(row=r, column=c, value=val).font = Font(bold=c%2!=0)
+
+        # 2. Tabla de Datos
+        headers = ["Vehículo", "Fecha", "Dirección", "Velocidad (Km/h)", "Evento", "Detalle", "Mapa", "Longitud", "Latitud"]
+        ws.append([]) 
+        ws.append(headers)
+        
+        # Estilo para encabezado de tabla
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        for col in range(1, len(headers)+1):
+            cell = ws.cell(row=6, column=col)
+            cell.fill, cell.font = header_fill, Font(bold=True, color="FFFFFF")
+
+        # 3. Llenado de filas con enlace dinámico a Google Maps
+        for i in range(10): # Simulación de eventos
+            lat, lng = 20.0282, -98.726
+            map_link = f"https://www.google.com/maps?q={lat},{lng}"
             
+            row = [unit_name, "2026-07-01 09:57:32", "Carretera Pachuca-Sahagún", 0, "Motor encendido", "-", "mapa", lng, lat]
+            ws.append(row)
+            # Agregar hipervínculo a la celda "Mapa" (columna 7)
+            ws.cell(row=ws.max_row, column=7).hyperlink = map_link
+            ws.cell(row=ws.max_row, column=7).font = Font(color="0000FF", underline="single")
+
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
         return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                         as_attachment=True, download_name="Reporte_Realista.xlsx")
+                         as_attachment=True, download_name="Reporte_Profesional_IDT.xlsx")
     except Exception as e:
-        return jsonify({'error': f'Error técnico: {str(e)}'}), 500
+        return jsonify({'error': str(e)}), 500
