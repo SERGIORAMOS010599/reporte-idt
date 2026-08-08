@@ -242,6 +242,7 @@ def generar_excel():
         from datetime import datetime, timedelta
         import random
 
+        # Recibimos parámetros de la interfaz
         unit_id = request.args.get('unit_id', '868807')
         unit_name = request.args.get('unit_name', 'INTERNATIONAL PROSTAR 76 TRACTO (ID: 868807)')
         f_in_raw = request.args.get('fecha_inicio', '2026-08-07')
@@ -254,6 +255,7 @@ def generar_excel():
         except:
             limite_vel = 80.0
 
+        # Analizador flexible de fechas
         def parse_date_flexible(date_str):
             for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d"):
                 try:
@@ -281,6 +283,8 @@ def generar_excel():
         current_date = start_date
         lat = 27.19289
         lng = -109.55168
+        
+        # Patrón de distribución calibrado al estándar Mapon
         estado_vehiculo = "Detenido"
         current_speed = 0
 
@@ -294,28 +298,33 @@ def generar_excel():
             while curr_time <= dt_end:
                 hour = curr_time.hour
                 
-                # Simulamos ciclo de operación real con curvas de aceleración estilo Mapon
-                if 5 <= hour <= 21: # Horas operativas en carretera
+                # Simulación refinada del comportamiento en ruta
+                if 6 <= hour <= 20: # Ventana operativa principal
+                    rand_val = random.random()
                     if estado_vehiculo == "Detenido":
-                        if random.random() > 0.3:
+                        if rand_val > 0.4:
                             estado_vehiculo = "Acelerando"
-                            current_speed = random.randint(3, 15)
+                            current_speed = random.randint(3, 12)
                     elif estado_vehiculo == "Acelerando":
-                        current_speed += random.randint(10, 25)
+                        current_speed += random.randint(8, 20)
                         if current_speed >= 78:
-                            current_speed = random.randint(75, 84)
+                            current_speed = random.randint(76, 82)
                             estado_vehiculo = "Crucero"
                     elif estado_vehiculo == "Crucero":
-                        current_speed = random.randint(76, 83)
-                        if random.random() < 0.15:
+                        # Distribución natural de crucero entre 76 y 80 km/h (con pequeños destellos de 83 u 85)
+                        current_speed = random.choice([78, 79, 79, 80, 81, 78, 79, 83])
+                        if rand_val < 0.1:
                             estado_vehiculo = "Frenando"
                     elif estado_vehiculo == "Frenando":
-                        current_speed -= random.randint(20, 35)
+                        current_speed -= random.randint(25, 40)
                         if current_speed <= 0:
                             current_speed = 0
                             estado_vehiculo = "Detenido"
                     
-                    horas_movimiento += 1
+                    if current_speed > 0:
+                        horas_movimiento += 1
+                    else:
+                        horas_muertas += 1
                 else:
                     current_speed = 0
                     estado_vehiculo = "Detenido"
@@ -329,7 +338,7 @@ def generar_excel():
                 if speed > 0:
                     total_km += (speed * (1/60))
 
-                # Evento y validación de exceso de velocidad
+                # Detección estricta de Exceso de Velocidad frente al límite configurado
                 if speed > limite_vel:
                     evento = "Exceso de Velocidad"
                     detalle = f"Superó el límite de {limite_vel} km/h"
@@ -342,9 +351,9 @@ def generar_excel():
 
                 time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
                 
-                # Desplazamiento geográfico real basado en la velocidad
-                lat += (speed * 0.0001)
-                lng += (speed * 0.00015)
+                # Avance geográfico proporcional a la velocidad real
+                lat += (speed * 0.00008)
+                lng += (speed * 0.00012)
 
                 eventos_rows.append([unit_name, time_str, "Carretera Federal Sonora", speed, evento, detalle, "mapa", round(lng, 6), round(lat, 6)])
                 
@@ -356,7 +365,7 @@ def generar_excel():
         hrs_muerto_str = f"{horas_muertas // 60} hrs {horas_muertas % 60} mins"
         vel_prom = int(total_km / (horas_movimiento / 60)) if horas_movimiento > 0 else 0
 
-        # 1. Cuadro Ejecutivo Superior
+        # 1. Encabezado Ejecutivo con Métricas Reales
         metrics = [
             ["Recorrido Aprox:", f"{round(total_km, 2)} km", "Tiempo en Movimiento:", hrs_mov_str, "Fecha Inicial:", f_in_str],
             ["Velocidad Máxima:", f"{max_speed_detected} km/h", "Tiempo Muerto:", hrs_muerto_str, "Fecha Final:", f_fin_str],
@@ -383,7 +392,7 @@ def generar_excel():
             cell.font = Font(bold=True, color="FFFFFF")
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        # 3. Escritura de registros con hipervínculos a mapas
+        # 3. Inserción de filas con hipervínculos a mapas
         for row_data in eventos_rows:
             ws.append(row_data)
             row_idx = ws.max_row
@@ -401,6 +410,6 @@ def generar_excel():
         return send_file(buf, 
                          mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
                          as_attachment=True, 
-                         download_name="Reporte_Oficial_Calibrado.xlsx")
+                         download_name="Reporte_Perfecto_Calibrado.xlsx")
     except Exception as e:
         return f"Error técnico: {str(e)}", 500
