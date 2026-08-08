@@ -240,38 +240,52 @@ def generar_excel():
         from openpyxl.styles import Font, Alignment, PatternFill
         import io
         
-        unit_name = request.args.get('unit_name', 'R-02')
+        # 1. Parámetros básicos
+        f_in = request.args.get('fecha_inicio', '01/07/2026')
+        f_fin = request.args.get('fecha_fin', '20/07/2026')
         
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "Reporte"
+        ws.title = "Reporte Ejecutivo"
         
-        # Estructura del encabezado (sin fórmulas complejas por ahora)
-        ws['A1'] = "IDT TECNOLOGÍAS"
-        ws['A1'].font = Font(bold=True)
-        ws['C1'] = "Unidad"
-        ws['D1'] = unit_name
+        # 2. Encabezado de Métricas (Las celdas de la imagen)
+        metrics = [
+            ["Recorrido Aprox:", "1559.00 km", "Tiempo en Movimiento:", "27 hrs 13 mins", "Fecha Inicial:", f_in],
+            ["Velocidad Máxima:", "115 km/h", "Tiempo Muerto:", "444 hrs 45 mins", "Fecha Final:", f_fin],
+            ["Velocidad Promedio:", "70 km/h", "Horas Trabajadas:", "", "Consumo Combustible:", ""]
+        ]
         
-        # Encabezados de tabla
-        headers = ["Vehículo", "Fecha", "Dirección", "Velocidad (Km/h)", "Evento"]
-        ws.append([])
+        for r, row in enumerate(metrics, 1):
+            for c, val in enumerate(row, 1):
+                cell = ws.cell(row=r, column=c, value=val)
+                if c in [1, 3, 5]: cell.font = Font(bold=True)
+        
+        ws.append(["Clase: Troque de 2 ejes, 6 llantas (dobles traseras)"])
+        ws.append([]) # Fila vacía
+        
+        # 3. Encabezados de Tabla (Fila 6)
+        headers = ["Vehículo", "Fecha", "Dirección", "Velocidad (Km/h)", "Evento", "Detalle", "Mapa", "Longitud", "Latitud"]
         ws.append(headers)
         
-        # Estilo sencillo para encabezados
-        for cell in ws[6]:
-            cell.font = Font(bold=True)
+        # Estilo de tabla
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        for c in range(1, len(headers) + 1):
+            cell = ws.cell(row=6, column=c)
+            cell.fill, cell.font = header_fill, Font(bold=True, color="FFFFFF")
             
-        # Llenado de filas (datos controlados)
+        # 4. Inserción de Datos (Aquí es donde agregaremos tus eventos reales minuto a minuto)
+        # Añadimos unos registros de prueba para validar que la tabla se dibuja bien
         for i in range(1, 10):
-            ws.append([unit_name, "2026-07-01 10:00:00", "Carretera Pachuca-Sahagún", 65 + i, "Motor encendido"])
-            
+            ws.append(["R-02", f"2026-07-02 08:{30+i}:39", "Carretera Pachuca-Sahagún", 40+i, "Motor encendido", "-", "mapa", -98.726, 20.0282])
+            # Hipervínculo al mapa
+            ws.cell(row=6+i, column=7).hyperlink = "https://www.google.com/maps?q=20.0282,-98.726"
+            ws.cell(row=6+i, column=7).font = Font(color="0000FF", underline="single")
+
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
         
-        return send_file(buf, 
-                         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                         as_attachment=True, 
-                         download_name="Reporte_Final.xlsx")
+        return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
+                         as_attachment=True, download_name="Reporte_IDT_Final.xlsx")
     except Exception as e:
         return f"Error: {str(e)}", 500
