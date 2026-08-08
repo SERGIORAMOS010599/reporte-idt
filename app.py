@@ -237,25 +237,19 @@ def generar_excel():
     try:
         unit_id = request.args.get('unit_id')
         unit_name = request.args.get('unit_name', 'Unidad')
-        f_in = request.args.get('fecha_inicio')
-        f_fin = request.args.get('fecha_fin')
         
-        # Convertimos las fechas a marcas de tiempo (Unix Timestamp)
-        # Esto elimina cualquier problema con espacios, símbolos o formatos de hora
-        start_ts = int(datetime.strptime(f"{f_in} 00:00:00", "%Y-%m-%d %H:%M:%S").timestamp())
-        end_ts = int(datetime.strptime(f"{f_fin} 23:59:59", "%Y-%m-%d %H:%M:%S").timestamp())
-        
+        # IDT a veces requiere que la consulta sea por 'track/list' si 'route/list' falla
+        # Probaremos un enfoque directo y minimalista
         url = f"{BASE_URL}/route/list.json"
         
-        # Enviamos los parámetros como números (timestamps)
+        # Probamos enviando solo los parámetros indispensables, sin rangos de hora/minuto
         params = {
             'key': API_KEY,
             'unit_id': unit_id,
-            'from': start_ts,
-            'till': end_ts,
             'include[]': 'points'
         }
         
+        # Hacemos la petición
         res = requests.get(url, params=params, timeout=45)
         data = res.json()
         
@@ -269,11 +263,14 @@ def generar_excel():
         else:
             units = data.get('data', {}).get('units', [])
             if not units:
-                ws.append(["Sin datos", "La API respondió, pero no hay unidades en este rango."])
+                ws.append(["Sin unidades", "La API respondió, pero no hay unidades activas."])
             else:
                 points = units[0].get('points', [])
-                for p in points:
-                    ws.append([unit_name, p.get('time'), p.get('lat'), p.get('lng'), p.get('speed', 0)])
+                if not points:
+                    ws.append(["Sin puntos", "No hay datos de telemetría disponibles."])
+                else:
+                    for p in points:
+                        ws.append([unit_name, p.get('time'), p.get('lat'), p.get('lng'), p.get('speed', 0)])
         
         buf = io.BytesIO()
         wb.save(buf)
