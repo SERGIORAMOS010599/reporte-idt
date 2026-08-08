@@ -234,75 +234,68 @@ def api_unidades():
 @app.route('/generar_excel')
 def generar_excel():
     try:
+        # ... (parámetros y setup igual al anterior) ...
         unit_id = request.args.get('unit_id')
         unit_name = request.args.get('unit_name', 'Unidad')
         f_in = request.args.get('fecha_inicio')
-        f_fin = request.args.get('fecha_fin')
+        f_fin = request.args.get('fecha_fin', f_in)
         h_in = request.args.get('hora_inicio', '00:00')
         h_fin = request.args.get('hora_fin', '23:59')
-        
-        if not f_fin:
-            f_fin = f_in
-            
+
         start_date = datetime.strptime(f_in.strip(), "%Y-%m-%d")
         end_date = datetime.strptime(f_fin.strip(), "%Y-%m-%d")
         
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "Reporte de Eventos"
-        # Actualizamos la estructura de columnas añadiendo "Eventos"
+        ws.title = "Reporte Eventos Detallado"
         ws.append(["Vehículo", "Fecha", "Latitud", "Longitud", "Velocidad (km/h)", "Eventos"])
         
         base_lat, base_lng = 29.072967, -110.955919
         
+        # Variable para controlar el estado anterior y detectar cambios
+        estado_anterior = "INICIO"
+        
         current_date = start_date
         while current_date <= end_date:
             date_str = current_date.strftime("%Y-%m-%d")
-            
             dt_start = datetime.strptime(f"{date_str} {h_in}", "%Y-%m-%d %H:%M")
             dt_end = datetime.strptime(f"{date_str} {h_fin}", "%Y-%m-%d %H:%M")
             
             curr_time = dt_start
-            minute_count = 0
-            
             while curr_time <= dt_end:
-                hour = curr_time.hour
+                # Simulamos lógica: Hora 10 a 12 (ejemplo) unidad encendida pero detenida (Ralentí)
+                is_running = (curr_time.hour >= 6 and curr_time.hour <= 20)
+                is_stopped = (curr_time.hour >= 10 and curr_time.hour <= 12)
                 
-                # Determinamos si la unidad está en periodo de descanso/apagado o en marcha
-                is_off = (hour < 5) or (minute_count % 180 > 140)
-                
-                if is_off:
+                if is_stopped:
                     speed = 0
-                    lat = base_lat
-                    lng = base_lng
-                    evento = "Motor Apagado / Detenido"
-                    
-                    # Cuando está apagado, reporta cada 10 minutos para optimizar
-                    if minute_count % 10 != 0:
-                        curr_time += timedelta(minutes=1)
-                        minute_count += 1
-                        continue
+                    evento = "Ralentí"
+                    # Detección de cambios de estado
+                    if estado_anterior != "Ralentí":
+                        evento = "Inicio de Ralentí"
+                    estado_anterior = "Ralentí"
+                elif is_running:
+                    speed = 80
+                    # Detección de fin de ralentí
+                    if estado_anterior == "Ralentí":
+                        evento = "Fin de Ralentí (Unidad en Movimiento)"
+                    else:
+                        evento = "Motor Encendido / En Movimiento"
+                    estado_anterior = "Movimiento"
                 else:
-                    # Cuando está encendido y en marcha, reporta cada 1 minuto
-                    speed = 75 + (minute_count % 18) - (minute_count % 7)
-                    base_lat += 0.0008
-                    base_lng += 0.0005
-                    lat = round(base_lat, 6)
-                    lng = round(base_lng, 6)
-                    evento = "Motor Encendido / En Movimiento"
+                    speed = 0
+                    evento = "Motor Apagado"
+                    estado_anterior = "Apagado"
                 
-                time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
-                ws.append([unit_name, time_str, lat, lng, speed, evento])
-                
+                ws.append([unit_name, curr_time.strftime("%Y-%m-%d %H:%M:%S"), base_lat, base_lng, speed, evento])
                 curr_time += timedelta(minutes=1)
-                minute_count += 1
                 
             current_date += timedelta(days=1)
-        
+            
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
         return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                         as_attachment=True, download_name="Reporte_Eventos.xlsx")
+                         as_attachment=True, download_name="Reporte_Eventos_Ralenti.xlsx")
     except Exception as e:
         return jsonify({'error': f'Error técnico: {str(e)}'}), 500
