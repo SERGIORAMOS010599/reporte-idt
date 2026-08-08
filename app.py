@@ -296,9 +296,8 @@ def generar_excel():
             while curr_time <= dt_end:
                 rand_val = random.random()
                 
-                # Comportamiento fluido a cualquier hora del día o de la madrugada
                 if estado_vehiculo == "Detenido":
-                    if rand_val > 0.85: # Probabilidad natural de iniciar marcha
+                    if rand_val > 0.85:
                         estado_vehiculo = "Acelerando"
                         current_speed = random.randint(3, 12)
                 elif estado_vehiculo == "Acelerando":
@@ -320,35 +319,6 @@ def generar_excel():
                     horas_movimiento += 1
                 else:
                     horas_muertas += 1
-
-                speed = max(0, current_speed)
-                
-                if speed > max_speed_detected:
-                    max_speed_detected = speed
-                
-                if speed > 0:
-                    total_km += (speed * (1/60))
-
-                if speed > limite_vel:
-                    evento = "Exceso de Velocidad"
-                    detalle = f"Superó el límite de {limite_vel} km/h"
-                elif speed > 0:
-                    evento = "Motor encendido / En movimiento"
-                    detalle = "-"
-                else:
-                    evento = "Motor apagado"
-                    detalle = "Detenido en reposo"
-
-                time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
-                
-                lat += (speed * 0.00008)
-                lng += (speed * 0.00012)
-
-                eventos_rows.append([unit_name, time_str, "Carretera Federal Sonora", speed, evento, detalle, "mapa", round(lng, 6), round(lat, 6)])
-                
-                curr_time += timedelta(minutes=1)
-
-            current_date += timedelta(days=1)
 
                 speed = max(0, current_speed)
                 
