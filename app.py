@@ -236,16 +236,35 @@ import random
 @app.route('/generar_excel')
 def generar_excel():
     try:
-        # 1. Intentar importar lo necesario
         import openpyxl
-        from openpyxl.styles import Font
+        from openpyxl.styles import Font, Alignment, PatternFill
         import io
         
-        # 2. Crear un archivo mínimo (1 sola celda) para probar si el problema es openpyxl
+        unit_name = request.args.get('unit_name', 'R-02')
+        
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws['A1'] = "PRUEBA DE CONEXIÓN"
+        ws.title = "Reporte"
         
+        # Estructura del encabezado (sin fórmulas complejas por ahora)
+        ws['A1'] = "IDT TECNOLOGÍAS"
+        ws['A1'].font = Font(bold=True)
+        ws['C1'] = "Unidad"
+        ws['D1'] = unit_name
+        
+        # Encabezados de tabla
+        headers = ["Vehículo", "Fecha", "Dirección", "Velocidad (Km/h)", "Evento"]
+        ws.append([])
+        ws.append(headers)
+        
+        # Estilo sencillo para encabezados
+        for cell in ws[6]:
+            cell.font = Font(bold=True)
+            
+        # Llenado de filas (datos controlados)
+        for i in range(1, 10):
+            ws.append([unit_name, "2026-07-01 10:00:00", "Carretera Pachuca-Sahagún", 65 + i, "Motor encendido"])
+            
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
@@ -253,8 +272,6 @@ def generar_excel():
         return send_file(buf, 
                          mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
                          as_attachment=True, 
-                         download_name="Reporte_Prueba.xlsx")
+                         download_name="Reporte_Final.xlsx")
     except Exception as e:
-        # Esto imprimirá el error real en tu consola de Render
-        print("ERROR CRÍTICO:", str(e))
-        return f"Error en servidor: {str(e)}", 500
+        return f"Error: {str(e)}", 500
