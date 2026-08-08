@@ -238,43 +238,36 @@ def generar_excel():
         unit_name = request.args.get('unit_name', 'Unidad')
         f_in = request.args.get('fecha_inicio')
         
-        # Probamos el formato estándar de Mapon/IDT con los parámetros originales 'from' y 'till'
-        final_url = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={f_in}&till={f_in}&include[]=points"
+        # Construcción manual de la URL para evitar que Python cambie %20 por '+'
+        # Este es el formato EXACTO que IDT necesita: 2026-08-06%2000:00:00
+        url = f"{BASE_URL}/route/list.json"
+        query_string = f"key={API_KEY}&unit_id={unit_id}&from={f_in}%2000:00:00&till={f_in}%2023:59:59&include[]=points"
+        final_url = f"{url}?{query_string}"
         
+        # Petición GET directa
         res = requests.get(final_url, timeout=45)
         data = res.json()
         
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "Diagnostico_API"
-        ws.append(["Estado", "Respuesta Cruda de la API (JSON)", "URL Utilizada"])
+        ws.title = "Reporte"
+        ws.append(["Vehículo", "Fecha", "Latitud", "Longitud", "Velocidad (km/h)"])
         
-        # Si hay un error, volcamos TODO el JSON de la API en la celda para leerlo con claridad
         if 'error' in data:
-            ws.append(["FALLO", str(data), final_url])
+            ws.append(["FALLO API", str(data.get('error')), final_url])
         else:
             units = data.get('data', {}).get('units', [])
             if not units:
-                ws.append(["SIN UNIDADES", str(data), final_url])
+                ws.append(["SIN UNIDADES", "La API respondió, pero no hay unidades.", final_url])
             else:
                 points = units[0].get('points', [])
-                if not points:
-                    ws.append(["SIN PUNTOS", str(units[0]), final_url])
-                else:
-                    # Si por fin entra, limpiamos y ponemos los puntos
-                    ws.cell(row=1, column=1, value="Vehículo")
-                    ws.cell(row=1, column=2, value="Fecha")
-                    ws.cell(row=1, column=3, value="Latitud")
-                    ws.cell(row=1, column=4, value="Longitud")
-                    ws.cell(row=1, column=5, value="Velocidad (km/h)")
-                    ws.delete_rows(2) # Limpiar la cabecera de diagnóstico
-                    for p in points:
-                        ws.append([unit_name, p.get('time'), p.get('lat'), p.get('lng'), p.get('speed', 0)])
+                for p in points:
+                    ws.append([unit_name, p.get('time'), p.get('lat'), p.get('lng'), p.get('speed', 0)])
         
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
         return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                         as_attachment=True, download_name="Reporte_Diagnostico_IDT.xlsx")
+                         as_attachment=True, download_name="Reporte_Final.xlsx")
     except Exception as e:
-        return jsonify({'error': f'Error técnico: {str(e)}'}), 500
+        return jsonify({'error': str(e)}), 500
