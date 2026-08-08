@@ -236,29 +236,45 @@ import random
 @app.route('/generar_excel')
 def generar_excel():
     try:
-        # Aseguramos todas las importaciones necesarias dentro de la función por seguridad
-        import openpyxl
-        from openpyxl.styles import Font, Alignment, PatternFill
-        import io
-        from datetime import datetime, timedelta
-        import requests
-        
         unit_id = request.args.get('unit_id')
-        unit_name = request.args.get('unit_name', 'Unidad')
+        unit_name = request.args.get('unit_name', 'R-02')
         f_in = request.args.get('fecha_inicio')
         f_fin = request.args.get('fecha_fin', f_in)
-
-        # Aquí empieza la lógica que implementamos...
+        
         wb = openpyxl.Workbook()
         ws = wb.active
-        # ... resto del código ...
         
+        # 1. Encabezado Ejecutivo (Métricas resumidas)
+        ws['A1'] = "IDT TECNOLOGÍAS"
+        ws['C1'] = "Unidad"
+        ws['D1'] = unit_name
+        
+        # 2. Preparar los datos de la tabla en una lista (más eficiente)
+        data_rows = [
+            ["Vehículo", "Fecha", "Dirección", "Velocidad (Km/h)", "Evento", "Detalle", "Mapa", "Longitud", "Latitud"]
+        ]
+        
+        # Generamos una muestra de datos (puedes ajustar el rango aquí)
+        for i in range(1, 15):
+            data_rows.append([
+                unit_name, f"2026-07-01 10:{i:02d}:00", "Carretera Pachuca-Sahagún", 
+                60 + i, "Motor encendido", "-", "mapa", -98.726, 20.0282
+            ])
+            
+        # 3. Escribir todo el bloque de datos de una sola vez
+        for row in data_rows:
+            ws.append(row)
+            
+        # 4. Formateo rápido
+        # Hipervínculos
+        for r in range(7, ws.max_row + 1):
+            ws.cell(row=r, column=7).hyperlink = "https://www.google.com/maps?q=20.0282,-98.726"
+            ws.cell(row=r, column=7).font = Font(color="0000FF", underline="single")
+
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
         return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                         as_attachment=True, download_name="Reporte_Test.xlsx")
-                         
+                         as_attachment=True, download_name="Reporte_Final.xlsx")
     except Exception as e:
-        # IMPORTANTE: Esto hará que el navegador muestre el error real en lugar de "Error al generar"
-        return f"Error detallado: {str(e)}", 500
+        return f"Error técnico: {str(e)}", 500
