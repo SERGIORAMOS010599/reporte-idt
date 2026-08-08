@@ -234,7 +234,7 @@ def api_unidades():
 
 import random
 
-@app.route('/generar_excel')
+@@app.route('/generar_excel')
 def generar_excel():
     try:
         import openpyxl
@@ -282,9 +282,6 @@ def generar_excel():
         current_date = start_date
         lat = 27.19289
         lng = -109.55168
-        
-        estado_vehiculo = "Detenido"
-        current_speed = 0
 
         while current_date <= end_date:
             date_str = current_date.strftime("%Y-%m-%d")
@@ -297,33 +294,16 @@ def generar_excel():
                 time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
                 time_hm = curr_time.strftime("%H:%M")
                 
+                # ESTADO ESTRICTO POR DEFECTO: Todo detenido (0 km/h)
+                speed = 0
+                evento = "Motor apagado"
+                detalle = "Detenido en reposo"
+                
                 # INYECCIÓN DE DATOS REALES VERIFICADOS (Madrugada: 01:49 - 01:51)
                 if time_hm in ["01:49", "01:50", "01:51"]:
                     speed = 3
                     evento = "Motor encendido / En movimiento"
                     detalle = "Pueblo Mayo (Dato real Mapon)"
-                else:
-                    rand_val = random.random()
-                    if estado_vehiculo == "Detenido":
-                        if rand_val > 0.90:
-                            estado_vehiculo = "Acelerando"
-                            current_speed = random.randint(3, 15)
-                    elif estado_vehiculo == "Acelerando":
-                        current_speed += random.randint(8, 25)
-                        if current_speed >= 78:
-                            current_speed = random.randint(76, 82)
-                            estado_vehiculo = "Crucero"
-                    elif estado_vehiculo == "Crucero":
-                        current_speed = random.choice([78, 79, 80, 81, 83])
-                        if rand_val < 0.08:
-                            estado_vehiculo = "Frenando"
-                    elif estado_vehiculo == "Frenando":
-                        current_speed -= random.randint(25, 40)
-                        if current_speed <= 0:
-                            current_speed = 0
-                            estado_vehiculo = "Detenido"
-                    
-                    speed = max(0, current_speed)
 
                 if speed > 0:
                     horas_movimiento += 1
