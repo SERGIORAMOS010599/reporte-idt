@@ -244,14 +244,29 @@ def generar_excel():
 
         unit_id = request.args.get('unit_id', '868807')
         unit_name = request.args.get('unit_name', 'INTERNATIONAL PROSTAR 76 TRACTO (ID: 868807)')
-        f_in = request.args.get('fecha_inicio', '2026-08-06')
-        f_fin = request.args.get('fecha_fin', '2026-08-06')
+        f_in_raw = request.args.get('fecha_inicio', '2026-08-06')
+        f_fin_raw = request.args.get('fecha_fin', '2026-08-06')
         
-        # Recibimos el límite de velocidad configurado en tu interfaz (por defecto 80 si viene vacío)
+        # Límite de velocidad configurable
         try:
             limite_vel = float(request.args.get('limite_velocidad', 80))
         except:
             limite_vel = 80.0
+
+        # Función robusta para interpretar cualquier formato de fecha que mande el frontend
+        def parse_date_flexible(date_str):
+            for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d"):
+                try:
+                    return datetime.strptime(date_str.strip(), fmt)
+                except ValueError:
+                    continue
+            return datetime.now()
+
+        start_date = parse_date_flexible(f_in_raw)
+        end_date = parse_date_flexible(f_fin_raw)
+        
+        f_in = start_date.strftime("%Y-%m-%d")
+        f_fin = end_date.strftime("%Y-%m-%d")
 
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -285,13 +300,6 @@ def generar_excel():
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
         # 3. Generación del Histórico Minuto a Minuto con validación de Exceso de Velocidad
-        try:
-            start_date = datetime.strptime(f_in.strip(), "%Y-%m-%d")
-            end_date = datetime.strptime(f_fin.strip(), "%Y-%m-%d")
-        except:
-            start_date = datetime.strptime("2026-08-06", "%Y-%m-%d")
-            end_date = datetime.strptime("2026-08-06", "%Y-%m-%d")
-
         current_date = start_date
         lat = 29.072967
         lng = -110.955919
@@ -301,7 +309,7 @@ def generar_excel():
             date_str = current_date.strftime("%Y-%m-%d")
             
             dt_start = datetime.strptime(f"{date_str} 00:00:00", "%Y-%m-%d %H:%M:%S")
-            dt_end = datetime.strptime(f"{date_str} {23:59:00}", "%Y-%m-%d %H:%M:%S")
+            dt_end = datetime.strptime(f"{date_str} 23:59:00", "%Y-%m-%d %H:%M:%S")
             
             curr_time = dt_start
             minute_counter = 0
@@ -327,10 +335,9 @@ def generar_excel():
                         detalle = "-"
                         estado_anterior = "Ralentí"
                     else:
-                        # Simulamos velocidades que pueden superar el límite configurado para probar la alerta
                         speed = random.randint(55, int(limite_vel + 15))
                         
-                        # EVALUACIÓN DEL LÍMITE DE VELOCIDAD CONFIGURADO
+                        # Evaluación del límite de velocidad configurado
                         if speed > limite_vel:
                             evento = "Exceso de Velocidad"
                             detalle = f"Superó el límite de {limite_vel} km/h"
