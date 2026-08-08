@@ -238,14 +238,23 @@ def generar_excel():
         unit_name = request.args.get('unit_name', 'Unidad')
         f_in = request.args.get('fecha_inicio')
         
-        # Construcción manual de la URL para evitar que Python cambie %20 por '+'
-        # Este es el formato EXACTO que IDT necesita: 2026-08-06%2000:00:00
-        url = f"{BASE_URL}/route/list.json"
-        query_string = f"key={API_KEY}&unit_id={unit_id}&from={f_in}%2000:00:00&till={f_in}%2023:59:59&include[]=points"
-        final_url = f"{url}?{query_string}"
+        # Convertimos la fecha a marca de tiempo (Unix Timestamp en segundos)
+        # Esto elimina por completo cualquier error de formato de texto o zona horaria
+        start_dt = datetime.strptime(f"{f_in} 00:00:00", "%Y-%m-%d %H:%M:%S")
+        end_dt = datetime.strptime(f"{f_in} 23:59:59", "%Y-%m-%d %H:%M:%S")
         
-        # Petición GET directa
-        res = requests.get(final_url, timeout=45)
+        url = f"{BASE_URL}/route/list.json"
+        
+        # Enviamos la petición mediante POST con los timestamps como enteros
+        payload = {
+            'key': API_KEY,
+            'unit_id': unit_id,
+            'from': int(start_dt.timestamp()),
+            'till': int(end_dt.timestamp()),
+            'include[]': 'points'
+        }
+        
+        res = requests.post(url, data=payload, timeout=45)
         data = res.json()
         
         wb = openpyxl.Workbook()
@@ -254,20 +263,23 @@ def generar_excel():
         ws.append(["Vehículo", "Fecha", "Latitud", "Longitud", "Velocidad (km/h)"])
         
         if 'error' in data:
-            ws.append(["FALLO API", str(data.get('error')), final_url])
+            ws.append(["FALLO POST API", str(data.get('error')), str(payload)])
         else:
             units = data.get('data', {}).get('units', [])
             if not units:
-                ws.append(["SIN UNIDADES", "La API respondió, pero no hay unidades.", final_url])
+                ws.append(["SIN UNIDADES", "La API respondió por POST, pero no hay unidades.", str(payload)])
             else:
                 points = units[0].get('points', [])
-                for p in points:
-                    ws.append([unit_name, p.get('time'), p.get('lat'), p.get('lng'), p.get('speed', 0)])
+                if not points:
+                    ws.append(["SIN PUNTOS", "La unidad no registró telemetría en esta fecha.", str(payload)])
+                else:
+                    for p in points:
+                        ws.append([unit_name, p.get('time'), p.get('lat'), p.get('lng'), p.get('speed', 0)])
         
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
         return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                         as_attachment=True, download_name="Reporte_Final.xlsx")
+                         as_attachment=True, download_name="Reporte_Minuto_a_Minuto.xlsx")
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f'Error técnico: {str(e)}'}), 500
