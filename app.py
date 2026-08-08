@@ -236,10 +236,10 @@ def generar_excel():
     try:
         unit_id = request.args.get('unit_id')
         unit_name = request.args.get('unit_name', 'Unidad')
-        f_in = request.args.get('fecha_inicio') # Ej: 2026-08-06
+        f_in = request.args.get('fecha_inicio')
         
-        # EL SECRETO: IDT rechaza las horas en /route/list.json, solo quiere la fecha YYYY-MM-DD
-        final_url = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={f_in}&till={f_in}&include[]=points"
+        # Probamos con el estándar alternativo de IDT para rutas: 'date_from' y 'date_till'
+        final_url = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&date_from={f_in}&date_till={f_in}&include[]=points"
         
         res = requests.get(final_url, timeout=45)
         data = res.json()
