@@ -376,254 +376,35 @@ def api_unidades():
 
 @app.route('/generar_excel')
 def generar_excel():
+    unit_id = request.args.get('unit_id')
+    f_in = request.args.get('fecha_inicio')
+    f_fin = request.args.get('fecha_fin')
+    
+    # URL al endpoint de rutas
+    url = f"{BASE_URL}/route/list.json"
+    params = {
+        'key': API_KEY,
+        'unit_id': unit_id,
+        'from': f"{f_in} 00:00:00",
+        'till': f"{f_fin} 23:59:59",
+        'include[]': ['points', 'summary']
+    }
+    
     try:
-        unit_id = request.args.get('unit_id')
-        unit_name = request.args.get('unit_name', f'Unidad {unit_id}')
-        fecha_inicio = request.args.get('fecha_inicio')
-        fecha_fin = request.args.get('fecha_fin')
-        hora_inicio = request.args.get('hora_inicio', '00:00')
-        hora_fin = request.args.get('hora_fin', '23:59')
-
-        if not unit_id or not fecha_inicio or not fecha_fin:
-            return jsonify({'error': 'Faltan parámetros requeridos'}), 400
-
-        try:
-            start_dt = datetime.strptime(f"{fecha_inicio} {hora_inicio}", "%Y-%m-%d %H:%M")
-            end_dt = datetime.strptime(f"{fecha_fin} {hora_fin}", "%Y-%m-%d %H:%M")
-        except Exception as e:
-            return jsonify({'error': f'Formato de fecha u hora inválido: {str(e)}'}), 400
-
-        str_from = f"{fecha_inicio} {hora_inicio}:00"
-        str_till = f"{fecha_fin} {hora_fin}:59"
-        sec_from = int(start_dt.timestamp())
-        sec_till = int(end_dt.timestamp())
-
-        alertas = []
-        try:
-            r_alerts = requests.get(f"{BASE_URL}/alert/list.json", params={
-                'key': API_KEY, 'unit_id': unit_id, 'from': sec_from, 'till': sec_till
-            }, timeout=15)
-            if r_alerts.ok:
-                data_a = r_alerts.json()
-                alertas = data_a.get('data', {}).get('alerts', []) or data_a.get('alerts', []) or []
-        except Exception: pass
-
-        url = f"{BASE_URL}/route/list.json"
-        params = {
-            'key': API_KEY,
-            'unit_id': unit_id,
-            'from': str_from,
-            'till': str_till,
-            'include[]': ['points', 'decoded_route', 'stops', 'summary']
-        }
-
-        route_json = None
-        try:
-            res = requests.get(url, params=params, timeout=30)
-            if res.ok: 
-                route_json = res.json()
-        except Exception: pass
-
-        if not route_json or not route_json.get('data', {}).get('units'):
-            params_alt = {
-                'key': API_KEY,
-                'unit_id': unit_id,
-                'from': f"{fecha_inicio} 00:00:00",
-                'till': f"{fecha_fin} 23:59:59",
-                'include[]': ['points', 'decoded_route', 'stops', 'summary']
-            }
-            try:
-                res = requests.get(url, params=params_alt, timeout=30)
-                if res.ok: route_json = res.json()
-            except Exception: pass
-
-        raw_points, official_dist, official_drive, official_stop, official_idle = extraer_puntos_y_resumen(route_json)
-
-        if not raw_points:
-            try:
-                r_unit = requests.get(f"{BASE_URL}/unit/data.json", params={'key': API_KEY, 'unit_id': unit_id}, timeout=15)
-                if r_unit.ok:
-                    u_data = r_unit.json().get('data', {}).get('units', [{}])[0]
-                    lp = u_data.get('last_point', u_data)
-                    lat_val = float(lp.get('lat', 0))
-                    lng_val = float(lp.get('lng', 0))
-                    spd_val = float(lp.get('speed', 0))
-                    addr_val = lp.get('address', 'Sonora, Mexico')
-                    if lat_val != 0 and lng_val != 0:
-                        raw_points.append({
-                            'timestamp': start_dt.timestamp(),
-                            'lat': lat_val,
-                            'lng': lng_val,
-                            'speed': spd_val,
-                            'address': addr_val,
-                            'acc': 1,
-                            'is_stop': False
-                        })
-            except Exception: pass
-
-        if not raw_points:
-            fallback_lat, fallback_lng, fallback_address = 29.0729673, -110.9559192, "Sonora, Mexico"
-            raw_points.append({
-                'timestamp': start_dt.timestamp(),
-                'lat': fallback_lat,
-                'lng': fallback_lng,
-                'speed': 0,
-                'address': fallback_address,
-                'acc': 0,
-                'is_stop': True
-            })
-            official_dist = 0.0
-            official_drive = 0
-            official_stop = int((end_dt - start_dt).total_seconds())
-            official_idle = 0
-
-        raw_points.sort(key=lambda x: x['timestamp'])
-
-        rows = []
-        max_velocidad = 0
-        minutos_movimiento = 0
-        minutos_ralenti = 0
-        minutos_detenido = 0
-        recorrido_total_km = 0.0
-
-        curr_ts = start_dt.timestamp()
-        end_ts = end_dt.timestamp()
-
-        p_idx = 0
-        n_pts = len(raw_points)
-        prev_lat, prev_lng = None, None
-
-        while curr_ts <= end_ts:
-            while p_idx < n_pts - 1 and raw_points[p_idx + 1]['timestamp'] <= curr_ts:
-                p_idx += 1
-
-            pA = raw_points[p_idx]
-            pB = raw_points[p_idx + 1] if p_idx < n_pts - 1 else pA
-
-            dt_gap = pB['timestamp'] - pA['timestamp']
-            dist_gap = haversine(pA['lat'], pA['lng'], pB['lat'], pB['lng'])
-
-            if pA.get('is_stop') or dt_gap > 300 or dist_gap < 0.05:
-                cur_lat = pA['lat']
-                cur_lng = pA['lng']
-                speed_final = int(round(pA.get('speed', 0)))
-                acc_state = pA.get('acc', 0)
-            else:
-                alpha = (curr_ts - pA['timestamp']) / dt_gap if dt_gap > 0 else 0.0
-                cur_lat = pA['lat'] + alpha * (pB['lat'] - pA['lat'])
-                cur_lng = pA['lng'] + alpha * (pB['lng'] - pA['lng'])
-
-                speed_leg = (dist_gap / (dt_gap / 3600.0)) if dt_gap > 0 else 0.0
-                speed_raw = pA.get('speed', 0.0) + alpha * (pB.get('speed', 0.0) - pA.get('speed', 0.0)) if pB.get('speed') is not None else pA.get('speed', 0.0)
-                speed_final = int(round(max(speed_raw, speed_leg)))
-                acc_state = 1
-
-            if speed_final > max_velocidad:
-                max_velocidad = speed_final
-
-            dt_item = datetime.fromtimestamp(curr_ts)
-            fecha_formatted = dt_item.strftime("%Y-%m-%d %H:%M:00")
-
-            alerta_match = None
-            for a in alertas:
-                a_str = a.get('gmt') or a.get('time') or ''
-                a_ts = parse_point_timestamp({'time': a_str, 'gmt': a.get('gmt')})
-                if a_ts and abs(a_ts - curr_ts) <= 60:
-                    alerta_match = a
-                    break
-
-            if alerta_match is not None:
-                evento = "🚨 Exceso de velocidad"
-                msg = alerta_match.get('msg') or alerta_match.get('title') or 'Notificación de exceso de velocidad'
-                v_val = alerta_match.get('value') or speed_final
-                detalle = f"Notificación IDT: {msg} ({v_val} km/h)"
-                minutos_movimiento += 1
-            elif speed_final > 3:
-                evento = "En movimiento"
-                detalle = "-"
-                minutos_movimiento += 1
-            elif acc_state == 1:
-                evento = "Ralentí / Motor ON"
-                detalle = "-"
-                minutos_ralenti += 1
-            else:
-                evento = "Apagado / Detenido"
-                detalle = "-"
-                minutos_detenido += 1
-
-            direccion = pA.get('address', 'Sonora, Mexico')
-            ciudad = ""
-            if ',' in direccion:
-                partes = direccion.split(',')
-                if len(partes) >= 2:
-                    ciudad = partes[-2].strip()
-
-            maps_url = f"https://www.google.com/maps?q={cur_lat},{cur_lng}"
-
-            if prev_lat is not None and (prev_lat != cur_lat or prev_lng != cur_lng):
-                recorrido_total_km += haversine(prev_lat, prev_lng, cur_lat, cur_lng)
-
-            prev_lat, prev_lng = cur_lat, cur_lng
-
-            rows.append([
-                unit_name,
-                fecha_formatted,
-                direccion,
-                ciudad,
-                speed_final,
-                evento,
-                detalle,
-                maps_url,
-                cur_lng,
-                cur_lat
-            ])
-
-            curr_ts += 60.0
-
-        str_distancia = f"{official_dist:.1f} km" if official_dist and official_dist > 0 else f"{recorrido_total_km:.2f} km"
-        str_conduciendo = format_sec_to_hm(official_drive) if official_drive and official_drive > 0 else f"{minutos_movimiento // 60}h {minutos_movimiento % 60}m"
-        str_detenido = format_sec_to_hm(official_stop) if official_stop and official_stop > 0 else f"{minutos_detenido // 60}h {minutos_detenido % 60}m"
-        str_ralenti = format_sec_to_hm(official_idle) if official_idle and official_idle > 0 else f"{minutos_ralenti // 60}h {minutos_ralenti % 60}m"
-
+        res = requests.get(url, params=params, timeout=45)
+        data = res.json()
+        
+        # Creamos un Excel de diagnóstico
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "Reporte"
-
-        ws.append(["", "", "Histórico Minuto a Minuto con Excesos de Velocidad"])
-        ws.append([])
-        ws.append(["", "", unit_name])
-        ws.append([])
-        ws.append(["Distancia (Mapon):", str_distancia, "Conduciendo:", str_conduciendo, "Fecha Inicial:", f"{fecha_inicio} {hora_inicio}"])
-        ws.append(["Velocidad Máxima:", f"{max_velocidad} km/h", "Detenido:", str_detenido, "Fecha Final:", f"{fecha_fin} {hora_fin}"])
-        ws.append(["Ralentí Excesivo:", str_ralenti, "Horas Trabajadas:", str_conduciendo, "Consumo Combustible:", "N/A"])
-        ws.append(["Costo Combustible:", "N/A"])
-        ws.append([])
-        ws.append(["Vehículo", "Fecha", "Dirección", "Ciudad", "Velocidad (Km/h)", "Evento", "Detalle", "Mapa", "Longitud", "Latitud"])
-
-        for r in rows:
-            row_copy = list(r)
-            row_copy[7] = f'=HYPERLINK("{r[7]}", "Ver en Mapa")'
-            ws.append(row_copy)
-
-        col_widths = [32, 20, 45, 20, 15, 24, 35, 18, 15, 15]
-        for col_idx, width in enumerate(col_widths, start=1):
-            ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = width
-
-        buffer = io.BytesIO()
-        wb.save(buffer)
-        buffer.seek(0)
-
-        safe_name = "".join([c if c.isalnum() else "_" for c in unit_name])
-        filename = f"Reporte_Minuto_a_Minuto_{safe_name}_{fecha_inicio}.xlsx"
-
-        return send_file(
-            buffer,
-            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            as_attachment=True,
-            download_name=filename
-        )
+        ws.append(["Diagnóstico de API"])
+        # Escribimos el JSON crudo en la celda A2
+        ws.append([str(data)[:30000]]) # Limitamos a 30k caracteres
+        
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
+                         as_attachment=True, download_name="Diagnostico.xlsx")
     except Exception as e:
-        return jsonify({'error': f'Error crítico en el servidor: {str(e)}'}), 500
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+        return jsonify({'error': f'Error: {str(e)}'}), 500
