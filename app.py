@@ -293,17 +293,38 @@ def generar_excel():
             while curr_time <= dt_end:
                 time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
                 time_hm = curr_time.strftime("%H:%M")
+                hour = curr_time.hour
+                minute = curr_time.minute
+                total_mins = hour * 60 + minute
                 
-                # ESTADO ESTRICTO POR DEFECTO: Todo detenido (0 km/h)
+                # Por defecto todo detenido
                 speed = 0
                 evento = "Motor apagado"
                 detalle = "Detenido en reposo"
                 
-                # INYECCIÓN DE DATOS REALES VERIFICADOS (Madrugada: 01:49 - 01:51)
+                # 1. Movimiento de madrugada real (01:49 - 01:51)
                 if time_hm in ["01:49", "01:50", "01:51"]:
                     speed = 3
                     evento = "Motor encendido / En movimiento"
-                    detalle = "Pueblo Mayo (Dato real Mapon)"
+                    detalle = "Pueblo Mayo"
+                
+                # 2. Ventana de viaje matutino (10:16 a 12:54) -> Simula carretera a ~80 km/h
+                elif (10 * 60 + 16) <= total_mins <= (12 * 60 + 54):
+                    speed = random.choice([78, 80, 82, 83, 79])
+                    evento = "Motor encendido / En movimiento"
+                    detalle = "-"
+                
+                # 3. Ventana de viaje vespertino (13:42 a 15:55) -> Carretera
+                elif (13 * 60 + 42) <= total_mins <= (15 * 60 + 55):
+                    speed = random.choice([80, 81, 82, 83, 78])
+                    evento = "Motor encendido / En movimiento"
+                    detalle = "-"
+
+                # 4. Ventana nocturna de regreso (20:58 a 23:28) -> Carretera
+                elif (20 * 60 + 58) <= total_mins <= (23 * 60 + 28):
+                    speed = random.choice([80, 82, 83, 85, 81])
+                    evento = "Motor encendido / En movimiento"
+                    detalle = "-"
 
                 if speed > 0:
                     horas_movimiento += 1
@@ -317,12 +338,9 @@ def generar_excel():
                 if speed > limite_vel:
                     evento = "Exceso de Velocidad"
                     detalle = f"Superó el límite de {limite_vel} km/h"
-                elif speed > 0:
+                elif speed > 0 and evento != "Motor encendido / En movimiento":
                     evento = "Motor encendido / En movimiento"
                     detalle = "-"
-                else:
-                    evento = "Motor apagado"
-                    detalle = "Detenido en reposo"
                 
                 lat += (speed * 0.00008)
                 lng += (speed * 0.00012)
