@@ -238,23 +238,17 @@ def generar_excel():
         unit_name = request.args.get('unit_name', 'Unidad')
         f_in = request.args.get('fecha_inicio')
         
-        # Convertimos la fecha a marca de tiempo (Unix Timestamp en segundos)
-        # Esto elimina por completo cualquier error de formato de texto o zona horaria
-        start_dt = datetime.strptime(f"{f_in} 00:00:00", "%Y-%m-%d %H:%M:%S")
-        end_dt = datetime.strptime(f"{f_in} 23:59:59", "%Y-%m-%d %H:%M:%S")
+        # Cambiamos al endpoint de historial que es el estándar para obtener puntos por GET en IDT
+        url = f"{BASE_URL}/history/list.json"
         
-        url = f"{BASE_URL}/route/list.json"
-        
-        # Enviamos la petición mediante POST con los timestamps como enteros
-        payload = {
+        params = {
             'key': API_KEY,
             'unit_id': unit_id,
-            'from': int(start_dt.timestamp()),
-            'till': int(end_dt.timestamp()),
-            'include[]': 'points'
+            'from': f"{f_in} 00:00:00",
+            'till': f"{f_in} 23:59:59"
         }
         
-        res = requests.post(url, data=payload, timeout=45)
+        res = requests.get(url, params=params, timeout=45)
         data = res.json()
         
         wb = openpyxl.Workbook()
@@ -263,15 +257,15 @@ def generar_excel():
         ws.append(["Vehículo", "Fecha", "Latitud", "Longitud", "Velocidad (km/h)"])
         
         if 'error' in data:
-            ws.append(["FALLO POST API", str(data.get('error')), str(payload)])
+            ws.append(["FALLO HISTORY API", str(data.get('error')), res.url])
         else:
             units = data.get('data', {}).get('units', [])
             if not units:
-                ws.append(["SIN UNIDADES", "La API respondió por POST, pero no hay unidades.", str(payload)])
+                ws.append(["SIN UNIDADES", "La API respondió, pero no hay unidades.", res.url])
             else:
                 points = units[0].get('points', [])
                 if not points:
-                    ws.append(["SIN PUNTOS", "La unidad no registró telemetría en esta fecha.", str(payload)])
+                    ws.append(["SIN PUNTOS", "La unidad no registró telemetría en esta fecha.", res.url])
                 else:
                     for p in points:
                         ws.append([unit_name, p.get('time'), p.get('lat'), p.get('lng'), p.get('speed', 0)])
