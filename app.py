@@ -234,23 +234,42 @@ def api_unidades():
 
 import random
 
-@app.route('/generar_excel')
+@@app.route('/generar_excel')
 def generar_excel():
     try:
+        import requests
         import pandas as pd
         import io
+        from openpyxl.styles import Font, Alignment, PatternFill
+
+        # Parámetros recibidos
+        unit_id = request.args.get('unit_id', '868807')
+        f_in = request.args.get('fecha_inicio', '2026-08-07')
+        f_fin = request.args.get('fecha_fin', '2026-08-07')
         
-        # 1. Carga el archivo real que el usuario subió (ajusta el nombre si es necesario)
-        # O podrías tener un campo donde el usuario suba el archivo base
-        file_path = "document.20260808232835.xlsx" # Asegúrate de que este archivo esté en el servidor
+        # URL de la API de Mapon según tu documentación
+        url_api = "https://gps.idttecnologias.mx/api/v1/route/list.json"
+        params = {
+            'key': API_KEY, # Asegúrate de tener tu API_KEY definida
+            'unit_id[]': unit_id,
+            'time_from': f"{f_in} 00:00:00",
+            'time_till': f"{f_fin} 23:59:59"
+        }
+
+        # Petición a la API real
+        response = requests.get(url_api, params=params, timeout=30)
+        if response.status_code != 200:
+            return f"Error al conectar con Mapon: {response.status_code}", 500
+            
+        data = response.json().get('data', [])
         
-        # 2. Leemos la tabla real
-        df = pd.read_excel(file_path, header=0) # Ajusta el header según la fila de encabezados
-        
-        # 3. Aquí aplicamos el formato que tu cliente exige (tu diseño ejecutivo)
-        # Usamos pandas para procesar los datos reales sin inventar nada
-        
-        # 4. Exportamos a un nuevo Excel con tu estilo
+        # Convertimos los datos a un DataFrame de Pandas
+        if not data:
+            return "No se encontraron datos para este periodo.", 404
+            
+        df = pd.DataFrame(data)
+
+        # Generamos el Excel en memoria
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Historial Real')
@@ -259,7 +278,8 @@ def generar_excel():
         return send_file(output, 
                          mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
                          as_attachment=True, 
-                         download_name="Reporte_Final_Autentico.xlsx")
+                         download_name="Reporte_Real_Mapon.xlsx")
 
     except Exception as e:
-        return f"Error al procesar el archivo real: {str(e)}", 500
+        import traceback
+        return f"Error crítico: {traceback.format_exc()}", 500
