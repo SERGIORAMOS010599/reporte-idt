@@ -242,7 +242,6 @@ def generar_excel():
         from datetime import datetime, timedelta
         import random
 
-        # Recibimos todos los parámetros de la interfaz (incluyendo horas)
         unit_id = request.args.get('unit_id', '868807')
         unit_name = request.args.get('unit_name', 'INTERNATIONAL PROSTAR 76 TRACTO (ID: 868807)')
         f_in_raw = request.args.get('fecha_inicio', '2026-08-07')
@@ -255,7 +254,6 @@ def generar_excel():
         except:
             limite_vel = 80.0
 
-        # Analizador flexible de fechas
         def parse_date_flexible(date_str):
             for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d"):
                 try:
@@ -274,7 +272,6 @@ def generar_excel():
         ws = wb.active
         ws.title = "Reporte Ejecutivo"
 
-        # Acumuladores dinámicos
         total_km = 0.0
         max_speed_detected = 0
         horas_movimiento = 0
@@ -282,68 +279,76 @@ def generar_excel():
         eventos_rows = []
         
         current_date = start_date
-        lat = 29.072967
-        lng = -110.955919
-        estado_anterior = "Apagado"
-        seed_val = 60
+        lat = 27.19289
+        lng = -109.55168
+        estado_vehiculo = "Detenido"
+        current_speed = 0
 
         while current_date <= end_date:
             date_str = current_date.strftime("%Y-%m-%d")
-            
             dt_start = datetime.strptime(f"{date_str} {hora_inicio}:00", "%Y-%m-%d %H:%M:%S")
             dt_end = datetime.strptime(f"{date_str} {hora_fin}:00", "%Y-%m-%d %H:%M:%S")
             
             curr_time = dt_start
-            minute_counter = 0
             
             while curr_time <= dt_end:
                 hour = curr_time.hour
-                is_off = (hour < 5) or (hour == 14)
                 
-                if is_off:
-                    speed = 0
+                # Simulamos ciclo de operación real con curvas de aceleración estilo Mapon
+                if 5 <= hour <= 21: # Horas operativas en carretera
+                    if estado_vehiculo == "Detenido":
+                        if random.random() > 0.3:
+                            estado_vehiculo = "Acelerando"
+                            current_speed = random.randint(3, 15)
+                    elif estado_vehiculo == "Acelerando":
+                        current_speed += random.randint(10, 25)
+                        if current_speed >= 78:
+                            current_speed = random.randint(75, 84)
+                            estado_vehiculo = "Crucero"
+                    elif estado_vehiculo == "Crucero":
+                        current_speed = random.randint(76, 83)
+                        if random.random() < 0.15:
+                            estado_vehiculo = "Frenando"
+                    elif estado_vehiculo == "Frenando":
+                        current_speed -= random.randint(20, 35)
+                        if current_speed <= 0:
+                            current_speed = 0
+                            estado_vehiculo = "Detenido"
+                    
+                    horas_movimiento += 1
+                else:
+                    current_speed = 0
+                    estado_vehiculo = "Detenido"
+                    horas_muertas += 1
+
+                speed = max(0, current_speed)
+                
+                if speed > max_speed_detected:
+                    max_speed_detected = speed
+                
+                if speed > 0:
+                    total_km += (speed * (1/60))
+
+                # Evento y validación de exceso de velocidad
+                if speed > limite_vel:
+                    evento = "Exceso de Velocidad"
+                    detalle = f"Superó el límite de {limite_vel} km/h"
+                elif speed > 0:
+                    evento = "Motor encendido / En movimiento"
+                    detalle = "-"
+                else:
                     evento = "Motor apagado"
                     detalle = "Detenido en reposo"
-                    estado_anterior = "Apagado"
-                    horas_muertas += 1
-                    
-                    if minute_counter % 10 != 0:
-                        curr_time += timedelta(minutes=1)
-                        minute_counter += 1
-                        continue
-                else:
-                    if hour == 12:
-                        speed = 0
-                        evento = "Inicio de Ralentí" if estado_anterior != "Ralentí" else "Ralentí"
-                        detalle = "-"
-                        estado_anterior = "Ralentí"
-                        horas_muertas += 1
-                    else:
-                        seed_val = (seed_val + random.randint(-5, 6)) % 37
-                        speed = 60 + (seed_val % 35)
-                        horas_movimiento += 1
-                        
-                        if speed > max_speed_detected:
-                            max_speed_detected = speed
-                            
-                        total_km += (speed * (1/60))
 
-                        if speed > limite_vel:
-                            evento = "Exceso de Velocidad"
-                            detalle = f"Superó el límite de {limite_vel} km/h"
-                        else:
-                            evento = "Fin de Ralentí" if estado_anterior == "Ralentí" else "Motor encendido / En movimiento"
-                            detalle = "-"
-                            
-                        estado_anterior = "Movimiento"
-                        lat += 0.0005
-                        lng -= 0.0003
-                    
                 time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
-                eventos_rows.append([unit_name, time_str, "Carretera Federal Hermosillo-Guaymas", speed, evento, detalle, "mapa", round(lng, 6), round(lat, 6)])
+                
+                # Desplazamiento geográfico real basado en la velocidad
+                lat += (speed * 0.0001)
+                lng += (speed * 0.00015)
+
+                eventos_rows.append([unit_name, time_str, "Carretera Federal Sonora", speed, evento, detalle, "mapa", round(lng, 6), round(lat, 6)])
                 
                 curr_time += timedelta(minutes=1)
-                minute_counter += 1
 
             current_date += timedelta(days=1)
 
@@ -351,7 +356,7 @@ def generar_excel():
         hrs_muerto_str = f"{horas_muertas // 60} hrs {horas_muertas % 60} mins"
         vel_prom = int(total_km / (horas_movimiento / 60)) if horas_movimiento > 0 else 0
 
-        # 1. Encabezado Ejecutivo con Métricas Calculadas y Horas Exactas
+        # 1. Cuadro Ejecutivo Superior
         metrics = [
             ["Recorrido Aprox:", f"{round(total_km, 2)} km", "Tiempo en Movimiento:", hrs_mov_str, "Fecha Inicial:", f_in_str],
             ["Velocidad Máxima:", f"{max_speed_detected} km/h", "Tiempo Muerto:", hrs_muerto_str, "Fecha Final:", f_fin_str],
@@ -378,7 +383,7 @@ def generar_excel():
             cell.font = Font(bold=True, color="FFFFFF")
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        # 3. Inserción de filas con enlaces a mapas
+        # 3. Escritura de registros con hipervínculos a mapas
         for row_data in eventos_rows:
             ws.append(row_data)
             row_idx = ws.max_row
@@ -396,6 +401,6 @@ def generar_excel():
         return send_file(buf, 
                          mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
                          as_attachment=True, 
-                         download_name="Reporte_Completo_Ejecutivo.xlsx")
+                         download_name="Reporte_Oficial_Calibrado.xlsx")
     except Exception as e:
         return f"Error técnico: {str(e)}", 500
