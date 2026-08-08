@@ -266,7 +266,7 @@ def generar_excel():
         ws.cell(row=4, column=1, value="Clase: Troque de 2 ejes, 6 llantas (dobles traseras)").font = Font(bold=True)
         ws.append([]) # Fila vacía de separación
 
-        # 2. Encabezados de la Tabla Detallada
+        # 2. Encabezados de la Tabla Detallada en el orden correcto
         headers = ["Vehículo", "Fecha", "Dirección", "Velocidad (Km/h)", "Evento", "Detalle", "Mapa", "Longitud", "Latitud"]
         ws.append(headers)
 
@@ -275,8 +275,9 @@ def generar_excel():
             cell = ws.cell(row=6, column=col_idx)
             cell.fill = header_fill
             cell.font = Font(bold=True, color="FFFFFF")
+            cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        # 3. Generación del Histórico completo recorriendo el rango seleccionado
+        # 3. Generación del Histórico completo recorriendo el rango seleccionado día por día
         try:
             start_date = datetime.strptime(f_in.strip(), "%Y-%m-%d")
             end_date = datetime.strptime(f_fin.strip(), "%Y-%m-%d")
@@ -287,11 +288,9 @@ def generar_excel():
         current_date = start_date
         lat, lng = 20.0282, -98.72601
 
-        # Bucle inclusivo para abarcar absolutamente todo el rango de días seleccionado
         while current_date <= end_date:
             date_str = current_date.strftime("%Y-%m-%d")
             
-            # Eventos operativos reales detallados para cada día del rango
             daily_events = [
                 ("00:07:16", 0, "Motor apagado", "Detenido: 9 hrs 50 mins"),
                 ("09:57:32", 0, "Motor encendido", "-"),
@@ -303,14 +302,18 @@ def generar_excel():
             
             for time_t, vel, evento, detalle in daily_events:
                 full_fecha = f"{date_str} {time_t}"
+                
+                # Respetamos rigurosamente el orden de las columnas: Longitud y Latitud van separadas al final
                 ws.append([unit_name, full_fecha, "Carretera Pachuca-Sahagún, Santa María", vel, evento, detalle, "mapa", lng, lat])
                 
-                # Asignar hipervínculo interactivo funcional en la columna "Mapa" (columna 7)
                 row_idx = ws.max_row
+                
+                # Hipervínculo interactivo en la columna "Mapa" (columna 7)
                 map_cell = ws.cell(row=row_idx, column=7)
                 map_cell.hyperlink = f"https://www.google.com/maps?q={lat},{lng}"
                 map_cell.font = Font(color="0000FF", underline="single")
-                
+                map_cell.alignment = Alignment(horizontal="center")
+
                 lat += 0.0001
                 lng += 0.0001
 
@@ -323,6 +326,6 @@ def generar_excel():
         return send_file(buf, 
                          mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
                          as_attachment=True, 
-                         download_name="Reporte_Historico_Completo.xlsx")
+                         download_name="Reporte_Historico_Ejectutivo.xlsx")
     except Exception as e:
         return f"Error técnico: {str(e)}", 500
