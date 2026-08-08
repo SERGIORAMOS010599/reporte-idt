@@ -236,40 +236,45 @@ import random
 
 @app.route('/generar_excel')
 def generar_excel():
-    try:
-        import requests
-        import pandas as pd
-        import io
-        from openpyxl.styles import Font, Alignment, PatternFill
+    import traceback
+    import requests
+    import pandas as pd
+    import io
 
-        # Parámetros recibidos
+    try:
+        # Verificamos si las variables globales existen
+        global API_KEY, BASE_URL
+        if 'API_KEY' not in globals() or not API_KEY:
+            return "Error crítico: La variable API_KEY no está definida en app.py", 500
+        if 'BASE_URL' not in globals() or not BASE_URL:
+            return "Error crítico: La variable BASE_URL no está definida en app.py", 500
+
         unit_id = request.args.get('unit_id', '868807')
         f_in = request.args.get('fecha_inicio', '2026-08-07')
         f_fin = request.args.get('fecha_fin', '2026-08-07')
         
-        # URL de la API de Mapon según tu documentación
-        url_api = "https://gps.idttecnologias.mx/api/v1/route/list.json"
+        url_api = f"{BASE_URL}/route/list.json"
         params = {
-            'key': API_KEY, # Asegúrate de tener tu API_KEY definida
+            'key': API_KEY,
             'unit_id[]': unit_id,
             'time_from': f"{f_in} 00:00:00",
             'time_till': f"{f_fin} 23:59:59"
         }
 
-        # Petición a la API real
         response = requests.get(url_api, params=params, timeout=30)
-        if response.status_code != 200:
-            return f"Error al conectar con Mapon: {response.status_code}", 500
-            
-        data = response.json().get('data', [])
         
-        # Convertimos los datos a un DataFrame de Pandas
+        # Si la API responde con error, te mostramos el contenido exacto de Mapon
+        if response.status_code != 200:
+            return f"Error en la API de Mapon (Código {response.status_code}): {response.text}", 500
+            
+        res_json = response.json()
+        data = res_json.get('data', [])
+        
         if not data:
-            return "No se encontraron datos para este periodo.", 404
+            return f"La API respondió OK pero no hay datos para la unidad {unit_id} en este periodo. Respuesta: {res_json}", 200
             
         df = pd.DataFrame(data)
 
-        # Generamos el Excel en memoria
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Historial Real')
@@ -281,5 +286,5 @@ def generar_excel():
                          download_name="Reporte_Real_Mapon.xlsx")
 
     except Exception as e:
-        import traceback
-        return f"Error crítico: {traceback.format_exc()}", 500
+        # Esto imprimirá el error técnico exacto en tu navegador
+        return f"Excepción capturada en Python:\n\n{traceback.format_exc()}", 500
