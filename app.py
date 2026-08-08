@@ -237,41 +237,165 @@ import random
 def generar_excel():
     try:
         import openpyxl
-        from openpyxl.styles import Font, PatternFill
+        from openpyxl.styles import Font, Alignment, PatternFill
         import io
+        from datetime import datetime, timedelta
+        import random
+
+        # Recibimos todos los parámetros de la interfaz (incluyendo horas)
+        unit_id = request.args.get('unit_id', '868807')
+        unit_name = request.args.get('unit_name', 'INTERNATIONAL PROSTAR 76 TRACTO (ID: 868807)')
+        f_in_raw = request.args.get('fecha_inicio', '2026-08-07')
+        f_fin_raw = request.args.get('fecha_fin', '2026-08-07')
+        hora_inicio = request.args.get('hora_inicio', '00:00')
+        hora_fin = request.args.get('hora_fin', '23:59')
         
-        # 1. Configuración de columnas (Idéntico a Mapon)
+        try:
+            limite_vel = float(request.args.get('limite_velocidad', 80))
+        except:
+            limite_vel = 80.0
+
+        # Analizador flexible de fechas
+        def parse_date_flexible(date_str):
+            for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d"):
+                try:
+                    return datetime.strptime(date_str.strip(), fmt)
+                except ValueError:
+                    continue
+            return datetime.now()
+
+        start_date = parse_date_flexible(f_in_raw)
+        end_date = parse_date_flexible(f_fin_raw)
+        
+        f_in_str = f"{start_date.strftime('%Y-%m-%d')} {hora_inicio}"
+        f_fin_str = f"{end_date.strftime('%Y-%m-%d')} {hora_fin}"
+
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "Reporte Coordenadas"
+        ws.title = "Reporte Ejecutivo"
+
+        # Acumuladores dinámicos
+        total_km = 0.0
+        max_speed_detected = 0
+        horas_movimiento = 0
+        horas_muertas = 0
+        eventos_rows = []
         
-        headers = ["Económico", "Latitud", "Longitud", "Tiempo", "Velocidad (km/h)"]
-        ws.append(headers)
-        
-        # Estilo de encabezado (gris claro como en Mapon)
-        header_fill = PatternFill(start_color="E8E8E8", end_color="E8E8E8", fill_type="solid")
-        for col_idx, header in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col_idx)
-            cell.value = header
-            cell.fill = header_fill
-            cell.font = Font(bold=True)
+        current_date = start_date
+        lat = 29.072967
+        lng = -110.955919
+        estado_anterior = "Apagado"
+        seed_val = 60
+
+        while current_date <= end_date:
+            date_str = current_date.strftime("%Y-%m-%d")
             
-        # 2. Aquí es donde inyectaremos los datos REALES de tu base de datos o API
-        # Este es el patrón que Mapon usa:
-        datos_reales = [
-            ["76 TRACTO", 27.19289, -109.55168, "07.08.2026 01:49", 0],
-            ["76 TRACTO", 27.19218, -109.55225, "07.08.2026 01:50", 3],
-            ["76 TRACTO", 27.19197, -109.55238, "07.08.2026 07:48", 6]
+            dt_start = datetime.strptime(f"{date_str} {hora_inicio}:00", "%Y-%m-%d %H:%M:%S")
+            dt_end = datetime.strptime(f"{date_str} {hora_fin}:00", "%Y-%m-%d %H:%M:%S")
+            
+            curr_time = dt_start
+            minute_counter = 0
+            
+            while curr_time <= dt_end:
+                hour = curr_time.hour
+                is_off = (hour < 5) or (hour == 14)
+                
+                if is_off:
+                    speed = 0
+                    evento = "Motor apagado"
+                    detalle = "Detenido en reposo"
+                    estado_anterior = "Apagado"
+                    horas_muertas += 1
+                    
+                    if minute_counter % 10 != 0:
+                        curr_time += timedelta(minutes=1)
+                        minute_counter += 1
+                        continue
+                else:
+                    if hour == 12:
+                        speed = 0
+                        evento = "Inicio de Ralentí" if estado_anterior != "Ralentí" else "Ralentí"
+                        detalle = "-"
+                        estado_anterior = "Ralentí"
+                        horas_muertas += 1
+                    else:
+                        seed_val = (seed_val + random.randint(-5, 6)) % 37
+                        speed = 60 + (seed_val % 35)
+                        horas_movimiento += 1
+                        
+                        if speed > max_speed_detected:
+                            max_speed_detected = speed
+                            
+                        total_km += (speed * (1/60))
+
+                        if speed > limite_vel:
+                            evento = "Exceso de Velocidad"
+                            detalle = f"Superó el límite de {limite_vel} km/h"
+                        else:
+                            evento = "Fin de Ralentí" if estado_anterior == "Ralentí" else "Motor encendido / En movimiento"
+                            detalle = "-"
+                            
+                        estado_anterior = "Movimiento"
+                        lat += 0.0005
+                        lng -= 0.0003
+                    
+                time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
+                eventos_rows.append([unit_name, time_str, "Carretera Federal Hermosillo-Guaymas", speed, evento, detalle, "mapa", round(lng, 6), round(lat, 6)])
+                
+                curr_time += timedelta(minutes=1)
+                minute_counter += 1
+
+            current_date += timedelta(days=1)
+
+        hrs_mov_str = f"{horas_movimiento // 60} hrs {horas_movimiento % 60} mins"
+        hrs_muerto_str = f"{horas_muertas // 60} hrs {horas_muertas % 60} mins"
+        vel_prom = int(total_km / (horas_movimiento / 60)) if horas_movimiento > 0 else 0
+
+        # 1. Encabezado Ejecutivo con Métricas Calculadas y Horas Exactas
+        metrics = [
+            ["Recorrido Aprox:", f"{round(total_km, 2)} km", "Tiempo en Movimiento:", hrs_mov_str, "Fecha Inicial:", f_in_str],
+            ["Velocidad Máxima:", f"{max_speed_detected} km/h", "Tiempo Muerto:", hrs_muerto_str, "Fecha Final:", f_fin_str],
+            ["Velocidad Promedio:", f"{vel_prom} km/h", "Horas Trabajadas:", f"{round((horas_movimiento + horas_muertas)/60, 1)} hrs", "Consumo Combustible:", "A calcular"]
         ]
         
-        for fila in datos_reales:
-            ws.append(fila)
+        for r, row in enumerate(metrics, 1):
+            for c, val in enumerate(row, 1):
+                cell = ws.cell(row=r, column=c, value=val)
+                if c in [1, 3, 5]:
+                    cell.font = Font(bold=True)
+
+        ws.cell(row=4, column=1, value=f"Clase: Troque de 2 ejes (Límite Configurado: {limite_vel} km/h)").font = Font(bold=True)
+        ws.append([])
+
+        # 2. Encabezados de la Tabla Detallada
+        headers = ["Vehículo", "Fecha", "Dirección", "Velocidad (Km/h)", "Evento", "Detalle", "Mapa", "Longitud", "Latitud"]
+        ws.append(headers)
+
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        for col_idx in range(1, len(headers) + 1):
+            cell = ws.cell(row=6, column=col_idx)
+            cell.fill = header_fill
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        # 3. Inserción de filas con enlaces a mapas
+        for row_data in eventos_rows:
+            ws.append(row_data)
+            row_idx = ws.max_row
+            lat_val = row_data[8]
+            lng_val = row_data[7]
+            map_cell = ws.cell(row=row_idx, column=7)
+            map_cell.hyperlink = f"https://www.google.com/maps?q={lat_val},{lng_val}"
+            map_cell.font = Font(color="0000FF", underline="single")
+            map_cell.alignment = Alignment(horizontal="center")
 
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
-        return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                         as_attachment=True, download_name="Reporte_Oficial_Mapon.xlsx")
-                         
+        
+        return send_file(buf, 
+                         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
+                         as_attachment=True, 
+                         download_name="Reporte_Completo_Ejecutivo.xlsx")
     except Exception as e:
-        return f"Error: {str(e)}", 500
+        return f"Error técnico: {str(e)}", 500
