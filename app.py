@@ -231,71 +231,60 @@ def api_unidades():
         return jsonify(res.json().get('data', {}).get('units', []))
     except: return jsonify([]), 500
 
+import random
+
 @app.route('/generar_excel')
 def generar_excel():
     try:
-        # ... (parámetros y setup igual al anterior) ...
+        # ... (parámetros igual) ...
         unit_id = request.args.get('unit_id')
         unit_name = request.args.get('unit_name', 'Unidad')
         f_in = request.args.get('fecha_inicio')
         f_fin = request.args.get('fecha_fin', f_in)
-        h_in = request.args.get('hora_inicio', '00:00')
-        h_fin = request.args.get('hora_fin', '23:59')
-
+        
         start_date = datetime.strptime(f_in.strip(), "%Y-%m-%d")
         end_date = datetime.strptime(f_fin.strip(), "%Y-%m-%d")
         
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "Reporte Eventos Detallado"
+        ws.title = "Reporte Eventos"
         ws.append(["Vehículo", "Fecha", "Latitud", "Longitud", "Velocidad (km/h)", "Eventos"])
         
         base_lat, base_lng = 29.072967, -110.955919
-        
-        # Variable para controlar el estado anterior y detectar cambios
-        estado_anterior = "INICIO"
+        estado_anterior = "Apagado"
         
         current_date = start_date
         while current_date <= end_date:
             date_str = current_date.strftime("%Y-%m-%d")
-            dt_start = datetime.strptime(f"{date_str} {h_in}", "%Y-%m-%d %H:%M")
-            dt_end = datetime.strptime(f"{date_str} {h_fin}", "%Y-%m-%d %H:%M")
-            
-            curr_time = dt_start
-            while curr_time <= dt_end:
-                # Simulamos lógica: Hora 10 a 12 (ejemplo) unidad encendida pero detenida (Ralentí)
-                is_running = (curr_time.hour >= 6 and curr_time.hour <= 20)
-                is_stopped = (curr_time.hour >= 10 and curr_time.hour <= 12)
-                
-                if is_stopped:
-                    speed = 0
-                    evento = "Ralentí"
-                    # Detección de cambios de estado
-                    if estado_anterior != "Ralentí":
-                        evento = "Inicio de Ralentí"
-                    estado_anterior = "Ralentí"
-                elif is_running:
-                    speed = 80
-                    # Detección de fin de ralentí
-                    if estado_anterior == "Ralentí":
-                        evento = "Fin de Ralentí (Unidad en Movimiento)"
+            # Simulamos horas operativas (de 6am a 8pm)
+            for hour in range(0, 24):
+                for minute in range(0, 60):
+                    time_str = f"{date_str} {hour:02d}:{minute:02d}:00"
+                    
+                    # Lógica de operación real
+                    if 6 <= hour <= 20:
+                        if 10 <= hour <= 12: # Periodo de ralentí
+                            speed = 0
+                            evento = "Inicio de Ralentí" if estado_anterior != "Ralentí" else "Ralentí"
+                            estado_anterior = "Ralentí"
+                        else:
+                            # Velocidad variable entre 60 y 90 km/h
+                            speed = random.randint(60, 90)
+                            evento = "Fin de Ralentí" if estado_anterior == "Ralentí" else "Motor Encendido / En Movimiento"
+                            estado_anterior = "Movimiento"
+                            base_lat += 0.0002 # Avance sutil
                     else:
-                        evento = "Motor Encendido / En Movimiento"
-                    estado_anterior = "Movimiento"
-                else:
-                    speed = 0
-                    evento = "Motor Apagado"
-                    estado_anterior = "Apagado"
-                
-                ws.append([unit_name, curr_time.strftime("%Y-%m-%d %H:%M:%S"), base_lat, base_lng, speed, evento])
-                curr_time += timedelta(minutes=1)
-                
+                        speed = 0
+                        evento = "Motor Apagado"
+                        estado_anterior = "Apagado"
+                    
+                    ws.append([unit_name, time_str, round(base_lat, 6), round(base_lng, 6), speed, evento])
             current_date += timedelta(days=1)
             
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
         return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                         as_attachment=True, download_name="Reporte_Eventos_Ralenti.xlsx")
+                         as_attachment=True, download_name="Reporte_Realista.xlsx")
     except Exception as e:
         return jsonify({'error': f'Error técnico: {str(e)}'}), 500
