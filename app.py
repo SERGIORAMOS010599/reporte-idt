@@ -1,9 +1,10 @@
-from flask import Flask, request, jsonify, render_template_string, send_file
+from flask import Flask, render_template_string, request, send_file, jsonify
 import requests
 import openpyxl
+from openpyxl.styles import Font, Alignment, PatternFill
 import io
-import math
 from datetime import datetime, timedelta
+import random
 
 app = Flask(__name__)
 
