@@ -234,7 +234,7 @@ def api_unidades():
 
 import random
 
-@@app.route('/generar_excel')
+@app.route('/generar_excel')
 def generar_excel():
     try:
         import openpyxl
