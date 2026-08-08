@@ -393,6 +393,7 @@ def generar_excel():
     except Exception as e:
         return jsonify({'error': f'Formato de fecha u hora inválido: {str(e)}'}), 400
 
+    # Construcción robusta de parámetros de fecha para el endpoint route/list.json
     str_from = f"{fecha_inicio} {hora_inicio}:00"
     str_till = f"{fecha_fin} {hora_fin}:59"
     sec_from = int(start_dt.timestamp())
@@ -409,7 +410,7 @@ def generar_excel():
             alertas = data_a.get('data', {}).get('alerts', []) or data_a.get('alerts', []) or []
     except Exception as e: pass
 
-    # Petición principal usando parámetros limpios y codificados correctamente para evitar el error de parámetro "from"
+    # Petición a route/list.json mediante parámetros en diccionario (evita errores de codificación)
     url = f"{BASE_URL}/route/list.json"
     params = {
         'key': API_KEY,
@@ -426,7 +427,7 @@ def generar_excel():
             route_json = res.json()
     except Exception as e: pass
 
-    # Respaldo con formato de fecha plano si la primera opción devuelve vacío
+    # Respaldo si no hay unidades devueltas
     if not route_json or not route_json.get('data', {}).get('units'):
         params_alt = {
             'key': API_KEY,
@@ -442,19 +443,32 @@ def generar_excel():
 
     raw_points, official_dist, official_drive, official_stop, official_idle = extraer_puntos_y_resumen(route_json)
 
-    # Resguardo automático por última ubicación si no hay puntos en el rango
+    # Si la API no devuelve puntos reales, intentamos extraer el punto actual de la unidad para evitar vacíos
     if not raw_points:
-        fallback_lat, fallback_lng, fallback_address = 29.0729673, -110.9559192, "Sonora, Mexico"
         try:
             r_unit = requests.get(f"{BASE_URL}/unit/data.json", params={'key': API_KEY, 'unit_id': unit_id}, timeout=15)
             if r_unit.ok:
                 u_data = r_unit.json().get('data', {}).get('units', [{}])[0]
                 lp = u_data.get('last_point', u_data)
-                fallback_lat = float(lp.get('lat', fallback_lat))
-                fallback_lng = float(lp.get('lng', fallback_lng))
-                fallback_address = lp.get('address', fallback_address)
+                lat_val = float(lp.get('lat', 0))
+                lng_val = float(lp.get('lng', 0))
+                spd_val = float(lp.get('speed', 0))
+                addr_val = lp.get('address', 'Sonora, Mexico')
+                if lat_val != 0 and lng_val != 0:
+                    raw_points.append({
+                        'timestamp': start_dt.timestamp(),
+                        'lat': lat_val,
+                        'lng': lng_val,
+                        'speed': spd_val,
+                        'address': addr_val,
+                        'acc': 1,
+                        'is_stop': False
+                    })
         except Exception as e: pass
 
+    # Resguardo final si de plano no hay nada
+    if not raw_points:
+        fallback_lat, fallback_lng, fallback_address = 29.0729673, -110.9559192, "Sonora, Mexico"
         raw_points.append({
             'timestamp': start_dt.timestamp(),
             'lat': fallback_lat,
@@ -572,7 +586,7 @@ def generar_excel():
 
         curr_ts += 60.0
 
-    str_distancia = f"{official_dist:.1f} km" if official_dist and official_dist > 0 else f"{recorrido_total_km:.2f} km"
+    str_distancia = f"{official_dist:.1f} km" if official_dist and official_dist > 0 else f"{recorr_total_km:.2f} km"
     str_conduciendo = format_sec_to_hm(official_drive) if official_drive and official_drive > 0 else f"{minutos_movimiento // 60}h {minutos_movimiento % 60}m"
     str_detenido = format_sec_to_hm(official_stop) if official_stop and official_stop > 0 else f"{minutos_detenido // 60}h {minutos_detenido % 60}m"
     str_ralenti = format_sec_to_hm(official_idle) if official_idle and official_idle > 0 else f"{minutos_ralenti // 60}h {minutos_ralenti % 60}m"
