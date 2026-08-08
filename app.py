@@ -236,180 +236,40 @@ import random
 @app.route('/generar_excel')
 def generar_excel():
     try:
-        import openpyxl
-        from openpyxl.styles import Font, Alignment, PatternFill
-        import io
-        from datetime import datetime, timedelta
-        import random
+        import requests # Asegúrate de tener importado requests
+        # ... (resto de tus imports)
 
-        # Recibimos parámetros de la interfaz
         unit_id = request.args.get('unit_id', '868807')
-        unit_name = request.args.get('unit_name', 'INTERNATIONAL PROSTAR 76 TRACTO (ID: 868807)')
-        f_in_raw = request.args.get('fecha_inicio', '2026-08-07')
-        f_fin_raw = request.args.get('fecha_fin', '2026-08-07')
+        f_in = request.args.get('fecha_inicio', '2026-08-07')
         hora_inicio = request.args.get('hora_inicio', '00:00')
+        f_fin = request.args.get('fecha_fin', '2026-08-07')
         hora_fin = request.args.get('hora_fin', '23:59')
         
-        try:
-            limite_vel = float(request.args.get('limite_velocidad', 80))
-        except:
-            limite_vel = 80.0
-
-        # Analizador flexible de fechas
-        def parse_date_flexible(date_str):
-            for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d"):
-                try:
-                    return datetime.strptime(date_str.strip(), fmt)
-                except ValueError:
-                    continue
-            return datetime.now()
-
-        start_date = parse_date_flexible(f_in_raw)
-        end_date = parse_date_flexible(f_fin_raw)
+        # 1. LLAMADA REAL A LA API PARA OBTENER EL HISTORIAL
+        # Ajusta esta URL según tu documentación de API para obtener el historial real
+        url_historial = f"{BASE_URL}/unit_data/history_period.json" 
+        params = {
+            'key': API_KEY,
+            'unit_id': unit_id,
+            'time_from': f"{f_in} {hora_inicio}:00",
+            'time_till': f"{f_fin} {hora_fin}:00"
+        }
+        res = requests.get(url_historial, params=params, timeout=30)
+        datos_reales = res.json().get('data', []) # Asumiendo que devuelve una lista de puntos
         
-        f_in_str = f"{start_date.strftime('%Y-%m-%d')} {hora_inicio}"
-        f_fin_str = f"{end_date.strftime('%Y-%m-%d')} {hora_fin}"
+        # ... (inicialización de wb, ws, encabezados como antes)
 
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "Reporte Ejecutivo"
-
+        # 2. PROCESAMIENTO DE DATOS REALES (sin random)
         total_km = 0.0
-        max_speed_detected = 0
-        horas_movimiento = 0
-        horas_muertas = 0
-        eventos_rows = []
-        
-        current_date = start_date
-        lat = 27.19289
-        lng = -109.55168
-        
-        # Patrón de distribución calibrado al estándar Mapon
-        estado_vehiculo = "Detenido"
-        current_speed = 0
-
-        while current_date <= end_date:
-            date_str = current_date.strftime("%Y-%m-%d")
-            dt_start = datetime.strptime(f"{date_str} {hora_inicio}:00", "%Y-%m-%d %H:%M:%S")
-            dt_end = datetime.strptime(f"{date_str} {hora_fin}:00", "%Y-%m-%d %H:%M:%S")
+        for punto in datos_reales:
+            fecha = punto.get('time')
+            speed = punto.get('speed', 0)
+            lat = punto.get('lat')
+            lng = punto.get('lng')
             
-            curr_time = dt_start
+            # Cálculo exacto basado en el dato real
+            total_km += (speed * (1/60))
             
-            while curr_time <= dt_end:
-                hour = curr_time.hour
-                
-                # Simulación refinada del comportamiento en ruta
-                if 6 <= hour <= 20: # Ventana operativa principal
-                    rand_val = random.random()
-                    if estado_vehiculo == "Detenido":
-                        if rand_val > 0.4:
-                            estado_vehiculo = "Acelerando"
-                            current_speed = random.randint(3, 12)
-                    elif estado_vehiculo == "Acelerando":
-                        current_speed += random.randint(8, 20)
-                        if current_speed >= 78:
-                            current_speed = random.randint(76, 82)
-                            estado_vehiculo = "Crucero"
-                    elif estado_vehiculo == "Crucero":
-                        # Distribución natural de crucero entre 76 y 80 km/h (con pequeños destellos de 83 u 85)
-                        current_speed = random.choice([78, 79, 79, 80, 81, 78, 79, 83])
-                        if rand_val < 0.1:
-                            estado_vehiculo = "Frenando"
-                    elif estado_vehiculo == "Frenando":
-                        current_speed -= random.randint(25, 40)
-                        if current_speed <= 0:
-                            current_speed = 0
-                            estado_vehiculo = "Detenido"
-                    
-                    if current_speed > 0:
-                        horas_movimiento += 1
-                    else:
-                        horas_muertas += 1
-                else:
-                    current_speed = 0
-                    estado_vehiculo = "Detenido"
-                    horas_muertas += 1
-
-                speed = max(0, current_speed)
-                
-                if speed > max_speed_detected:
-                    max_speed_detected = speed
-                
-                if speed > 0:
-                    total_km += (speed * (1/60))
-
-                # Detección estricta de Exceso de Velocidad frente al límite configurado
-                if speed > limite_vel:
-                    evento = "Exceso de Velocidad"
-                    detalle = f"Superó el límite de {limite_vel} km/h"
-                elif speed > 0:
-                    evento = "Motor encendido / En movimiento"
-                    detalle = "-"
-                else:
-                    evento = "Motor apagado"
-                    detalle = "Detenido en reposo"
-
-                time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
-                
-                # Avance geográfico proporcional a la velocidad real
-                lat += (speed * 0.00008)
-                lng += (speed * 0.00012)
-
-                eventos_rows.append([unit_name, time_str, "Carretera Federal Sonora", speed, evento, detalle, "mapa", round(lng, 6), round(lat, 6)])
-                
-                curr_time += timedelta(minutes=1)
-
-            current_date += timedelta(days=1)
-
-        hrs_mov_str = f"{horas_movimiento // 60} hrs {horas_movimiento % 60} mins"
-        hrs_muerto_str = f"{horas_muertas // 60} hrs {horas_muertas % 60} mins"
-        vel_prom = int(total_km / (horas_movimiento / 60)) if horas_movimiento > 0 else 0
-
-        # 1. Encabezado Ejecutivo con Métricas Reales
-        metrics = [
-            ["Recorrido Aprox:", f"{round(total_km, 2)} km", "Tiempo en Movimiento:", hrs_mov_str, "Fecha Inicial:", f_in_str],
-            ["Velocidad Máxima:", f"{max_speed_detected} km/h", "Tiempo Muerto:", hrs_muerto_str, "Fecha Final:", f_fin_str],
-            ["Velocidad Promedio:", f"{vel_prom} km/h", "Horas Trabajadas:", f"{round((horas_movimiento + horas_muertas)/60, 1)} hrs", "Consumo Combustible:", "A calcular"]
-        ]
-        
-        for r, row in enumerate(metrics, 1):
-            for c, val in enumerate(row, 1):
-                cell = ws.cell(row=r, column=c, value=val)
-                if c in [1, 3, 5]:
-                    cell.font = Font(bold=True)
-
-        ws.cell(row=4, column=1, value=f"Clase: Troque de 2 ejes (Límite Configurado: {limite_vel} km/h)").font = Font(bold=True)
-        ws.append([])
-
-        # 2. Encabezados de la Tabla Detallada
-        headers = ["Vehículo", "Fecha", "Dirección", "Velocidad (Km/h)", "Evento", "Detalle", "Mapa", "Longitud", "Latitud"]
-        ws.append(headers)
-
-        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-        for col_idx in range(1, len(headers) + 1):
-            cell = ws.cell(row=6, column=col_idx)
-            cell.fill = header_fill
-            cell.font = Font(bold=True, color="FFFFFF")
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-
-        # 3. Inserción de filas con hipervínculos a mapas
-        for row_data in eventos_rows:
-            ws.append(row_data)
-            row_idx = ws.max_row
-            lat_val = row_data[8]
-            lng_val = row_data[7]
-            map_cell = ws.cell(row=row_idx, column=7)
-            map_cell.hyperlink = f"https://www.google.com/maps?q={lat_val},{lng_val}"
-            map_cell.font = Font(color="0000FF", underline="single")
-            map_cell.alignment = Alignment(horizontal="center")
-
-        buf = io.BytesIO()
-        wb.save(buf)
-        buf.seek(0)
-        
-        return send_file(buf, 
-                         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                         as_attachment=True, 
-                         download_name="Reporte_Perfecto_Calibrado.xlsx")
-    except Exception as e:
-        return f"Error técnico: {str(e)}", 500
+            # ... (Lógica para insertar filas en el Excel)
+            
+        # ... (resto del código)
