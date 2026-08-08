@@ -246,6 +246,12 @@ def generar_excel():
         unit_name = request.args.get('unit_name', 'INTERNATIONAL PROSTAR 76 TRACTO (ID: 868807)')
         f_in = request.args.get('fecha_inicio', '2026-08-06')
         f_fin = request.args.get('fecha_fin', '2026-08-06')
+        
+        # Recibimos el límite de velocidad configurado en tu interfaz (por defecto 80 si viene vacío)
+        try:
+            limite_vel = float(request.args.get('limite_velocidad', 80))
+        except:
+            limite_vel = 80.0
 
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -254,7 +260,7 @@ def generar_excel():
         # 1. Encabezado Ejecutivo de Métricas Superiores
         metrics = [
             ["Recorrido Aprox:", "1559.00 km", "Tiempo en Movimiento:", "27 hrs 13 mins", "Fecha Inicial:", f_in],
-            ["Velocidad Máxima:", "115 km/h", "Tiempo Muerto:", "444 hrs 45 mins", "Fecha Final:", f_fin],
+            ["Velocidad Máxima:", f"{limite_vel + 15} km/h", "Tiempo Muerto:", "444 hrs 45 mins", "Fecha Final:", f_fin],
             ["Velocidad Promedio:", "70 km/h", "Horas Trabajadas:", "27 hrs", "Consumo Combustible:", "0 L"]
         ]
         
@@ -264,7 +270,7 @@ def generar_excel():
                 if c in [1, 3, 5]:
                     cell.font = Font(bold=True)
 
-        ws.cell(row=4, column=1, value="Clase: Troque de 2 ejes, 6 llantas (dobles traseras)").font = Font(bold=True)
+        ws.cell(row=4, column=1, value=f"Clase: Troque de 2 ejes (Límite Configurado: {limite_vel} km/h)").font = Font(bold=True)
         ws.append([]) # Fila vacía de separación
 
         # 2. Encabezados de la Tabla Detallada
@@ -278,7 +284,7 @@ def generar_excel():
             cell.font = Font(bold=True, color="FFFFFF")
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        # 3. Generación del Histórico Minuto a Minuto / 10 Minutos por Rango de Fechas
+        # 3. Generación del Histórico Minuto a Minuto con validación de Exceso de Velocidad
         try:
             start_date = datetime.strptime(f_in.strip(), "%Y-%m-%d")
             end_date = datetime.strptime(f_fin.strip(), "%Y-%m-%d")
@@ -287,28 +293,22 @@ def generar_excel():
             end_date = datetime.strptime("2026-08-06", "%Y-%m-%d")
 
         current_date = start_date
-        
-        # Coordenadas iniciales base (Ej. Sonora / Carretera)
         lat = 29.072967
         lng = -110.955919
-        
         estado_anterior = "Apagado"
 
         while current_date <= end_date:
             date_str = current_date.strftime("%Y-%m-%d")
             
-            # Recorremos las 24 horas del día minuto a minuto
             dt_start = datetime.strptime(f"{date_str} 00:00:00", "%Y-%m-%d %H:%M:%S")
-            dt_end = datetime.strptime(f"{date_str} 23:59:00", "%Y-%m-%d %H:%M:%S")
+            dt_end = datetime.strptime(f"{date_str} {23:59:00}", "%Y-%m-%d %H:%M:%S")
             
             curr_time = dt_start
             minute_counter = 0
             
             while curr_time <= dt_end:
                 hour = curr_time.hour
-                
-                # Regla operativa: Madrugadas o bloques específicos = Apagado; Día = Movimiento / Ralentí
-                is_off = (hour < 5) or (hour == 14) # Ejemplo: apagado en madrugada y una pausa a las 14 hrs
+                is_off = (hour < 5) or (hour == 14)
                 
                 if is_off:
                     speed = 0
@@ -316,33 +316,34 @@ def generar_excel():
                     detalle = "Detenido en reposo"
                     estado_anterior = "Apagado"
                     
-                    # REGLA: Cuando está apagado, transmite cada 10 minutos para optimizar
                     if minute_counter % 10 != 0:
                         curr_time += timedelta(minutes=1)
                         minute_counter += 1
                         continue
                 else:
-                    # En horas operativas: simula movimiento o ralentí
-                    if hour == 12: # Hora de ralentí al mediodía
+                    if hour == 12:
                         speed = 0
                         evento = "Inicio de Ralentí" if estado_anterior != "Ralentí" else "Ralentí"
                         detalle = "-"
                         estado_anterior = "Ralentí"
                     else:
-                        speed = random.randint(60, 95)
-                        evento = "Fin de Ralentí" if estado_anterior == "Ralentí" else "Motor encendido / En movimiento"
-                        detalle = "-"
-                        estado_anterior = "Movimiento"
+                        # Simulamos velocidades que pueden superar el límite configurado para probar la alerta
+                        speed = random.randint(55, int(limite_vel + 15))
                         
-                        # Avance geográfico sutil y lógico en ruta
+                        # EVALUACIÓN DEL LÍMITE DE VELOCIDAD CONFIGURADO
+                        if speed > limite_vel:
+                            evento = "Exceso de Velocidad"
+                            detalle = f"Superó el límite de {limite_vel} km/h"
+                        else:
+                            evento = "Fin de Ralentí" if estado_anterior == "Ralentí" else "Motor encendido / En movimiento"
+                            detalle = "-"
+                            
+                        estado_anterior = "Movimiento"
                         lat += 0.0012
                         lng -= 0.0008
                     
-                    # REGLA: Cuando está encendido, transmite cada 1 MINUTO exacto
-                    
                 time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
                 
-                # Añadimos la fila respetando estrictamente el orden de coordenadas (Longitud antes que Latitud)
                 ws.append([unit_name, time_str, "Carretera Federal Hermosillo-Guaymas", speed, evento, detalle, "mapa", round(lng, 6), round(lat, 6)])
                 
                 row_idx = ws.max_row
@@ -363,6 +364,6 @@ def generar_excel():
         return send_file(buf, 
                          mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
                          as_attachment=True, 
-                         download_name="Reporte_Historico_MinutoAMinuto.xlsx")
+                         download_name="Reporte_Con_Excesos_Velocidad.xlsx")
     except Exception as e:
         return f"Error técnico: {str(e)}", 500
