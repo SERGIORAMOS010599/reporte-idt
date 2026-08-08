@@ -240,19 +240,22 @@ def generar_excel():
         f_in = request.args.get('fecha_inicio')
         f_fin = request.args.get('fecha_fin')
         
+        # Convertimos las fechas a marcas de tiempo (Unix Timestamp)
+        # Esto elimina cualquier problema con espacios, símbolos o formatos de hora
+        start_ts = int(datetime.strptime(f"{f_in} 00:00:00", "%Y-%m-%d %H:%M:%S").timestamp())
+        end_ts = int(datetime.strptime(f"{f_fin} 23:59:59", "%Y-%m-%d %H:%M:%S").timestamp())
+        
         url = f"{BASE_URL}/route/list.json"
         
-        # Intentamos enviar los parámetros usando la codificación automática de 'requests'
-        # Esto es más seguro y profesional que construir la URL manualmente
+        # Enviamos los parámetros como números (timestamps)
         params = {
             'key': API_KEY,
             'unit_id': unit_id,
-            'from': f"{f_in} 00:00:00",
-            'till': f"{f_fin} 23:59:59",
+            'from': start_ts,
+            'till': end_ts,
             'include[]': 'points'
         }
         
-        # Usamos 'params' de la librería, que es la forma estándar y correcta
         res = requests.get(url, params=params, timeout=45)
         data = res.json()
         
@@ -262,12 +265,11 @@ def generar_excel():
         ws.append(["Vehículo", "Fecha", "Latitud", "Longitud", "Velocidad (km/h)"])
         
         if 'error' in data:
-            # Aquí veremos qué URL final construyó la librería
             ws.append(["ERROR DE API", str(data.get('error')), str(res.url)])
         else:
             units = data.get('data', {}).get('units', [])
             if not units:
-                ws.append(["Sin unidades", str(data)])
+                ws.append(["Sin datos", "La API respondió, pero no hay unidades en este rango."])
             else:
                 points = units[0].get('points', [])
                 for p in points:
@@ -279,4 +281,4 @@ def generar_excel():
         return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
                          as_attachment=True, download_name="Reporte_Final.xlsx")
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f'Error técnico: {str(e)}'}), 500
