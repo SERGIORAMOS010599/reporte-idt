@@ -170,7 +170,6 @@ HTML_INTERFACE = """
             btn.disabled = false;
         }
 
-        // CORRECCIÓN DE LOS ATAJOS DE FECHA (HORA LOCAL Y FORMATO YYYY-MM-DD)
         function setRange(type) {
             const now = new Date();
             let start = new Date();
@@ -237,20 +236,11 @@ def generar_excel():
     try:
         unit_id = request.args.get('unit_id')
         unit_name = request.args.get('unit_name', 'Unidad')
+        f_in = request.args.get('fecha_inicio')
         
-        # IDT a veces requiere que la consulta sea por 'track/list' si 'route/list' falla
-        # Probaremos un enfoque directo y minimalista
-        url = f"{BASE_URL}/route/list.json"
+        final_url = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={f_in}%2000:00:00&till={f_in}%2023:59:59&include[]=points"
         
-        # Probamos enviando solo los parámetros indispensables, sin rangos de hora/minuto
-        params = {
-            'key': API_KEY,
-            'unit_id': unit_id,
-            'include[]': 'points'
-        }
-        
-        # Hacemos la petición
-        res = requests.get(url, params=params, timeout=45)
+        res = requests.get(final_url, timeout=45)
         data = res.json()
         
         wb = openpyxl.Workbook()
@@ -259,15 +249,15 @@ def generar_excel():
         ws.append(["Vehículo", "Fecha", "Latitud", "Longitud", "Velocidad (km/h)"])
         
         if 'error' in data:
-            ws.append(["ERROR DE API", str(data.get('error')), str(res.url)])
+            ws.append(["ERROR DE API", str(data.get('error')), final_url])
         else:
             units = data.get('data', {}).get('units', [])
             if not units:
-                ws.append(["Sin unidades", "La API respondió, pero no hay unidades activas."])
+                ws.append(["Sin unidades", "No se encontraron datos en la respuesta de IDT"])
             else:
                 points = units[0].get('points', [])
                 if not points:
-                    ws.append(["Sin puntos", "No hay datos de telemetría disponibles."])
+                    ws.append(["Sin puntos", "La unidad no registró movimiento en este rango de fechas"])
                 else:
                     for p in points:
                         ws.append([unit_name, p.get('time'), p.get('lat'), p.get('lng'), p.get('speed', 0)])
@@ -276,6 +266,9 @@ def generar_excel():
         wb.save(buf)
         buf.seek(0)
         return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                         as_attachment=True, download_name="Reporte_Final.xlsx")
+                         as_attachment=True, download_name="Reporte_Minuto_a_Minuto.xlsx")
     except Exception as e:
-        return jsonify({'error': f'Error técnico: {str(e)}'}), 500
+        return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
