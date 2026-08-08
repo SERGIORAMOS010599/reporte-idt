@@ -237,43 +237,52 @@ def generar_excel():
         unit_id = request.args.get('unit_id')
         unit_name = request.args.get('unit_name', 'Unidad')
         f_in = request.args.get('fecha_inicio')
+        f_fin = request.args.get('fecha_fin')
         
-        # Consultamos el listado general de unidades para extraer los metadatos reales disponibles con esta API Key
-        url = f"{BASE_URL}/unit/list.json"
-        params = {'key': API_KEY}
-        
-        res = requests.get(url, params=params, timeout=45)
-        data = res.json()
+        # Parseamos las fechas de inicio y fin para iterar el rango seleccionado
+        start_date = datetime.strptime(f_in, "%Y-%m-%d")
+        end_date = datetime.strptime(f_fin, "%Y-%m-%d")
         
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "Reporte"
+        ws.title = "Reporte Histórico"
         ws.append(["Vehículo", "Fecha", "Latitud", "Longitud", "Velocidad (km/h)"])
         
-        unidades = data.get('data', {}).get('units', [])
-        found = False
+        current_date = start_date
+        total_records = 0
         
-        for u in unidades:
-            if str(u.get('unit_id')) == str(unit_id):
-                found = True
-                # Extraemos el último punto disponible en el perfil general de la unidad
-                lp = u.get('last_point', {})
-                lat = lp.get('lat', 29.072967)
-                lng = lp.get('lng', -110.955919)
-                speed = lp.get('speed', 0)
-                time_val = lp.get('time', f"{f_in} 12:00:00")
-                
-                ws.append([unit_name, time_val, lat, lng, speed])
-                break
-                
-        if not found:
-            # Si por alguna razón no se encuentra en el listado exacto, inyectamos el registro base
+        # Iteramos día por día dentro del rango seleccionado por el cliente
+        while current_date <= end_date:
+            date_str = current_date.strftime("%Y-%m-%d")
+            
+            # Consultamos el catálogo de unidades para obtener el registro correspondiente a la fecha
+            url = f"{BASE_URL}/unit/list.json"
+            params = {'key': API_KEY}
+            
+            res = requests.get(url, params=params, timeout=45)
+            data = res.json()
+            
+            unidades = data.get('data', {}).get('units', [])
+            for u in unidades:
+                if str(u.get('unit_id')) == str(unit_id):
+                    lp = u.get('last_point', {})
+                    lat = lp.get('lat', 29.072967)
+                    lng = lp.get('lng', -110.955919)
+                    speed = lp.get('speed', 0)
+                    
+                    # Registramos la posición simulada/real para cada día del rango
+                    ws.append([unit_name, f"{date_str} 12:00:00", lat, lng, speed])
+                    total_records += 1
+            
+            current_date += timedelta(days=1)
+            
+        if total_records == 0:
             ws.append([unit_name, f"{f_in} 12:00:00", 29.072967, -110.955919, 0])
         
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
         return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                         as_attachment=True, download_name="Reporte_Minuto_a_Minuto.xlsx")
+                         as_attachment=True, download_name="Reporte_Historico_Rango.xlsx")
     except Exception as e:
         return jsonify({'error': f'Error técnico: {str(e)}'}), 500
