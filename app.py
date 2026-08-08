@@ -195,40 +195,51 @@ def api_unidades():
 def generar_excel():
     try:
         unit_id = request.args.get('unit_id')
-        f_in = request.args.get('fecha_inicio')
-        f_fin = request.args.get('fecha_fin')
+        unit_name = request.args.get('unit_name', 'Unidad')
+        f_in = request.args.get('fecha_inicio') # Ej: "2026-08-06"
+        f_fin = request.args.get('fecha_fin')   # Ej: "2026-08-06"
         
-        # Petición a route/list.json
+        # Convertimos las fechas a objetos datetime para obtener el timestamp
+        start_dt = datetime.strptime(f"{f_in} 00:00:00", "%Y-%m-%d %H:%M:%S")
+        end_dt = datetime.strptime(f"{f_fin} 23:59:59", "%Y-%m-%d %H:%M:%S")
+        
+        # IDT a menudo prefiere timestamps (segundos)
+        ts_from = int(start_dt.timestamp())
+        ts_till = int(end_dt.timestamp())
+        
         url = f"{BASE_URL}/route/list.json"
         params = {
             'key': API_KEY,
             'unit_id': unit_id,
-            'from': f"{f_in} 00:00:00",
-            'till': f"{f_fin} 23:59:59",
+            'from': ts_from,
+            'till': ts_till,
             'include[]': ['points', 'summary']
         }
+        
+        # Hacemos la petición
         res = requests.get(url, params=params, timeout=45)
         data = res.json()
-        
-        points = data.get('data', {}).get('units', [{}])[0].get('points', [])
         
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.append(["Vehículo", "Fecha", "Latitud", "Longitud", "Velocidad (km/h)"])
         
-        if not points:
-            ws.append(["ERROR DE API", str(data)[:100]])
+        # Diagnóstico: Si 'data' o 'units' no existen, IDT nos da una pista
+        units = data.get('data', {}).get('units', [])
+        if not units:
+            ws.append(["Sin datos en IDT", str(data)[:100], str(params)])
         else:
-            for p in points:
-                ws.append([request.args.get('unit_name'), p.get('time'), p.get('lat'), p.get('lng'), p.get('speed', 0)])
+            points = units[0].get('points', [])
+            if not points:
+                ws.append(["Unidad sin puntos", "La API respondió, pero no hay puntos en este rango", str(params)])
+            else:
+                for p in points:
+                    ws.append([unit_name, p.get('time'), p.get('lat'), p.get('lng'), p.get('speed', 0)])
         
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
         return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                         as_attachment=True, download_name="Reporte.xlsx")
+                         as_attachment=True, download_name="Reporte_Final.xlsx")
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+        return jsonify({'error': f'Error en el servidor: {str(e)}'}), 500
