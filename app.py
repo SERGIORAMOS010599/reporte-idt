@@ -240,9 +240,20 @@ def generar_excel():
         f_in = request.args.get('fecha_inicio')
         f_fin = request.args.get('fecha_fin')
         
-        final_url = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={f_in}%2000:00:00&till={f_fin}%2023:59:59&include[]=points"
+        url = f"{BASE_URL}/route/list.json"
         
-        res = requests.get(final_url, timeout=45)
+        # Intentamos enviar los parámetros usando la codificación automática de 'requests'
+        # Esto es más seguro y profesional que construir la URL manualmente
+        params = {
+            'key': API_KEY,
+            'unit_id': unit_id,
+            'from': f"{f_in} 00:00:00",
+            'till': f"{f_fin} 23:59:59",
+            'include[]': 'points'
+        }
+        
+        # Usamos 'params' de la librería, que es la forma estándar y correcta
+        res = requests.get(url, params=params, timeout=45)
         data = res.json()
         
         wb = openpyxl.Workbook()
@@ -251,26 +262,21 @@ def generar_excel():
         ws.append(["Vehículo", "Fecha", "Latitud", "Longitud", "Velocidad (km/h)"])
         
         if 'error' in data:
-            ws.append(["ERROR DE API", str(data.get('error')), final_url])
+            # Aquí veremos qué URL final construyó la librería
+            ws.append(["ERROR DE API", str(data.get('error')), str(res.url)])
         else:
             units = data.get('data', {}).get('units', [])
             if not units:
-                ws.append(["Sin unidades", "No se encontraron datos en la respuesta de IDT"])
+                ws.append(["Sin unidades", str(data)])
             else:
                 points = units[0].get('points', [])
-                if not points:
-                    ws.append(["Sin puntos", "La unidad no registró movimiento en este rango de fechas"])
-                else:
-                    for p in points:
-                        ws.append([unit_name, p.get('time'), p.get('lat'), p.get('lng'), p.get('speed', 0)])
+                for p in points:
+                    ws.append([unit_name, p.get('time'), p.get('lat'), p.get('lng'), p.get('speed', 0)])
         
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
         return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                         as_attachment=True, download_name="Reporte_Minuto_a_Minuto.xlsx")
+                         as_attachment=True, download_name="Reporte_Final.xlsx")
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
