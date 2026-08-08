@@ -236,16 +236,11 @@ def generar_excel():
     try:
         unit_id = request.args.get('unit_id')
         unit_name = request.args.get('unit_name', 'Unidad')
-        f_in = request.args.get('fecha_inicio')
+        f_in = request.args.get('fecha_inicio') # Ej: 2026-08-06
         
-        # Construimos la URL como un texto plano estricto.
-        # Reemplazamos los espacios por %20 de manera literal para que no se conviertan en '+'
-        fecha_hora_inicio = f"{f_in}%2000:00:00"
-        fecha_hora_fin = f"{f_in}%2023:59:59"
+        # EL SECRETO: IDT rechaza las horas en /route/list.json, solo quiere la fecha YYYY-MM-DD
+        final_url = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={f_in}&till={f_in}&include[]=points"
         
-        final_url = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={fecha_hora_inicio}&till={fecha_hora_fin}&include[]=points"
-        
-        # Hacemos la petición directa con la URL de texto plano
         res = requests.get(final_url, timeout=45)
         data = res.json()
         
