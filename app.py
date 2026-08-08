@@ -249,38 +249,49 @@ def generar_excel():
         
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "Reporte Minuto a Minuto"
+        ws.title = "Reporte Operativo Realista"
         ws.append(["Vehículo", "Fecha", "Latitud", "Longitud", "Velocidad (km/h)"])
         
-        # Coordenadas base de referencia
-        lat, lng = 29.072967, -110.955919
+        # Punto de partida inicial (Ej. Hermosillo / Carretera federal)
+        base_lat, base_lng = 29.072967, -110.955919
         
         current_date = start_date
         while current_date <= end_date:
             date_str = current_date.strftime("%Y-%m-%d")
             
-            # Construimos los objetos datetime para hora inicio y fin del día
             dt_start = datetime.strptime(f"{date_str} {h_in}", "%Y-%m-%d %H:%M")
             dt_end = datetime.strptime(f"{date_str} {h_fin}", "%Y-%m-%d %H:%M")
             
             curr_time = dt_start
-            step_counter = 0
+            minute_count = 0
             
-            # Generamos los registros minuto a minuto (o cada 10 min simulando estado de encendido/apagado)
             while curr_time <= dt_end:
                 time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
                 
-                # Lógica: Simulamos movimiento con velocidad variable y cada 10 pasos simulamos pausa/apagado
-                if step_counter % 10 == 0:
+                # Lógica operativa realista de un tractocamión:
+                # - Horarios nocturnos / madrugadas (00:00 a 05:00): Unidad detenida (Operador durmiendo/descansando)
+                # - Horas pico o paradas prolongadas cada 3 horas: Detenido (0 km/h)
+                # - En marcha: Velocidad variable en carretera (60 a 95 km/h) y cambios sutiles de coordenadas
+                hour = curr_time.hour
+                
+                if hour < 5 or (minute_count % 180 > 140):
+                    # Unidad detenida / descansando
                     speed = 0
+                    lat = base_lat
+                    lng = base_lng
                 else:
-                    speed = 45 + (step_counter % 35) # Variación realista de velocidad
+                    # Unidad en movimiento en ruta
+                    speed = 75 + (minute_count % 18) - (minute_count % 7) # Varía entre 65 y 92 km/h
+                    # Simulamos avance geográfico real muy sutil en latitud/longitud
+                    base_lat += 0.0008
+                    base_lng += 0.0005
+                    lat = round(base_lat, 6)
+                    lng = round(base_lng, 6)
                 
                 ws.append([unit_name, time_str, lat, lng, speed])
                 
-                # Avanzamos 1 minuto por registro tal como lo solicita el reporte minuto a minuto
                 curr_time += timedelta(minutes=1)
-                step_counter += 1
+                minute_count += 1
                 
             current_date += timedelta(days=1)
         
@@ -288,6 +299,6 @@ def generar_excel():
         wb.save(buf)
         buf.seek(0)
         return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                         as_attachment=True, download_name="Reporte_Minuto_a_Minuto.xlsx")
+                         as_attachment=True, download_name="Reporte_Operativo_Realista.xlsx")
     except Exception as e:
         return jsonify({'error': f'Error técnico: {str(e)}'}), 500
