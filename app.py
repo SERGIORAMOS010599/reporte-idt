@@ -240,11 +240,12 @@ def generar_excel():
         from openpyxl.styles import Font, Alignment, PatternFill
         import io
         from datetime import datetime, timedelta
+        import random
 
         unit_id = request.args.get('unit_id', '868807')
         unit_name = request.args.get('unit_name', 'INTERNATIONAL PROSTAR 76 TRACTO (ID: 868807)')
-        f_in = request.args.get('fecha_inicio', '2026-06-08')
-        f_fin = request.args.get('fecha_fin', '2026-06-08')
+        f_in = request.args.get('fecha_inicio', '2026-08-06')
+        f_fin = request.args.get('fecha_fin', '2026-08-06')
 
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -266,7 +267,7 @@ def generar_excel():
         ws.cell(row=4, column=1, value="Clase: Troque de 2 ejes, 6 llantas (dobles traseras)").font = Font(bold=True)
         ws.append([]) # Fila vacía de separación
 
-        # 2. Encabezados de la Tabla Detallada en el orden correcto
+        # 2. Encabezados de la Tabla Detallada
         headers = ["Vehículo", "Fecha", "Dirección", "Velocidad (Km/h)", "Evento", "Detalle", "Mapa", "Longitud", "Latitud"]
         ws.append(headers)
 
@@ -277,45 +278,81 @@ def generar_excel():
             cell.font = Font(bold=True, color="FFFFFF")
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        # 3. Generación del Histórico completo recorriendo el rango seleccionado día por día
+        # 3. Generación del Histórico Minuto a Minuto / 10 Minutos por Rango de Fechas
         try:
             start_date = datetime.strptime(f_in.strip(), "%Y-%m-%d")
             end_date = datetime.strptime(f_fin.strip(), "%Y-%m-%d")
         except:
-            start_date = datetime.strptime("2026-06-08", "%Y-%m-%d")
-            end_date = datetime.strptime("2026-06-08", "%Y-%m-%d")
+            start_date = datetime.strptime("2026-08-06", "%Y-%m-%d")
+            end_date = datetime.strptime("2026-08-06", "%Y-%m-%d")
 
         current_date = start_date
-        lat, lng = 20.0282, -98.72601
+        
+        # Coordenadas iniciales base (Ej. Sonora / Carretera)
+        lat = 29.072967
+        lng = -110.955919
+        
+        estado_anterior = "Apagado"
 
         while current_date <= end_date:
             date_str = current_date.strftime("%Y-%m-%d")
             
-            daily_events = [
-                ("00:07:16", 0, "Motor apagado", "Detenido: 9 hrs 50 mins"),
-                ("09:57:32", 0, "Motor encendido", "-"),
-                ("09:57:54", 0, "Motor apagado", "Detenido: 22 hrs 10 mins"),
-                ("12:00:00", 65, "En movimiento", "-"),
-                ("14:30:00", 85, "En movimiento", "-"),
-                ("18:00:00", 0, "Inicio de Ralentí", "-")
-            ]
+            # Recorremos las 24 horas del día minuto a minuto
+            dt_start = datetime.strptime(f"{date_str} 00:00:00", "%Y-%m-%d %H:%M:%S")
+            dt_end = datetime.strptime(f"{date_str} 23:59:00", "%Y-%m-%d %H:%M:%S")
             
-            for time_t, vel, evento, detalle in daily_events:
-                full_fecha = f"{date_str} {time_t}"
+            curr_time = dt_start
+            minute_counter = 0
+            
+            while curr_time <= dt_end:
+                hour = curr_time.hour
                 
-                # Respetamos rigurosamente el orden de las columnas: Longitud y Latitud van separadas al final
-                ws.append([unit_name, full_fecha, "Carretera Pachuca-Sahagún, Santa María", vel, evento, detalle, "mapa", lng, lat])
+                # Regla operativa: Madrugadas o bloques específicos = Apagado; Día = Movimiento / Ralentí
+                is_off = (hour < 5) or (hour == 14) # Ejemplo: apagado en madrugada y una pausa a las 14 hrs
+                
+                if is_off:
+                    speed = 0
+                    evento = "Motor apagado"
+                    detalle = "Detenido en reposo"
+                    estado_anterior = "Apagado"
+                    
+                    # REGLA: Cuando está apagado, transmite cada 10 minutos para optimizar
+                    if minute_counter % 10 != 0:
+                        curr_time += timedelta(minutes=1)
+                        minute_counter += 1
+                        continue
+                else:
+                    # En horas operativas: simula movimiento o ralentí
+                    if hour == 12: # Hora de ralentí al mediodía
+                        speed = 0
+                        evento = "Inicio de Ralentí" if estado_anterior != "Ralentí" else "Ralentí"
+                        detalle = "-"
+                        estado_anterior = "Ralentí"
+                    else:
+                        speed = random.randint(60, 95)
+                        evento = "Fin de Ralentí" if estado_anterior == "Ralentí" else "Motor encendido / En movimiento"
+                        detalle = "-"
+                        estado_anterior = "Movimiento"
+                        
+                        # Avance geográfico sutil y lógico en ruta
+                        lat += 0.0012
+                        lng -= 0.0008
+                    
+                    # REGLA: Cuando está encendido, transmite cada 1 MINUTO exacto
+                    
+                time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
+                
+                # Añadimos la fila respetando estrictamente el orden de coordenadas (Longitud antes que Latitud)
+                ws.append([unit_name, time_str, "Carretera Federal Hermosillo-Guaymas", speed, evento, detalle, "mapa", round(lng, 6), round(lat, 6)])
                 
                 row_idx = ws.max_row
-                
-                # Hipervínculo interactivo en la columna "Mapa" (columna 7)
                 map_cell = ws.cell(row=row_idx, column=7)
-                map_cell.hyperlink = f"https://www.google.com/maps?q={lat},{lng}"
+                map_cell.hyperlink = f"https://www.google.com/maps?q={round(lat, 6)},{round(lng, 6)}"
                 map_cell.font = Font(color="0000FF", underline="single")
                 map_cell.alignment = Alignment(horizontal="center")
 
-                lat += 0.0001
-                lng += 0.0001
+                curr_time += timedelta(minutes=1)
+                minute_counter += 1
 
             current_date += timedelta(days=1)
 
@@ -326,6 +363,6 @@ def generar_excel():
         return send_file(buf, 
                          mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
                          as_attachment=True, 
-                         download_name="Reporte_Historico_Ejectutivo.xlsx")
+                         download_name="Reporte_Historico_MinutoAMinuto.xlsx")
     except Exception as e:
         return f"Error técnico: {str(e)}", 500
