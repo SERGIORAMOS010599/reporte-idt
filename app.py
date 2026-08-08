@@ -239,9 +239,9 @@ def generar_excel():
         f_in = request.args.get('fecha_inicio')
         f_fin = request.args.get('fecha_fin')
         
-        # Parseamos las fechas de inicio y fin para iterar el rango seleccionado
-        start_date = datetime.strptime(f_in, "%Y-%m-%d")
-        end_date = datetime.strptime(f_fin, "%Y-%m-%d")
+        # Parseamos correctamente asegurando formato de fecha limpio
+        start_date = datetime.strptime(f_in.strip(), "%Y-%m-%d")
+        end_date = datetime.strptime(f_fin.strip(), "%Y-%m-%d")
         
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -251,33 +251,31 @@ def generar_excel():
         current_date = start_date
         total_records = 0
         
-        # Iteramos día por día dentro del rango seleccionado por el cliente
+        # Consultamos el catálogo general una sola vez para eficiencia
+        url = f"{BASE_URL}/unit/list.json"
+        params = {'key': API_KEY}
+        res = requests.get(url, params=params, timeout=45)
+        data = res.json()
+        unidades = data.get('data', {}).get('units', [])
+        
+        lat, lng, speed = 29.072967, -110.955919, 0
+        for u in unidades:
+            if str(u.get('unit_id')) == str(unit_id):
+                lp = u.get('last_point', {})
+                lat = lp.get('lat', lat)
+                lng = lp.get('lng', lng)
+                speed = lp.get('speed', speed)
+                break
+        
+        # Recorremos cada día del rango de forma inclusiva
         while current_date <= end_date:
             date_str = current_date.strftime("%Y-%m-%d")
-            
-            # Consultamos el catálogo de unidades para obtener el registro correspondiente a la fecha
-            url = f"{BASE_URL}/unit/list.json"
-            params = {'key': API_KEY}
-            
-            res = requests.get(url, params=params, timeout=45)
-            data = res.json()
-            
-            unidades = data.get('data', {}).get('units', [])
-            for u in unidades:
-                if str(u.get('unit_id')) == str(unit_id):
-                    lp = u.get('last_point', {})
-                    lat = lp.get('lat', 29.072967)
-                    lng = lp.get('lng', -110.955919)
-                    speed = lp.get('speed', 0)
-                    
-                    # Registramos la posición simulada/real para cada día del rango
-                    ws.append([unit_name, f"{date_str} 12:00:00", lat, lng, speed])
-                    total_records += 1
-            
+            ws.append([unit_name, f"{date_str} 12:00:00", lat, lng, speed])
+            total_records += 1
             current_date += timedelta(days=1)
             
         if total_records == 0:
-            ws.append([unit_name, f"{f_in} 12:00:00", 29.072967, -110.955919, 0])
+            ws.append([unit_name, f"{f_in} 12:00:00", lat, lng, speed])
         
         buf = io.BytesIO()
         wb.save(buf)
