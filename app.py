@@ -199,46 +199,48 @@ def generar_excel():
         f_in = request.args.get('fecha_inicio')
         f_fin = request.args.get('fecha_fin')
         
-        # Construimos la URL de forma manual, forzando los parámetros como strings
-        # Algunos servidores IDT requieren que la fecha sea YYYY-MM-DD HH:MM:SS
+        # IDT requiere el formato YYYY-MM-DD%20HH:MM:SS
+        # Vamos a construir la URL con el espacio codificado explícitamente
         url = f"{BASE_URL}/route/list.json"
         
-        # FORZAMOS los parámetros como cadenas explícitas
+        # Usamos un diccionario y dejamos que 'requests' maneje la codificación,
+        # pero asegurándonos de que no haya espacios extra.
         params = {
             'key': API_KEY,
-            'unit_id': str(unit_id),
+            'unit_id': unit_id,
             'from': f"{f_in} 00:00:00",
             'till': f"{f_fin} 23:59:59",
-            'include[]': 'points' # Quitamos el resumen para simplificar la petición
+            'include[]': 'points'
         }
         
-        # Hacemos la petición
-        res = requests.get(url, params=params, timeout=45)
+        # FORZAMOS la codificación correcta reemplazando el espacio por %20
+        response = requests.get(url, params=params)
+        # La librería requests a veces no codifica los corchetes o espacios como IDT quiere.
+        # Vamos a intentar el llamado directo con la URL construida:
+        final_url = f"{url}?key={API_KEY}&unit_id={unit_id}&from={f_in}%2000:00:00&till={f_fin}%2023:59:59&include[]=points"
+        
+        res = requests.get(final_url, timeout=45)
         data = res.json()
         
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.append(["Vehículo", "Fecha", "Latitud", "Longitud", "Velocidad (km/h)"])
         
-        # Depuración: Si falla, escribimos la URL exacta que generamos para analizarla
         if 'error' in data:
-            ws.append(["ERROR DE API", str(data.get('error')), url + "?" + "&".join([f"{k}={v}" for k,v in params.items()])])
+            ws.append(["ERROR DE API", str(data.get('error')), final_url])
         else:
             units = data.get('data', {}).get('units', [])
             if not units:
                 ws.append(["Sin unidades", str(data)])
             else:
                 points = units[0].get('points', [])
-                if not points:
-                    ws.append(["Sin puntos", str(units[0].keys())])
-                else:
-                    for p in points:
-                        ws.append([unit_name, p.get('time'), p.get('lat'), p.get('lng'), p.get('speed', 0)])
+                for p in points:
+                    ws.append([unit_name, p.get('time'), p.get('lat'), p.get('lng'), p.get('speed', 0)])
         
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
         return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                         as_attachment=True, download_name="Reporte_Diagnostico.xlsx")
+                         as_attachment=True, download_name="Reporte_Final.xlsx")
     except Exception as e:
         return jsonify({'error': str(e)}), 500
