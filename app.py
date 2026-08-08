@@ -138,7 +138,7 @@ HTML_INTERFACE = """
             const unitId = $('#unit_select').val();
             const unitText = $('#unit_select option:selected').text();
             
-            if (!unitId) { alert("Selecciona una unidad"); return; }
+            if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
             status.innerText = "⏳ Generando reporte...";
@@ -159,20 +159,61 @@ HTML_INTERFACE = """
                 const a = document.createElement('a');
                 a.href = url;
                 a.download = `Reporte_${unitText}.xlsx`;
+                document.body.appendChild(a);
                 a.click();
-                status.innerText = "¡Descarga lista!";
+                a.remove();
+                status.innerText = "¡Reporte generado y descargado con éxito!";
             } else {
                 alert("Error al generar el reporte.");
+                status.innerText = "Error en la generación.";
             }
             btn.disabled = false;
         }
 
+        // CORRECCIÓN DE LOS ATAJOS DE FECHA (HORA LOCAL Y FORMATO YYYY-MM-DD)
         function setRange(type) {
             const now = new Date();
-            const formatDate = (d) => d.toISOString().split('T')[0];
-            document.getElementById('fecha_inicio').value = formatDate(now);
-            document.getElementById('fecha_fin').value = formatDate(now);
+            let start = new Date();
+            let end = new Date();
+
+            const formatDate = (d) => {
+                let month = '' + (d.getMonth() + 1),
+                    day = '' + d.getDate(),
+                    year = d.getFullYear();
+                if (month.length < 2) month = '0' + month;
+                if (day.length < 2) day = '0' + day;
+                return [year, month, day].join('-');
+            };
+
+            if (type === 'hoy') {
+                start = now;
+                end = now;
+            } else if (type === 'ayer') {
+                start.setDate(now.getDate() - 1);
+                end.setDate(now.getDate() - 1);
+            } else if (type === 'esta_semana') {
+                const day = now.getDay() || 7;
+                start.setDate(now.getDate() - day + 1);
+                end = now;
+            } else if (type === 'semana_anterior') {
+                const day = now.getDay() || 7;
+                start.setDate(now.getDate() - day - 6);
+                end.setDate(now.getDate() - day);
+            } else if (type === 'ultimos_7_dias') {
+                start.setDate(now.getDate() - 6);
+                end = now;
+            } else if (type === 'este_mes') {
+                start = new Date(now.getFullYear(), now.getMonth(), 1);
+                end = now;
+            } else if (type === 'mes_anterior') {
+                start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+                end = new Date(now.getFullYear(), now.getMonth(), 0);
+            }
+
+            document.getElementById('fecha_inicio').value = formatDate(start);
+            document.getElementById('fecha_fin').value = formatDate(end);
         }
+
         setRange('hoy');
         cargarUnidades();
     </script>
@@ -199,31 +240,14 @@ def generar_excel():
         f_in = request.args.get('fecha_inicio')
         f_fin = request.args.get('fecha_fin')
         
-        # IDT requiere el formato YYYY-MM-DD%20HH:MM:SS
-        # Vamos a construir la URL con el espacio codificado explícitamente
-        url = f"{BASE_URL}/route/list.json"
-        
-        # Usamos un diccionario y dejamos que 'requests' maneje la codificación,
-        # pero asegurándonos de que no haya espacios extra.
-        params = {
-            'key': API_KEY,
-            'unit_id': unit_id,
-            'from': f"{f_in} 00:00:00",
-            'till': f"{f_fin} 23:59:59",
-            'include[]': 'points'
-        }
-        
-        # FORZAMOS la codificación correcta reemplazando el espacio por %20
-        response = requests.get(url, params=params)
-        # La librería requests a veces no codifica los corchetes o espacios como IDT quiere.
-        # Vamos a intentar el llamado directo con la URL construida:
-        final_url = f"{url}?key={API_KEY}&unit_id={unit_id}&from={f_in}%2000:00:00&till={f_fin}%2023:59:59&include[]=points"
+        final_url = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={f_in}%2000:00:00&till={f_fin}%2023:59:59&include[]=points"
         
         res = requests.get(final_url, timeout=45)
         data = res.json()
         
         wb = openpyxl.Workbook()
         ws = wb.active
+        ws.title = "Reporte"
         ws.append(["Vehículo", "Fecha", "Latitud", "Longitud", "Velocidad (km/h)"])
         
         if 'error' in data:
@@ -231,16 +255,22 @@ def generar_excel():
         else:
             units = data.get('data', {}).get('units', [])
             if not units:
-                ws.append(["Sin unidades", str(data)])
+                ws.append(["Sin unidades", "No se encontraron datos en la respuesta de IDT"])
             else:
                 points = units[0].get('points', [])
-                for p in points:
-                    ws.append([unit_name, p.get('time'), p.get('lat'), p.get('lng'), p.get('speed', 0)])
+                if not points:
+                    ws.append(["Sin puntos", "La unidad no registró movimiento en este rango de fechas"])
+                else:
+                    for p in points:
+                        ws.append([unit_name, p.get('time'), p.get('lat'), p.get('lng'), p.get('speed', 0)])
         
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
         return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                         as_attachment=True, download_name="Reporte_Final.xlsx")
+                         as_attachment=True, download_name="Reporte_Minuto_a_Minuto.xlsx")
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
