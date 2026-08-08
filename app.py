@@ -249,10 +249,10 @@ def generar_excel():
         
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "Reporte Operativo Realista"
-        ws.append(["Vehículo", "Fecha", "Latitud", "Longitud", "Velocidad (km/h)"])
+        ws.title = "Reporte de Eventos"
+        # Actualizamos la estructura de columnas añadiendo "Eventos"
+        ws.append(["Vehículo", "Fecha", "Latitud", "Longitud", "Velocidad (km/h)", "Eventos"])
         
-        # Punto de partida inicial (Ej. Hermosillo / Carretera federal)
         base_lat, base_lng = 29.072967, -110.955919
         
         current_date = start_date
@@ -266,29 +266,33 @@ def generar_excel():
             minute_count = 0
             
             while curr_time <= dt_end:
-                time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
-                
-                # Lógica operativa realista de un tractocamión:
-                # - Horarios nocturnos / madrugadas (00:00 a 05:00): Unidad detenida (Operador durmiendo/descansando)
-                # - Horas pico o paradas prolongadas cada 3 horas: Detenido (0 km/h)
-                # - En marcha: Velocidad variable en carretera (60 a 95 km/h) y cambios sutiles de coordenadas
                 hour = curr_time.hour
                 
-                if hour < 5 or (minute_count % 180 > 140):
-                    # Unidad detenida / descansando
+                # Determinamos si la unidad está en periodo de descanso/apagado o en marcha
+                is_off = (hour < 5) or (minute_count % 180 > 140)
+                
+                if is_off:
                     speed = 0
                     lat = base_lat
                     lng = base_lng
+                    evento = "Motor Apagado / Detenido"
+                    
+                    # Cuando está apagado, reporta cada 10 minutos para optimizar
+                    if minute_count % 10 != 0:
+                        curr_time += timedelta(minutes=1)
+                        minute_count += 1
+                        continue
                 else:
-                    # Unidad en movimiento en ruta
-                    speed = 75 + (minute_count % 18) - (minute_count % 7) # Varía entre 65 y 92 km/h
-                    # Simulamos avance geográfico real muy sutil en latitud/longitud
+                    # Cuando está encendido y en marcha, reporta cada 1 minuto
+                    speed = 75 + (minute_count % 18) - (minute_count % 7)
                     base_lat += 0.0008
                     base_lng += 0.0005
                     lat = round(base_lat, 6)
                     lng = round(base_lng, 6)
+                    evento = "Motor Encendido / En Movimiento"
                 
-                ws.append([unit_name, time_str, lat, lng, speed])
+                time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
+                ws.append([unit_name, time_str, lat, lng, speed, evento])
                 
                 curr_time += timedelta(minutes=1)
                 minute_count += 1
@@ -299,6 +303,6 @@ def generar_excel():
         wb.save(buf)
         buf.seek(0)
         return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                         as_attachment=True, download_name="Reporte_Operativo_Realista.xlsx")
+                         as_attachment=True, download_name="Reporte_Eventos.xlsx")
     except Exception as e:
         return jsonify({'error': f'Error técnico: {str(e)}'}), 500
