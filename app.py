@@ -238,19 +238,15 @@ def generar_excel():
         unit_name = request.args.get('unit_name', 'Unidad')
         f_in = request.args.get('fecha_inicio')
         
-        # Endpoint oficial de rutas de Mapon/IDT
-        url = f"{BASE_URL}/route/list.json"
+        # Construimos la URL como un texto plano estricto.
+        # Reemplazamos los espacios por %20 de manera literal para que no se conviertan en '+'
+        fecha_hora_inicio = f"{f_in}%2000:00:00"
+        fecha_hora_fin = f"{f_in}%2023:59:59"
         
-        # Parámetros limpios sin caracteres especiales conflictivos
-        params = {
-            'key': API_KEY,
-            'unit_id': unit_id,
-            'from': f"{f_in} 00:00:00",
-            'till': f"{f_in} 23:59:59"
-        }
+        final_url = f"{BASE_URL}/route/list.json?key={API_KEY}&unit_id={unit_id}&from={fecha_hora_inicio}&till={fecha_hora_fin}&include[]=points"
         
-        # Petición limpia gestionada por la librería requests
-        res = requests.get(url, params=params, timeout=45)
+        # Hacemos la petición directa con la URL de texto plano
+        res = requests.get(final_url, timeout=45)
         data = res.json()
         
         wb = openpyxl.Workbook()
@@ -259,7 +255,7 @@ def generar_excel():
         ws.append(["Vehículo", "Fecha", "Latitud", "Longitud", "Velocidad (km/h)"])
         
         if 'error' in data:
-            ws.append(["ERROR DE API", str(data.get('error')), res.url])
+            ws.append(["ERROR DE API", str(data.get('error')), final_url])
         else:
             units = data.get('data', {}).get('units', [])
             if not units:
