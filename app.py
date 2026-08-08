@@ -294,37 +294,61 @@ def generar_excel():
             curr_time = dt_start
             
             while curr_time <= dt_end:
-                hour = curr_time.hour
+                rand_val = random.random()
                 
-                if 6 <= hour <= 20:
-                    rand_val = random.random()
-                    if estado_vehiculo == "Detenido":
-                        if rand_val > 0.4:
-                            estado_vehiculo = "Acelerando"
-                            current_speed = random.randint(3, 12)
-                    elif estado_vehiculo == "Acelerando":
-                        current_speed += random.randint(8, 20)
-                        if current_speed >= 78:
-                            current_speed = random.randint(76, 82)
-                            estado_vehiculo = "Crucero"
-                    elif estado_vehiculo == "Crucero":
-                        current_speed = random.choice([78, 79, 79, 80, 81, 78, 79, 83])
-                        if rand_val < 0.1:
-                            estado_vehiculo = "Frenando"
-                    elif estado_vehiculo == "Frenando":
-                        current_speed -= random.randint(25, 40)
-                        if current_speed <= 0:
-                            current_speed = 0
-                            estado_vehiculo = "Detenido"
-                    
-                    if current_speed > 0:
-                        horas_movimiento += 1
-                    else:
-                        horas_muertas += 1
+                # Comportamiento fluido a cualquier hora del día o de la madrugada
+                if estado_vehiculo == "Detenido":
+                    if rand_val > 0.85: # Probabilidad natural de iniciar marcha
+                        estado_vehiculo = "Acelerando"
+                        current_speed = random.randint(3, 12)
+                elif estado_vehiculo == "Acelerando":
+                    current_speed += random.randint(8, 20)
+                    if current_speed >= 78:
+                        current_speed = random.randint(76, 82)
+                        estado_vehiculo = "Crucero"
+                elif estado_vehiculo == "Crucero":
+                    current_speed = random.choice([78, 79, 79, 80, 81, 78, 79, 83])
+                    if rand_val < 0.1:
+                        estado_vehiculo = "Frenando"
+                elif estado_vehiculo == "Frenando":
+                    current_speed -= random.randint(25, 40)
+                    if current_speed <= 0:
+                        current_speed = 0
+                        estado_vehiculo = "Detenido"
+                
+                if current_speed > 0:
+                    horas_movimiento += 1
                 else:
-                    current_speed = 0
-                    estado_vehiculo = "Detenido"
                     horas_muertas += 1
+
+                speed = max(0, current_speed)
+                
+                if speed > max_speed_detected:
+                    max_speed_detected = speed
+                
+                if speed > 0:
+                    total_km += (speed * (1/60))
+
+                if speed > limite_vel:
+                    evento = "Exceso de Velocidad"
+                    detalle = f"Superó el límite de {limite_vel} km/h"
+                elif speed > 0:
+                    evento = "Motor encendido / En movimiento"
+                    detalle = "-"
+                else:
+                    evento = "Motor apagado"
+                    detalle = "Detenido en reposo"
+
+                time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
+                
+                lat += (speed * 0.00008)
+                lng += (speed * 0.00012)
+
+                eventos_rows.append([unit_name, time_str, "Carretera Federal Sonora", speed, evento, detalle, "mapa", round(lng, 6), round(lat, 6)])
+                
+                curr_time += timedelta(minutes=1)
+
+            current_date += timedelta(days=1)
 
                 speed = max(0, current_speed)
                 
