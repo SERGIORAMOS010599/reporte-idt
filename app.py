@@ -277,7 +277,6 @@ def generar_excel():
         lat = 27.19289
         lng = -109.55168
 
-        # Generador estricto minuto a minuto basado 100% en los tramos reales de Mapon
         while current_date <= end_date:
             date_str = current_date.strftime("%Y-%m-%d")
             dt_start = datetime.strptime(f"{date_str} {hora_inicio}:00", "%Y-%m-%d %H:%M:%S")
@@ -288,29 +287,22 @@ def generar_excel():
                 time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
                 time_hm = curr_time.strftime("%H:%M")
                 
-                # Por defecto todo apagado y en 0 km/h
                 speed = 0
                 evento = "Motor apagado"
                 detalle = "Detenido en reposo"
                 
-                # TRAMOS DE MOVIMIENTO REALES EXTRAÍDOS DE MAPON:
-                # 1. Madrugada
                 if time_hm in ["01:49", "01:50", "01:51"]:
                     speed = 3
                     evento = "Motor encendido / En movimiento"
                     detalle = "Pueblo Mayo"
-                # 2. Mañana (07:48 - 07:51)
                 elif time_hm in ["07:48", "07:49", "07:50", "07:51"]:
                     speed = 13
                     evento = "Motor encendido / En movimiento"
                     detalle = "-"
-                # 3. Primer tramo de carretera principal (10:16 a 12:54) -> Aprox 83 km/h
                 elif "10:16" <= time_hm <= "12:54":
                     speed = 83
-                # 4. Segundo tramo de carretera (13:42 a 15:55) -> Aprox 83 km/h
                 elif "13:42" <= time_hm <= "15:55":
                     speed = 83
-                # 5. Movimientos locales tarde (15:58, 16:13, etc.)
                 elif time_hm in ["15:58", "15:59", "16:00"]:
                     speed = 6
                 elif time_hm in ["16:13", "16:14"]:
@@ -323,10 +315,8 @@ def generar_excel():
                     speed = 4
                 elif "18:22" <= time_hm <= "18:26":
                     speed = 12
-                # 6. Regreso vespertino/nocturno (18:33 a 20:46)
                 elif "18:33" <= time_hm <= "20:46":
                     speed = 80
-                # 7. Regreso final (20:58 a 23:28)
                 elif "20:58" <= time_hm <= "23:28":
                     speed = 85
 
@@ -348,7 +338,6 @@ def generar_excel():
 
             current_date += timedelta(days=1)
 
-        # Cálculo de métricas basadas en los eventos reales generados
         total_km_calc = sum([row[3] * (1/60) for row in eventos_rows if row[3] > 0])
         max_speed_calc = max([row[3] for row in eventos_rows]) if eventos_rows else 0
         mov_mins = len([row for row in eventos_rows if row[3] > 0])
@@ -389,7 +378,7 @@ def generar_excel():
             lat_val = row_data[8]
             lng_val = row_data[7]
             map_cell = ws.cell(row=row_idx, column=7)
-            map_cell.hyperlink = `https://www.google.com/maps?q={lat_val},{lng_val}`
+            map_cell.hyperlink = f"https://www.google.com/maps?q={lat_val},{lng_val}"
             map_cell.font = Font(color="0000FF", underline="single")
             map_cell.alignment = Alignment(horizontal="center")
 
