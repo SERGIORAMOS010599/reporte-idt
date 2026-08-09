@@ -282,6 +282,9 @@ def generar_excel():
         current_date = start_date
         lat = 27.19289
         lng = -109.55168
+        
+        estado_vehiculo = "Detenido"
+        current_speed = 0
 
         while current_date <= end_date:
             date_str = current_date.strftime("%Y-%m-%d")
@@ -293,51 +296,55 @@ def generar_excel():
             while curr_time <= dt_end:
                 time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
                 time_hm = curr_time.strftime("%H:%M")
-                hour = curr_time.hour
-                minute = curr_time.minute
-                total_mins = hour * 60 + minute
                 
-                # Por defecto todo detenido
-                speed = 0
-                evento = "Motor apagado"
-                detalle = "Detenido en reposo"
-                
-                # 1. Movimiento de madrugada real (01:49 - 01:51) -> 3 minutos
+                # 1. Inyección estricta del evento real de madrugada (01:49 - 01:51)
                 if time_hm in ["01:49", "01:50", "01:51"]:
                     speed = 3
                     evento = "Motor encendido / En movimiento"
-                    detalle = "Pueblo Mayo"
-                
-                # 2. Viaje matutino ajustado (10:16 a 12:54) -> 158 minutos exactos
-                elif (10 * 60 + 16) <= total_mins <= (12 * 60 + 54):
-                    speed = 81
-                    evento = "Motor encendido / En movimiento"
-                    detalle = "-"
-                
-                # 3. Viaje vespertino ajustado (13:42 a 15:55) -> 133 minutos exactos
-                elif (13 * 60 + 42) <= total_mins <= (15 * 60 + 55):
-                    speed = 81
-                    evento = "Motor encendido / En movimiento"
-                    detalle = "-"
+                    detalle = "Pueblo Mayo (Dato real Mapon)"
+                else:
+                    # 2. Comportamiento dinámico normal para el resto del día
+                    rand_val = random.random()
+                    if estado_vehiculo == "Detenido":
+                        if rand_val > 0.85:
+                            estado_vehiculo = "Acelerando"
+                            current_speed = random.randint(3, 15)
+                    elif estado_vehiculo == "Acelerando":
+                        current_speed += random.randint(8, 25)
+                        if current_speed >= 78:
+                            current_speed = random.randint(76, 82)
+                            estado_vehiculo = "Crucero"
+                    elif estado_vehiculo == "Crucero":
+                        current_speed = random.choice([78, 79, 80, 81, 83])
+                        if rand_val < 0.1:
+                            estado_vehiculo = "Frenando"
+                    elif estado_vehiculo == "Frenando":
+                        current_speed -= random.randint(25, 40)
+                        if current_speed <= 0:
+                            current_speed = 0
+                            estado_vehiculo = "Detenido"
+                    
+                    speed = max(0, current_speed)
 
-                # 4. Movimientos locales tarde (15:58 a 18:26) -> Tramos cortos de baja velocidad
-                elif (15 * 60 + 58) <= total_mins <= (16 * 60 + 0) or \
-                     (16 * 60 + 13) <= total_mins <= (16 * 60 + 14) or \
-                     (16 * 60 + 25) <= total_mins <= (16 * 60 + 28) or \
-                     (16 * 60 + 42) <= total_mins <= (16 * 60 + 51) or \
-                     (17 * 60 + 48) <= total_mins <= (17 * 60 + 49) or \
-                     (18 * 60 + 22) <= total_mins <= (18 * 60 + 26):
-                    speed = random.choice([6, 8, 9, 12])
-                    evento = "Motor encendido / En movimiento"
-                    detalle = "-"
+                if speed > 0:
+                    horas_movimiento += 1
+                    total_km += (speed * (1/60))
+                else:
+                    horas_muertas += 1
 
-                # 5. Viaje nocturno de regreso ajustado (18:33 a 20:46 y 20:58 a 23:28) -> ~310 minutos
-                elif (18 * 60 + 33) <= total_mins <= (20 * 60 + 46) or \
-                     (20 * 60 + 58) <= total_mins <= (23 * 60 + 28):
-                    speed = 82
+                if speed > max_speed_detected:
+                    max_speed_detected = speed
+
+                if speed > limite_vel:
+                    evento = "Exceso de Velocidad"
+                    detalle = f"Superó el límite de {limite_vel} km/h"
+                elif speed > 0 and time_hm not in ["01:49", "01:50", "01:51"]:
                     evento = "Motor encendido / En movimiento"
                     detalle = "-"
-                         
+                elif speed == 0:
+                    evento = "Motor apagado"
+                    detalle = "Detenido en reposo"
+                
                 lat += (speed * 0.00008)
                 lng += (speed * 0.00012)
 
