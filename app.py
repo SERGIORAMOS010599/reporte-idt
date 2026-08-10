@@ -377,14 +377,14 @@ def generar_excel():
         ws.cell(row=5, column=1, value="Recorrido Aprox:").font = Font(bold=True)
         ws.cell(row=5, column=2, value=f"{round(total_dist, 2)} km")
         ws.cell(row=5, column=3, value="Tiempo en Movimiento:").font = Font(bold=True)
+        ws.cell(row=5, column=4, value=f"{mov_hrs} hrs {mov_mins} mins ({porc_mov}%)") # <--- LÍNEA FALTANTE
         ws.cell(row=5, column=5, value="Fecha Inicial:").font = Font(bold=True)
         ws.cell(row=5, column=6, value=f_in)
 
         ws.cell(row=6, column=1, value="Velocidad Máxima:").font = Font(bold=True)
         ws.cell(row=6, column=2, value=f"{round(max_vel, 1)} km/h")
         ws.cell(row=6, column=3, value="Tiempo Muerto:").font = Font(bold=True)
-        ws.cell(row=6, column=5, value="Fecha Final:").font = Font(bold=True)
-        ws.cell(row=6, column=6, value=f_fin)
+        ws.cell(row=6, column=4, value=f"{muerto_hrs} hrs {muerto_mins} mins ({porc_muerto}%)") # <--- LÍNEA FALTANTE
 
         ws.cell(row=7, column=1, value="Velocidad Promedio:").font = Font(bold=True)
         ws.cell(row=7, column=2, value=f"{round(prom_vel, 1)} km/h")
