@@ -242,20 +242,18 @@ def generar_excel():
         import io
         from datetime import datetime, timedelta
         import pandas as pd
+        import glob
         import os
 
-        # Buscamos automáticamente el archivo de Mapon más reciente subido al servidor
-        import glob
+        # Buscamos de forma segura cualquier archivo xlsx disponible
         files = glob.glob('*.xlsx')
-        mapon_files = [f for f in files if 'document' in f or 'Mapon' in f or 'Reporte' not in f]
+        if not files:
+            return f"Error de diagnóstico: No se encontró ningún archivo .xlsx en el servidor. Archivos en carpeta actual: {os.listdir('.')}", 500
         
-        if mapon_files:
-            latest_mapon = max(mapon_files, key=os.path.getmtime)
-            df_mapon = pd.read_excel(latest_mapon, sheet_name=0)
-        else:
-            return "Error: No se encontró el archivo Excel oficial de Mapon en el servidor.", 400
+        latest_mapon = max(files, key=os.path.getmtime)
+        df_mapon = pd.read_excel(latest_mapon, sheet_name=0)
 
-        # Extraemos las filas de rutas del reporte de Mapon (filas 9 a 30)
+        # Extraemos las filas de rutas de forma segura
         segments_raw = df_mapon.iloc[9:31, [1, 2, 4, 5, 7, 8, 9, 10]].copy()
         segments_raw.columns = ['Hora_Inicio', 'Origen', 'Hora_Fin', 'Destino', 'Distancia_km', 'Km_Inicial', 'Tiempo', 'Vel_Max']
 
@@ -283,17 +281,14 @@ def generar_excel():
         horas_mov_str = "10h 15min"
         horas_muerto_str = "13h 43min"
 
-        # Construimos el detalle minuto a minuto o por tramo real exacto de Mapon
         for idx, row in segments_raw.iterrows():
             h_ini = str(row['Hora_Inicio']).strip()
             h_fin = str(row['Hora_Fin']).strip()
             origen = str(row['Origen']).strip() if pd.notna(row['Origen']) else "Carretera Federal Sonora"
             dest = str(row['Destino']).strip() if pd.notna(row['Destino']) else "-"
-            dist = row['Distancia_km']
             vel_str = str(row['Vel_Max']).replace(' km/h', '').strip()
             speed = float(vel_str) if vel_str.isdigit() else 0
 
-            # Determinamos evento
             if speed > limite_vel:
                 evento = "Exceso de Velocidad"
                 detalle = f"Superó el límite de {limite_vel} km/h"
@@ -320,7 +315,6 @@ def generar_excel():
                 round(lat, 6)
             ])
 
-        # Métricas exactas que provee Mapon
         metrics = [
             ["Recorrido Aprox:", f"{total_km_real} km", "Tiempo en Movimiento:", horas_mov_str, "Fecha Inicial:", f"{f_in_raw} {hora_inicio}"],
             ["Velocidad Máxima:", f"{max_speed_real} km/h", "Tiempo Muerto:", horas_muerto_str, "Fecha Final:", f"{f_fin_raw} {hora_fin}"],
@@ -366,4 +360,5 @@ def generar_excel():
                          download_name="Reporte_Oficial_Mapon_Calibrado.xlsx")
     except Exception as e:
         import traceback
-        return f"Error técnico: {traceback.format_exc()}", 500
+        # ESTO MOSTRARÁ EL ERROR TÉCNICO DIRECTAMENTE EN EL NAVEGADOR EN LUGAR DE LA ALERTA GENÉRICA
+        return f"Error técnico detallado:\n\n{traceback.format_exc()}", 500
