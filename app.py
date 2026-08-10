@@ -277,14 +277,15 @@ def generar_excel():
                 pass
             return "23:59:59" if es_fin else "00:00:00"
 
-        # ISO 8601
+        # ISO 8601 Estricto
         f_in_api = f"{normalizar_fecha(f_in)}T{normalizar_hora(hora_inicio)}Z"
         f_fin_api = f"{normalizar_fecha(f_fin)}T{normalizar_hora(hora_fin, True)}Z"
 
         api_key = os.environ.get('MAPON_API_KEY')
 
-        # 3. Petición a Mapon (Usamos el endpoint original de tu librería)
-        url = "https://gps.idttecnologias.mx/api/v1/routeplanning_routes/list.json"
+        # 3. Petición a Mapon (ENDPOINT DE HISTÓRICO DE RUTAS CORREGIDO)
+        url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
+        
         params = {
             "key": api_key,
             "unit_id": unit_id,
@@ -306,7 +307,6 @@ def generar_excel():
             
             def extraer_tramos(obj):
                 if isinstance(obj, dict):
-                    # Si el diccionario tiene llaves típicas de un tramo, lo guardamos
                     if 'start_time' in obj or 'start' in obj or 'distance' in obj:
                         rutas_encontradas.append(obj)
                     else:
@@ -318,7 +318,7 @@ def generar_excel():
 
             extraer_tramos(data)
 
-            # Procesamos de forma segura los diccionarios encontrados
+            # Procesamos de forma segura
             for item in rutas_encontradas:
                 h_ini = str(item.get('start', {}).get('time', item.get('start_time', '00:00')))[-8:-3]
                 if not h_ini or h_ini == "00:00":
@@ -341,7 +341,7 @@ def generar_excel():
         except Exception as api_err:
             api_debug_info = f"Error Parseando JSON: {str(api_err)} | Data cruda: {str(data)[:500]}"
 
-        # 4. Construcción del Excel Oficial
+        # 4. Construcción del Excel
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Histórico"
@@ -385,7 +385,6 @@ def generar_excel():
 
         row_idx = 11
 
-        # Si NO extrajo tramos a pesar de todo, guardamos la respuesta de la API para ver qué estructura nos envió Mapon
         if not tramos_reales:
             ws.cell(row=row_idx, column=1, value="API INFO:")
             ws.cell(row=row_idx, column=2, value=api_debug_info)
