@@ -282,8 +282,9 @@ def generar_excel():
                 pass
             return "23:59:59" if es_fin else "00:00:00"
 
-        f_in_api = f"{normalizar_fecha(f_in)} {normalizar_hora(hora_inicio)}"
-        f_fin_api = f"{normalizar_fecha(f_fin)} {normalizar_hora(hora_fin, True)}"
+       # Formato ISO 8601 Estricto que exigen las APIs de Mapon
+        f_in_api = f"{normalizar_fecha(f_in)}T{normalizar_hora(hora_inicio)}Z"
+        f_fin_api = f"{normalizar_fecha(f_fin)}T{normalizar_hora(hora_fin, True)}Z"
 
         api_key = os.environ.get('MAPON_API_KEY')
 
