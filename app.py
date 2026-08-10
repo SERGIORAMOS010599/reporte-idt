@@ -5,6 +5,7 @@ from openpyxl.styles import Font, Alignment, PatternFill
 import io
 from datetime import datetime, timedelta
 import random
+import os
 
 app = Flask(__name__)
 
@@ -103,9 +104,15 @@ HTML_INTERFACE = """
                     </div>
                 </div>
 
-                <div class="form-group">
-                    <label>Límite de Velocidad Permitido (km/h):</label>
-                    <input type="number" id="limite_velocidad" value="80" min="1" max="150" required>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Lím. Vel. (km/h):</label>
+                        <input type="number" id="limite_velocidad" value="80" min="1" max="150" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Alerta Ralentí (mins):</label>
+                        <input type="number" id="min_ralenti" value="5" min="1" max="60" title="Minutos para considerar ralentí excesivo" required>
+                    </div>
                 </div>
 
                 <button type="button" class="btn-submit" id="btn_submit" onclick="generarReporte()" disabled>📥 Generar y Descargar Excel</button>
@@ -150,7 +157,9 @@ HTML_INTERFACE = """
                 fecha_inicio: document.getElementById('fecha_inicio').value,
                 fecha_fin: document.getElementById('fecha_fin').value,
                 hora_inicio: document.getElementById('hora_inicio').value,
-                hora_fin: document.getElementById('hora_fin').value
+                hora_fin: document.getElementById('hora_fin').value,
+                limite_velocidad: document.getElementById('limite_velocidad').value,
+                min_ralenti: document.getElementById('min_ralenti').value
             });
 
             const res = await fetch(`/generar_excel?${params.toString()}`);
@@ -186,25 +195,19 @@ HTML_INTERFACE = """
             };
 
             if (type === 'hoy') {
-                start = now;
-                end = now;
+                start = now; end = now;
             } else if (type === 'ayer') {
-                start.setDate(now.getDate() - 1);
-                end.setDate(now.getDate() - 1);
+                start.setDate(now.getDate() - 1); end.setDate(now.getDate() - 1);
             } else if (type === 'esta_semana') {
                 const day = now.getDay() || 7;
-                start.setDate(now.getDate() - day + 1);
-                end = now;
+                start.setDate(now.getDate() - day + 1); end = now;
             } else if (type === 'semana_anterior') {
                 const day = now.getDay() || 7;
-                start.setDate(now.getDate() - day - 6);
-                end.setDate(now.getDate() - day);
+                start.setDate(now.getDate() - day - 6); end.setDate(now.getDate() - day);
             } else if (type === 'ultimos_7_dias') {
-                start.setDate(now.getDate() - 6);
-                end = now;
+                start.setDate(now.getDate() - 6); end = now;
             } else if (type === 'este_mes') {
-                start = new Date(now.getFullYear(), now.getMonth(), 1);
-                end = now;
+                start = new Date(now.getFullYear(), now.getMonth(), 1); end = now;
             } else if (type === 'mes_anterior') {
                 start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
                 end = new Date(now.getFullYear(), now.getMonth(), 0);
@@ -232,21 +235,10 @@ def api_unidades():
         return jsonify(res.json().get('data', {}).get('units', []))
     except: return jsonify([]), 500
 
-import random
 
 @app.route('/generar_excel')
 def generar_excel():
     try:
-        from flask import request, send_file
-        import requests
-        import openpyxl
-        from openpyxl.styles import Font, Alignment, PatternFill
-        import io
-        import os
-        from datetime import datetime, timedelta
-        import re
-        import random
-
         unit_id = request.args.get('unit_id', '868807')
         if "ID:" in unit_id:
             unit_id = unit_id.split("ID:")[1].replace(")", "").strip()
@@ -255,6 +247,10 @@ def generar_excel():
         f_fin = request.args.get('fecha_fin', f_in)
         hora_inicio = request.args.get('hora_inicio', '00:00:00')
         hora_fin = request.args.get('hora_fin', '23:59:59')
+        
+        # Recuperamos parámetros de la UI
+        limite_velocidad = int(request.args.get('limite_velocidad', 80))
+        min_ralenti = int(request.args.get('min_ralenti', 5))
 
         def normalizar_fecha(fecha_str):
             try:
@@ -272,18 +268,24 @@ def generar_excel():
             except: pass
             return "23:59:59" if es_fin else "00:00:00"
 
-        # Formato de API Mapon
         f_in_api = f"{normalizar_fecha(f_in)}T{normalizar_hora(hora_inicio)}Z"
         f_fin_api = f"{normalizar_fecha(f_fin)}T{normalizar_hora(hora_fin, True)}Z"
-        api_key = os.environ.get('MAPON_API_KEY')
+        api_key = os.environ.get('MAPON_API_KEY', API_KEY)
 
-        # Petición a Mapon
+        # ---------------------------------------------------------
+        # PETICIÓN A MAPON: AGREGAMOS include[]=metrics
+        # ---------------------------------------------------------
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
-        params = {"key": api_key, "unit_id": unit_id, "from": f_in_api, "till": f_fin_api}
+        params = {
+            "key": api_key, 
+            "unit_id": unit_id, 
+            "from": f_in_api, 
+            "till": f_fin_api,
+            "include[]": "metrics" # CRUCIAL para obtener los tiempos de ralentí reales
+        }
 
         tramos_reales = []
         
-        # Parseador de ISO a Datetime en Python
         def parse_iso(iso_str):
             if not iso_str: return None
             try:
@@ -329,14 +331,14 @@ def generar_excel():
                 dist_km = float(item.get('distance', 0)) / 1000.0
                 speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
                 
-                # ------------------------------------------------
-                # DETECCIÓN DE RALENTÍ (NUEVO)
-                # ------------------------------------------------
+                # Extracción mejorada de Ralentí
                 metrics = item.get('metrics', {})
-                # Mapon puede mandar el ralentí bajo distintos nombres dependiendo del sensor
                 idle_sec = float(metrics.get('engine_work_time', metrics.get('idle_time', metrics.get('engine_on_time', 0))))
                 if item.get('type') == 'idle':
                     idle_sec = duracion_seg
+                
+                # Si Mapon no mandó engine_work_time pero hay velocidad 0, usamos una heurística mínima si quieres,
+                # pero nos guiaremos por lo que nos envíe Mapon
                 
                 tramos_reales.append({
                     'dt_ini': dt_ini,
@@ -349,7 +351,7 @@ def generar_excel():
                     'lat_fin': lat_fin,
                     'lng_fin': lng_fin,
                     'duracion': duracion_seg,
-                    'idle_sec': idle_sec # Guardamos los segundos de ralentí
+                    'idle_sec': idle_sec
                 })
         except:
             pass
@@ -359,14 +361,6 @@ def generar_excel():
         ws = wb.active
         ws.title = "Histórico"
 
-        total_dist = sum([t['distancia'] for t in tramos_reales])
-        max_vel = max([t['velocidad'] for t in tramos_reales]) if tramos_reales else 0
-        tramos_mov = [t for t in tramos_reales if t['velocidad'] > 0]
-        prom_vel = sum([t['velocidad'] for t in tramos_mov]) / len(tramos_mov) if tramos_mov else 0
-        
-       # ---------------------------------------------------------
-        # CÁLCULOS EXACTOS DE TIEMPO (MOVIMIENTO, RALENTÍ Y APAGADO)
-        # ---------------------------------------------------------
         total_dist = sum([t['distancia'] for t in tramos_reales])
         max_vel = max([t['velocidad'] for t in tramos_reales]) if tramos_reales else 0
         tramos_mov = [t for t in tramos_reales if t['velocidad'] > 0]
@@ -389,7 +383,6 @@ def generar_excel():
         porc_ral = round((tiempo_ralenti_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
         porc_muerto = round((tiempo_muerto_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
 
-        # Resumen Superior con Ralentí
         ws.cell(row=1, column=3, value="Histórico").font = Font(bold=True, size=14)
         ws.cell(row=3, column=3, value="Unidad").font = Font(bold=True)
         ws.cell(row=3, column=4, value=str(unit_id))
@@ -414,7 +407,7 @@ def generar_excel():
         ws.cell(row=7, column=1, value="Velocidad Promedio:").font = Font(bold=True)
         ws.cell(row=7, column=2, value=f"{round(prom_vel, 1)} km/h")
         ws.cell(row=7, column=3, value="Tiempo en Ralentí:").font = Font(bold=True)
-        ws.cell(row=7, column=4, value=f"{ral_hrs} hrs {ral_mins} mins ({porc_ral}%)").font = Font(color="FF0000") # Resaltado
+        ws.cell(row=7, column=4, value=f"{ral_hrs} hrs {ral_mins} mins ({porc_ral}%)").font = Font(color="FF0000")
         ws.cell(row=7, column=5, value="Consumo Combustible:").font = Font(bold=True)
         ws.cell(row=7, column=6, value="A calcular")
 
@@ -437,45 +430,49 @@ def generar_excel():
         # ---------------------------------------------------------
         # ALGORITMO DE EXPANSIÓN (MOVIMIENTO, RALENTÍ Y APAGADO)
         # ---------------------------------------------------------
-        import random 
-
         for t in tramos_reales:
             curr_time = t['dt_ini']
             end_time = t['dt_fin']
             
             max_speed = t['velocidad']
             is_moving = max_speed > 0
-            idle_remaining = t['idle_sec'] # Segundos disponibles de ralentí para esta parada
+            
+            idle_remaining = t['idle_sec'] 
+            # Evaluación del umbral seleccionado por el cliente
+            es_ralenti_excesivo = t['idle_sec'] >= (min_ralenti * 60)
             
             total_seconds = (end_time - curr_time).total_seconds()
-            
             avg_speed = (t['distancia'] / (total_seconds / 3600)) if total_seconds > 0 else 0
             delta_lat = (t['lat_fin'] - t['lat_ini'])
             delta_lng = (t['lng_fin'] - t['lng_ini'])
             
             step = 0
             while curr_time <= end_time:
-                # Determinar estado y frecuencia de este bloque de tiempo
                 if is_moving:
                     interval_mins = 1
-                    evento = "Exceso de velocidad" if random.uniform(avg_speed*0.85, avg_speed*1.15) > 80 else "En movimiento"
+                    evento = "Exceso de velocidad" if random.uniform(avg_speed*0.85, avg_speed*1.15) > limite_velocidad else "En movimiento"
                     detalle = "Avanzando hacia destino"
                     current_speed = round(random.uniform(avg_speed * 0.85, avg_speed * 1.15), 1)
                     current_speed = min(current_speed, max_speed)
                 else:
                     if idle_remaining > 0:
-                        interval_mins = 1  # Minuto a minuto mientras hay ralentí
+                        interval_mins = 1  
                         current_speed = 0
-                        evento = "Ralentí (Motor Encendido)"
-                        detalle = "Detenido con motor encendido"
-                        idle_remaining -= 60 # Restamos 1 minuto (60 seg) al contador de ralentí
+                        
+                        if es_ralenti_excesivo:
+                            evento = "Ralentí Excesivo"
+                            detalle = f"Motor encendido sin avance (> {min_ralenti} min)"
+                        else:
+                            evento = "Ralentí"
+                            detalle = "Motor encendido (Normal)"
+                            
+                        idle_remaining -= 60 
                     else:
-                        interval_mins = 10 # Pasamos a 10 minutos cuando se apaga
+                        interval_mins = 10 
                         current_speed = 0
                         evento = "Motor apagado"
                         detalle = "Detenido en reposo"
 
-                # Progreso de coordenadas si está en movimiento
                 progress = (curr_time - t['dt_ini']).total_seconds() / total_seconds if total_seconds > 0 else 0
                 progress = min(progress, 1.0)
                 current_lat = t['lat_ini'] + (delta_lat * progress)
@@ -492,6 +489,10 @@ def generar_excel():
                 ws.cell(row=row_idx, column=6, value=evento)
                 ws.cell(row=row_idx, column=7, value=detalle)
                 
+                # Resaltar en rojo si es ralentí excesivo
+                if evento == "Ralentí Excesivo":
+                    ws.cell(row=row_idx, column=6).font = Font(color="FF0000", bold=True)
+                
                 map_cell = ws.cell(row=row_idx, column=8, value="mapa")
                 map_cell.hyperlink = f"https://www.google.com/maps?q={current_lat},{current_lng}"
                 map_cell.font = Font(color="0000FF", underline="single")
@@ -500,10 +501,8 @@ def generar_excel():
                 ws.cell(row=row_idx, column=9, value=round(current_lng, 6))
                 ws.cell(row=row_idx, column=10, value=round(current_lat, 6))
                 
-                # Avanzamos el reloj
                 curr_time += timedelta(minutes=interval_mins)
                 
-                # Si el próximo salto rebasa la fecha final del tramo, forzamos salida
                 if curr_time > end_time and step > 0:
                     break
                 step += 1
@@ -518,3 +517,6 @@ def generar_excel():
     except Exception as e:
         import traceback
         return f"Error crítico: {traceback.format_exc()}", 500
+
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=5000)
