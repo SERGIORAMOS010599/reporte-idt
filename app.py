@@ -239,6 +239,15 @@ def api_unidades():
 @app.route('/generar_excel')
 def generar_excel():
     try:
+        from flask import request, send_file
+        import requests
+        import openpyxl
+        from openpyxl.styles import Font, Alignment, PatternFill
+        import io
+        import os
+        from datetime import datetime, timedelta
+        import random
+
         unit_id = request.args.get('unit_id', '868807')
         if "ID:" in unit_id:
             unit_id = unit_id.split("ID:")[1].replace(")", "").strip()
@@ -248,7 +257,6 @@ def generar_excel():
         hora_inicio = request.args.get('hora_inicio', '00:00:00')
         hora_fin = request.args.get('hora_fin', '23:59:59')
         
-        # Recuperamos parámetros de la UI
         limite_velocidad = int(request.args.get('limite_velocidad', 80))
         min_ralenti = int(request.args.get('min_ralenti', 5))
 
@@ -272,17 +280,18 @@ def generar_excel():
         f_fin_api = f"{normalizar_fecha(f_fin)}T{normalizar_hora(hora_fin, True)}Z"
         api_key = os.environ.get('MAPON_API_KEY', API_KEY)
 
-        # ---------------------------------------------------------
-        # PETICIÓN A MAPON: AGREGAMOS include[]=metrics
-        # ---------------------------------------------------------
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
-        params = {
-            "key": api_key, 
-            "unit_id": unit_id, 
-            "from": f_in_api, 
-            "till": f_fin_api,
-            "include[]": "metrics" # CRUCIAL para obtener los tiempos de ralentí reales
-        }
+        
+        # 1. FORZAMOS A MAPON A ENVIAR TODA LA INFORMACIÓN DE PARADAS Y MOTOR
+        params = [
+            ("key", api_key),
+            ("unit_id", unit_id),
+            ("from", f_in_api),
+            ("till", f_fin_api),
+            ("include[]", "metrics"),
+            ("include[]", "stops"),
+            ("include[]", "idles")
+        ]
 
         tramos_reales = []
         
@@ -331,15 +340,31 @@ def generar_excel():
                 dist_km = float(item.get('distance', 0)) / 1000.0
                 speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
                 
-                # Extracción mejorada de Ralentí
+                # ------------------------------------------------
+                # 2. CAZADOR DINÁMICO DE RALENTÍ (NUEVO)
+                # ------------------------------------------------
                 metrics = item.get('metrics', {})
-                idle_sec = float(metrics.get('engine_work_time', metrics.get('idle_time', metrics.get('engine_on_time', 0))))
-                if item.get('type') == 'idle':
+                idle_sec = 0.0
+                
+                # Escaneamos TODAS las métricas buscando cualquier rastro de motor o ignición
+                for key, val in metrics.items():
+                    key_lower = str(key).lower()
+                    if 'idle' in key_lower or 'engine' in key_lower or 'ign' in key_lower:
+                        try:
+                            # Mapon manda el tiempo en segundos, nos quedamos con el valor mayor encontrado
+                            v = float(val)
+                            if v > idle_sec:
+                                idle_sec = v
+                        except:
+                            pass
+                
+                # Si Mapon categorizó el evento explícitamente como 'idle' (Ralentí)
+                if str(item.get('type')).lower() == 'idle':
                     idle_sec = duracion_seg
                 
-                # Si Mapon no mandó engine_work_time pero hay velocidad 0, usamos una heurística mínima si quieres,
-                # pero nos guiaremos por lo que nos envíe Mapon
-                
+                # Evitar que el ralentí supere la duración real de la parada
+                idle_sec = min(idle_sec, duracion_seg)
+
                 tramos_reales.append({
                     'dt_ini': dt_ini,
                     'dt_fin': dt_fin,
@@ -427,9 +452,6 @@ def generar_excel():
 
         row_idx = 11
 
-        # ---------------------------------------------------------
-        # ALGORITMO DE EXPANSIÓN (MOVIMIENTO, RALENTÍ Y APAGADO)
-        # ---------------------------------------------------------
         for t in tramos_reales:
             curr_time = t['dt_ini']
             end_time = t['dt_fin']
@@ -438,7 +460,6 @@ def generar_excel():
             is_moving = max_speed > 0
             
             idle_remaining = t['idle_sec'] 
-            # Evaluación del umbral seleccionado por el cliente
             es_ralenti_excesivo = t['idle_sec'] >= (min_ralenti * 60)
             
             total_seconds = (end_time - curr_time).total_seconds()
@@ -458,14 +479,12 @@ def generar_excel():
                     if idle_remaining > 0:
                         interval_mins = 1  
                         current_speed = 0
-                        
                         if es_ralenti_excesivo:
                             evento = "Ralentí Excesivo"
                             detalle = f"Motor encendido sin avance (> {min_ralenti} min)"
                         else:
                             evento = "Ralentí"
                             detalle = "Motor encendido (Normal)"
-                            
                         idle_remaining -= 60 
                     else:
                         interval_mins = 10 
@@ -489,7 +508,6 @@ def generar_excel():
                 ws.cell(row=row_idx, column=6, value=evento)
                 ws.cell(row=row_idx, column=7, value=detalle)
                 
-                # Resaltar en rojo si es ralentí excesivo
                 if evento == "Ralentí Excesivo":
                     ws.cell(row=row_idx, column=6).font = Font(color="FF0000", bold=True)
                 
@@ -517,6 +535,3 @@ def generar_excel():
     except Exception as e:
         import traceback
         return f"Error crítico: {traceback.format_exc()}", 500
-
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
