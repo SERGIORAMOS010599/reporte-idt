@@ -256,7 +256,7 @@ HTML_INTERFACE = """
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_INTERFACE)
+    return render_template_string(HTML_INTERFACE)
 
 @app.route('/api_unidades')
 def api_unidades():
