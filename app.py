@@ -314,23 +314,29 @@ def generar_excel():
                 
                 dt_ini = parse_iso(h_str_ini)
                 dt_fin = parse_iso(h_str_fin)
-                
                 duracion_seg = float(item.get('duration', item.get('time', 0)))
                 
                 if dt_ini and not dt_fin:
                     dt_fin = dt_ini + timedelta(seconds=duracion_seg)
-                    
                 if not dt_ini: continue
 
                 origen = str(item.get('start', {}).get('address', item.get('start_address', 'Zona Operativa')))
                 lat_ini = float(item.get('start', {}).get('lat', item.get('start_lat', 27.19)))
                 lng_ini = float(item.get('start', {}).get('lng', item.get('start_lng', -109.55)))
-                
                 lat_fin = float(item.get('end', {}).get('lat', item.get('end_lat', lat_ini)))
                 lng_fin = float(item.get('end', {}).get('lng', item.get('end_lng', lng_ini)))
                 
                 dist_km = float(item.get('distance', 0)) / 1000.0
                 speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
+                
+                # ------------------------------------------------
+                # DETECCIÓN DE RALENTÍ (NUEVO)
+                # ------------------------------------------------
+                metrics = item.get('metrics', {})
+                # Mapon puede mandar el ralentí bajo distintos nombres dependiendo del sensor
+                idle_sec = float(metrics.get('engine_work_time', metrics.get('idle_time', metrics.get('engine_on_time', 0))))
+                if item.get('type') == 'idle':
+                    idle_sec = duracion_seg
                 
                 tramos_reales.append({
                     'dt_ini': dt_ini,
@@ -342,7 +348,8 @@ def generar_excel():
                     'lng_ini': lng_ini,
                     'lat_fin': lat_fin,
                     'lng_fin': lng_fin,
-                    'duracion': duracion_seg
+                    'duracion': duracion_seg,
+                    'idle_sec': idle_sec # Guardamos los segundos de ralentí
                 })
         except:
             pass
