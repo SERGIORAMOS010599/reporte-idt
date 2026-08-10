@@ -244,6 +244,7 @@ def generar_excel():
         import io
         import os
         from datetime import datetime
+        import re
 
         # 1. Parámetros
         unit_id = request.args.get('unit_id', '868807')
@@ -277,13 +278,13 @@ def generar_excel():
                 pass
             return "23:59:59" if es_fin else "00:00:00"
 
-        # ISO 8601 Estricto
+        # ISO 8601 Estricto para Mapon
         f_in_api = f"{normalizar_fecha(f_in)}T{normalizar_hora(hora_inicio)}Z"
         f_fin_api = f"{normalizar_fecha(f_fin)}T{normalizar_hora(hora_fin, True)}Z"
 
         api_key = os.environ.get('MAPON_API_KEY')
 
-        # 3. Petición a Mapon (ENDPOINT DE HISTÓRICO DE RUTAS CORREGIDO)
+        # 3. Petición a Mapon 
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
         
         params = {
@@ -300,11 +301,8 @@ def generar_excel():
         try:
             response = requests.get(url, params=params, timeout=15)
             data = response.json()
-            api_debug_info = str(data)[:1000] 
 
-            # Extracción recursiva a prueba de balas (No importa cómo anide Mapon los datos)
             rutas_encontradas = []
-            
             def extraer_tramos(obj):
                 if isinstance(obj, dict):
                     if 'start_time' in obj or 'start' in obj or 'distance' in obj:
@@ -318,49 +316,96 @@ def generar_excel():
 
             extraer_tramos(data)
 
-            # Procesamos de forma segura
+            # Extractor inteligente de hora (soluciona el error de "3:59::00")
+            def extraer_hhmmss(time_str):
+                if not time_str: return "00:00:00"
+                match = re.search(r'(\d{2}:\d{2}:\d{2})', str(time_str))
+                if match: return match.group(1)
+                match = re.search(r'(\d{2}:\d{2})', str(time_str))
+                if match: return match.group(1) + ":00"
+                return "00:00:00"
+
+            # Procesamos y limpiamos los datos de Mapon
             for item in rutas_encontradas:
-                h_ini = str(item.get('start', {}).get('time', item.get('start_time', '00:00')))[-8:-3]
-                if not h_ini or h_ini == "00:00":
-                    h_ini = str(item.get('time', '00:00'))[-8:-3]
+                # Hora
+                h_str = item.get('start', {}).get('time', item.get('start_time', '00:00'))
+                h_ini = extraer_hhmmss(h_str)
                 
+                # Duración (para calcular tiempos)
+                duracion_seg = float(item.get('duration', item.get('time', 0))) # Tiempo en segundos
+                
+                # Dirección y Coordenadas
                 origen = str(item.get('start', {}).get('address', item.get('start_address', 'Zona Operativa')))
+                lat = float(item.get('start', {}).get('lat', item.get('start_lat', 27.19289)))
+                lng = float(item.get('start', {}).get('lng', item.get('start_lng', -109.55168)))
                 
+                # Distancia (Mapon la manda en metros, hay que pasarla a kilómetros)
                 dist_raw = item.get('distance', 0)
-                dist = float(dist_raw) if dist_raw is not None else 0.0
+                dist_km = float(dist_raw) / 1000.0 if dist_raw else 0.0
                 
+                # Velocidad
                 speed_raw = item.get('metrics', {}).get('max_speed', item.get('max_speed', 0))
                 speed = float(speed_raw) if speed_raw is not None else 0.0
                 
                 tramos_reales.append({
-                    'hora': h_ini if h_ini else "00:00",
+                    'hora': h_ini,
                     'origen': origen,
-                    'distancia': dist,
-                    'velocidad': speed
+                    'distancia': dist_km,
+                    'velocidad': speed,
+                    'lat': lat,
+                    'lng': lng,
+                    'duracion': duracion_seg
                 })
         except Exception as api_err:
-            api_debug_info = f"Error Parseando JSON: {str(api_err)} | Data cruda: {str(data)[:500]}"
+            api_debug_info = f"Error Parseando JSON: {str(api_err)}"
 
-        # 4. Construcción del Excel
+        # 4. Cálculos exactos
+        total_dist = sum([t['distancia'] for t in tramos_reales])
+        max_vel = max([t['velocidad'] for t in tramos_reales]) if tramos_reales else 0
+        tramos_mov = [t for t in tramos_reales if t['velocidad'] > 0]
+        prom_vel = sum([t['velocidad'] for t in tramos_mov]) / len(tramos_mov) if tramos_mov else 0
+
+        tiempo_movimiento_seg = sum([t['duracion'] for t in tramos_reales if t['velocidad'] > 0])
+        tiempo_muerto_seg = sum([t['duracion'] for t in tramos_reales if t['velocidad'] == 0])
+
+        mov_hrs = int(tiempo_movimiento_seg // 3600)
+        mov_mins = int((tiempo_movimiento_seg % 3600) // 60)
+        muerto_hrs = int(tiempo_muerto_seg // 3600)
+        muerto_mins = int((tiempo_muerto_seg % 3600) // 60)
+
+        total_segundos = tiempo_movimiento_seg + tiempo_muerto_seg
+        porc_mov = round((tiempo_movimiento_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
+        porc_muerto = round((tiempo_muerto_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
+
+        # 5. Construcción del Excel
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Histórico"
 
         ws.cell(row=1, column=3, value="Histórico").font = Font(bold=True, size=14)
         ws.cell(row=3, column=3, value="Unidad").font = Font(bold=True)
-        ws.cell(row=3, column=4, value=f"ID: {unit_id}")
+        ws.cell(row=3, column=4, value=str(unit_id))
+
+        # Texto legible para las cabeceras de fechas
+        fecha_ini_legible = f"{normalizar_fecha(f_in)} {normalizar_hora(hora_inicio)}"
+        fecha_fin_legible = f"{normalizar_fecha(f_fin)} {normalizar_hora(hora_fin, True)}"
 
         ws.cell(row=5, column=1, value="Recorrido Aprox:").font = Font(bold=True)
+        ws.cell(row=5, column=2, value=f"{round(total_dist, 2)} km")
         ws.cell(row=5, column=3, value="Tiempo en Movimiento:").font = Font(bold=True)
+        ws.cell(row=5, column=4, value=f"{mov_hrs} hrs {mov_mins} mins ({porc_mov}%)")
         ws.cell(row=5, column=5, value="Fecha Inicial:").font = Font(bold=True)
-        ws.cell(row=5, column=6, value=f_in_api)
+        ws.cell(row=5, column=6, value=fecha_ini_legible)
 
         ws.cell(row=6, column=1, value="Velocidad Máxima:").font = Font(bold=True)
+        ws.cell(row=6, column=2, value=f"{round(max_vel, 1)} km/h")
         ws.cell(row=6, column=3, value="Tiempo Muerto").font = Font(bold=True)
+        ws.cell(row=6, column=4, value=f"{muerto_hrs} hrs {muerto_mins} mins ({porc_muerto}%)")
         ws.cell(row=6, column=5, value="Fecha Final:").font = Font(bold=True)
-        ws.cell(row=6, column=6, value=f_fin_api)
+        ws.cell(row=6, column=6, value=fecha_fin_legible)
 
         ws.cell(row=7, column=1, value="Velocidad Promedio:").font = Font(bold=True)
+        ws.cell(row=7, column=2, value=f"{round(prom_vel, 1)} km/h")
         ws.cell(row=7, column=3, value="Horas Trabajadas:").font = Font(bold=True)
         ws.cell(row=7, column=4, value="24.0 hrs")
         ws.cell(row=7, column=5, value="Consumo Combustible:").font = Font(bold=True)
@@ -385,41 +430,43 @@ def generar_excel():
 
         row_idx = 11
 
-        if not tramos_reales:
-            ws.cell(row=row_idx, column=1, value="API INFO:")
-            ws.cell(row=row_idx, column=2, value=api_debug_info)
-            ws.cell(row=row_idx, column=3, value=f"from: {f_in_api}")
-            ws.cell(row=row_idx, column=4, value=f"till: {f_fin_api}")
-        else:
-            total_dist = sum([t['distancia'] for t in tramos_reales])
-            max_vel = max([t['velocidad'] for t in tramos_reales])
-            tramos_mov = [t for t in tramos_reales if t['velocidad'] > 0]
-            prom_vel = sum([t['velocidad'] for t in tramos_mov]) / len(tramos_mov) if tramos_mov else 0
+        for t in tramos_reales:
+            fecha_str = f"{normalizar_fecha(f_in)} {t['hora']}"
+            ciudad = "Navojoa" if "Navojoa" in t['origen'] or "Pueblo Mayo" in t['origen'] else ("Guaymas" if "Guaymas" in t['origen'] else "Zona Operativa")
+            
+            speed = t['velocidad']
+            dist = round(t['distancia'], 2)
+            
+            if speed > 0:
+                evento = "Exceso de velocidad" if speed > 80 else "Motor encendido"
+                detalle = f"Distancia: {dist} km"
+            else:
+                evento = "Motor apagado"
+                # Convertimos segundos de detención a formato legible
+                mins_detenido = int(t['duracion'] // 60)
+                hrs_detenido = mins_detenido // 60
+                mins_restantes = mins_detenido % 60
+                if hrs_detenido > 0:
+                    detalle = f"Detenido: {hrs_detenido} hrs {mins_restantes} mins"
+                else:
+                    detalle = f"Detenido: {mins_detenido} mins"
 
-            ws.cell(row=5, column=2, value=f"{round(total_dist, 2)} km")
-            ws.cell(row=6, column=2, value=f"{round(max_vel, 1)} km/h")
-            ws.cell(row=7, column=2, value=f"{round(prom_vel, 1)} km/h")
-
-            for t in tramos_reales:
-                fecha_str = f"{normalizar_fecha(f_in)} {t['hora']}:00"
-                speed = t['velocidad']
-                evento = "Exceso de velocidad" if speed > 80 else ("Motor encendido" if speed > 0 else "Motor apagado")
-                detalle = f"Distancia: {t['distancia']} km" if speed > 0 else "Detenido"
-
-                ws.cell(row=row_idx, column=1, value=str(unit_id))
-                ws.cell(row=row_idx, column=2, value=fecha_str)
-                ws.cell(row=row_idx, column=3, value=t['origen'])
-                ws.cell(row=row_idx, column=4, value="Zona Operativa")
-                ws.cell(row=row_idx, column=5, value=speed)
-                ws.cell(row=row_idx, column=6, value=evento)
-                ws.cell(row=row_idx, column=7, value=detalle)
-                
-                map_cell = ws.cell(row=row_idx, column=8, value="mapa")
-                map_cell.hyperlink = f"https://www.google.com/maps?q=27.19289,-109.55168"
-                map_cell.font = Font(color="0000FF", underline="single")
-                map_cell.alignment = Alignment(horizontal="center")
-                
-                row_idx += 1
+            ws.cell(row=row_idx, column=1, value=str(unit_id))
+            ws.cell(row=row_idx, column=2, value=fecha_str)
+            ws.cell(row=row_idx, column=3, value=t['origen'])
+            ws.cell(row=row_idx, column=4, value=ciudad)
+            ws.cell(row=row_idx, column=5, value=speed)
+            ws.cell(row=row_idx, column=6, value=evento)
+            ws.cell(row=row_idx, column=7, value=detalle)
+            
+            map_cell = ws.cell(row=row_idx, column=8, value="mapa")
+            map_cell.hyperlink = f"https://www.google.com/maps?q={t['lat']},{t['lng']}"
+            map_cell.font = Font(color="0000FF", underline="single")
+            map_cell.alignment = Alignment(horizontal="center")
+            
+            ws.cell(row=row_idx, column=9, value=t['lng'])
+            ws.cell(row=row_idx, column=10, value=t['lat'])
+            row_idx += 1
 
         buf = io.BytesIO()
         wb.save(buf)
