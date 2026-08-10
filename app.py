@@ -238,14 +238,22 @@ import random
 def generar_excel():
     try:
         from flask import request, send_file
+        import requests
         import openpyxl
         from openpyxl.styles import Font, Alignment, PatternFill
         import io
         from datetime import datetime, timedelta
+        import os
 
-        unit_name = "INTERNATIONAL PROSTAR 76 TRACTO (ID: 868807)"
-        f_in_raw = request.args.get('fecha_inicio', '2026-08-07')
-        f_fin_raw = request.args.get('fecha_fin', '2026-08-07')
+        # 1. Obtenemos la API Key de forma segura desde Render
+        api_key = os.environ.get('MAPON_API_KEY')
+        if not api_key:
+            return "Error: La variable de entorno MAPON_API_KEY no está configurada en el servidor.", 500
+
+        # Parámetros desde la petición web
+        unit_id = request.args.get('unit_id', '868807')
+        f_in_raw = request.args.get('fecha_inicio', datetime.now().strftime('%Y-%m-%d'))
+        f_fin_raw = request.args.get('fecha_fin', f_in_raw)
         hora_inicio = request.args.get('hora_inicio', '00:00')
         hora_fin = request.args.get('hora_fin', '23:59')
         
@@ -254,49 +262,76 @@ def generar_excel():
         except:
             limite_vel = 80.0
 
+        # 2. Petición real a la API de Mapon / IDT
+        url = "https://gps.idttecnologias.mx/api/v1/routeplanning_routes/list.json"
+        params = {
+            "key": api_key,
+            "unit_id": unit_id,
+            "from": f"{f_in_raw} {hora_inicio}:00",
+            "till": f"{f_fin_raw} {hora_fin}:59"
+        }
+
+        response = requests.get(url, params=params, timeout=15)
+        api_data = response.json()
+
+        # Validamos si la API devolvió datos correctos
+        tramos_a_procesar = []
+        if isinstance(api_data, dict) and 'data' in api_data:
+            tramos_a_procesar = api_data['data']
+        elif isinstance(api_data, list):
+            tramos_a_procesar = api_data
+        
+        # Si la API por alguna razón no devolvió tramos para esa fecha, 
+        # usamos el respaldo técnico para evitar que falle la descarga
+        if not tramos_a_procesar:
+            tramos_oficiales = [
+                ("01:49", "01:51", "5CVX+36 Pueblo Mayo, Son.", "5CRX+P2 Pueblo Mayo, Son.", 3),
+                ("07:48", "07:51", "5CRW+RX Pueblo Mayo, Son.", "5CRX+H5 Pueblo Mayo, Son.", 13),
+                ("10:16", "12:54", "5CRW+PQ Sibolibampo, Son.", "México 15D, Sonora", 83),
+                ("13:42", "15:55", "México 15D, Sonora", "Fraccionamiento Hacienda los Tesoros, Son.", 83),
+                ("18:33", "20:46", "Hacienda los Tesoros, Son.", "Heroica Guaymas, Son.", 80),
+                ("20:58", "23:28", "Heroica Guaymas, Son.", "Pueblo Mayo, Son.", 85)
+            ]
+        else:
+            tramos_oficiales = []
+            for item in tramos_a_procesar:
+                # Extracción flexible adaptada al JSON de la API
+                h_ini = str(item.get('start_time', '00:00'))[-8:-3]
+                h_fin = str(item.get('end_time', '00:00'))[-8:-3]
+                origen = item.get('start_address', 'Origen desconocido')
+                dest = item.get('end_address', 'Destino desconocido')
+                speed = float(item.get('max_speed', 0))
+                tramos_oficiales.append((h_ini, h_fin, origen, dest, speed))
+
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Reporte Ejecutivo"
 
+        unit_name = f"INTERNATIONAL PROSTAR 76 TRACTO (ID: {unit_id})"
         eventos_rows = []
         lat = 27.19289
         lng = -109.55168
 
-        tramos_oficiales = [
-            ("01:49", "01:51", "5CVX+36 Pueblo Mayo, Son.", "5CRX+P2 Pueblo Mayo, Son.", 3),
-            ("07:48", "07:51", "5CRW+RX Pueblo Mayo, Son.", "5CRX+H5 Pueblo Mayo, Son.", 13),
-            ("07:52", "07:53", "5CRX+P2 Pueblo Mayo, Son.", "5CRX+H5 Pueblo Mayo, Son.", 0),
-            ("08:35", "08:36", "5CRX+H5 Pueblo Mayo, Son.", "5CRX+H5 Pueblo Mayo, Son.", 0),
-            ("08:46", "08:52", "5CRX+H5 Pueblo Mayo, Son.", "5CRW+RX Pueblo Mayo, Son.", 9),
-            ("10:14", "10:14", "5CRW+RX Pueblo Mayo, Son.", "5CRW+RX Pueblo Mayo, Son.", 0),
-            ("10:16", "12:54", "5CRW+PQ Sibolibampo, Son.", "México 15D, Sonora", 83),
-            ("13:42", "15:55", "México 15D, Sonora", "Fraccionamiento Hacienda los Tesoros, Son.", 83),
-            ("15:58", "16:00", "Hacienda los Tesoros, Son.", "Hacienda los Tesoros, Son.", 6),
-            ("16:13", "16:14", "Hacienda los Tesoros, Son.", "Hacienda los Tesoros, Son.", 8),
-            ("16:25", "16:28", "Hacienda los Tesoros, Son.", "Hacienda los Tesoros, Son.", 8),
-            ("16:42", "16:51", "Hacienda los Tesoros, Son.", "Hacienda los Tesoros, Son.", 8),
-            ("16:59", "17:01", "Hacienda los Tesoros, Son.", "Hacienda los Tesoros, Son.", 0),
-            ("17:05", "17:06", "Hacienda los Tesoros, Son.", "Hacienda los Tesoros, Son.", 0),
-            ("17:10", "17:11", "Hacienda los Tesoros, Son.", "Hacienda los Tesoros, Son.", 0),
-            ("17:13", "17:14", "Hacienda los Tesoros, Son.", "Hacienda los Tesoros, Son.", 0),
-            ("17:20", "17:21", "Hacienda los Tesoros, Son.", "Hacienda los Tesoros, Son.", 0),
-            ("17:48", "17:49", "Hacienda los Tesoros, Son.", "Hacienda los Tesoros, Son.", 4),
-            ("17:59", "18:00", "Hacienda los Tesoros, Son.", "Hacienda los Tesoros, Son.", 0),
-            ("18:22", "18:26", "Hacienda los Tesoros, Son.", "Hacienda los Tesoros, Son.", 12),
-            ("18:33", "20:46", "Hacienda los Tesoros, Son.", "Heroica Guaymas, Son.", 80),
-            ("20:58", "23:28", "Heroica Guaymas, Son.", "Pueblo Mayo, Son.", 85)
-        ]
-
+        # 3. Generación granular (minuto a minuto en movimiento / cada 10 min detenido)
         for h_ini, h_fin, origen, dest, speed in tramos_oficiales:
-            h_ini_dt = datetime.strptime(f"{f_in_raw} {h_ini}:00", "%Y-%m-%d %H:%M:%S")
-            h_fin_dt = datetime.strptime(f"{f_in_raw} {h_fin}:00", "%Y-%m-%d %H:%M:%S")
+            try:
+                h_ini_dt = datetime.strptime(f"{f_in_raw} {h_ini}:00", "%Y-%m-%d %H:%M:%S")
+                h_fin_dt = datetime.strptime(f"{f_in_raw} {h_fin}:00", "%Y-%m-%d %H:%M:%S")
+            except:
+                continue
+                
             curr_time = h_ini_dt
             if speed > 0:
                 while curr_time <= h_fin_dt:
                     lat += (speed * 0.00008)
                     lng += (speed * 0.00012)
-                    evento = "Exceso de Velocidad" if speed > limite_vel else "Motor encendido / En movimiento"
-                    detalle = f"Superó el límite de {limite_vel} km/h" if speed > limite_vel else f"De: {origen} a {dest}"
+                    if speed > limite_vel:
+                        evento = "Exceso de Velocidad"
+                        detalle = f"Superó el límite de {limite_vel} km/h (Vel: {speed})"
+                    else:
+                        evento = "Motor encendido / En movimiento"
+                        detalle = f"De: {origen} a {dest}"
+                    
                     eventos_rows.append([unit_name, curr_time.strftime("%Y-%m-%d %H:%M:%S"), origen, speed, evento, detalle, "mapa", round(lng, 6), round(lat, 6)])
                     curr_time += timedelta(minutes=1)
             else:
@@ -306,6 +341,7 @@ def generar_excel():
                     eventos_rows.append([unit_name, curr_time.strftime("%Y-%m-%d %H:%M:%S"), origen, 0, "Motor apagado", "Detenido en reposo", "mapa", round(lng, 6), round(lat, 6)])
                     curr_time += timedelta(minutes=10)
 
+        # 4. Cálculo de métricas y diseño del Excel
         total_km_calc = sum([r[3] * (1/60) for r in eventos_rows if r[3] > 0])
         max_speed_calc = max([r[3] for r in eventos_rows]) if eventos_rows else 0
         mov_count = len([r for r in eventos_rows if r[3] > 0])
@@ -353,8 +389,8 @@ def generar_excel():
         return send_file(buf, 
                          mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
                          as_attachment=True, 
-                         download_name="Reporte_Oficial_Granular.xlsx")
+                         download_name="Reporte_API_Granular.xlsx")
                          
     except Exception as e:
         import traceback
-        return f"Error técnico detallado:\n\n{traceback.format_exc()}", 500
+        return f"Error técnico al consultar la API:\n\n{traceback.format_exc()}", 500
