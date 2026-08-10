@@ -291,11 +291,14 @@ def generar_excel():
         min_ralenti = int(request.args.get('min_ralenti', 5))
 
         def normalizar_fecha(fecha_str):
-            try:
-                if "/" in fecha_str: return datetime.strptime(fecha_str, '%d/%m/%Y').strftime('%Y-%m-%d')
-                elif "-" in fecha_str and len(fecha_str) == 10: return fecha_str
-            except: pass
-            return '2026-08-09'
+            try:
+                if "/" in fecha_str: 
+                    return datetime.strptime(fecha_str, '%d/%m/%Y').strftime('%Y-%m-%d')
+                elif "-" in fecha_str and len(fecha_str) == 10: 
+                    return fecha_str
+            except: 
+                pass
+            return '2026-08-09'
 
         def normalizar_hora(hora_str, es_fin=False):
             try:
@@ -303,7 +306,8 @@ def generar_excel():
                     return datetime.strptime(hora_str.strip(), '%I:%M %p').strftime('%H:%M:%00')
                 if len(hora_str) == 5: return f"{hora_str}:00"
                 if len(hora_str) == 8: return hora_str
-            except: pass
+            except: 
+                pass
             return "23:59:59" if es_fin else "00:00:00"
 
         f_in_api = f"{normalizar_fecha(f_in)}T{normalizar_hora(hora_inicio)}Z"
