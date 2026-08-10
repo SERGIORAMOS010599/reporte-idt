@@ -356,7 +356,20 @@ def generar_excel():
         max_vel = max([t['velocidad'] for t in tramos_reales]) if tramos_reales else 0
         tramos_mov = [t for t in tramos_reales if t['velocidad'] > 0]
         prom_vel = sum([t['velocidad'] for t in tramos_mov]) / len(tramos_mov) if tramos_mov else 0
+        
+        # Cálculos de Tiempo
+        tiempo_movimiento_seg = sum([t['duracion'] for t in tramos_reales if t['velocidad'] > 0])
+        tiempo_muerto_seg = sum([t['duracion'] for t in tramos_reales if t['velocidad'] == 0])
 
+        mov_hrs = int(tiempo_movimiento_seg // 3600)
+        mov_mins = int((tiempo_movimiento_seg % 3600) // 60)
+        muerto_hrs = int(tiempo_muerto_seg // 3600)
+        muerto_mins = int((tiempo_muerto_seg % 3600) // 60)
+
+        total_segundos = tiempo_movimiento_seg + tiempo_muerto_seg
+        porc_mov = round((tiempo_movimiento_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
+        porc_muerto = round((tiempo_muerto_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
+        
         ws.cell(row=1, column=3, value="Histórico").font = Font(bold=True, size=14)
         ws.cell(row=3, column=3, value="Unidad").font = Font(bold=True)
         ws.cell(row=3, column=4, value=str(unit_id))
