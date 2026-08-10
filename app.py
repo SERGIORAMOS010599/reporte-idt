@@ -357,9 +357,17 @@ def generar_excel():
         tramos_mov = [t for t in tramos_reales if t['velocidad'] > 0]
         prom_vel = sum([t['velocidad'] for t in tramos_mov]) / len(tramos_mov) if tramos_mov else 0
         
-        # Cálculos de Tiempo
-        tiempo_movimiento_seg = sum([t['duracion'] for t in tramos_reales if t['velocidad'] > 0])
-        tiempo_muerto_seg = sum([t['duracion'] for t in tramos_reales if t['velocidad'] == 0])
+        # ---------------------------------------------------------
+        # CÁLCULOS EXACTOS DE TIEMPO (RESTANDO FECHAS)
+        # ---------------------------------------------------------
+        total_dist = sum([t['distancia'] for t in tramos_reales])
+        max_vel = max([t['velocidad'] for t in tramos_reales]) if tramos_reales else 0
+        tramos_mov = [t for t in tramos_reales if t['velocidad'] > 0]
+        prom_vel = sum([t['velocidad'] for t in tramos_mov]) / len(tramos_mov) if tramos_mov else 0
+
+        # Calculamos los segundos reales de cada tramo restando el Fin menos el Inicio
+        tiempo_movimiento_seg = sum([(t['dt_fin'] - t['dt_ini']).total_seconds() for t in tramos_reales if t['velocidad'] > 0])
+        tiempo_muerto_seg = sum([(t['dt_fin'] - t['dt_ini']).total_seconds() for t in tramos_reales if t['velocidad'] == 0])
 
         mov_hrs = int(tiempo_movimiento_seg // 3600)
         mov_mins = int((tiempo_movimiento_seg % 3600) // 60)
