@@ -269,26 +269,26 @@ def api_unidades():
 @app.route('/generar_excel')
 def generar_excel():
     try:
-        from flask import request, send_file
-        import requests
-        import openpyxl
-        from openpyxl.styles import Font, Alignment, PatternFill
-        import io
-        import os
-        from datetime import datetime, timedelta
-        import random
+        from flask import request, send_file
+        import requests
+        import openpyxl
+        from openpyxl.styles import Font, Alignment, PatternFill
+        import io
+        import os
+        from datetime import datetime, timedelta
+        import random
 
-        unit_id = request.args.get('unit_id', '868807')
-        if "ID:" in unit_id:
-            unit_id = unit_id.split("ID:")[1].replace(")", "").strip()
+        unit_id = request.args.get('unit_id', '868807')
+        if "ID:" in unit_id:
+            unit_id = unit_id.split("ID:")[1].replace(")", "").strip()
 
-        f_in = request.args.get('fecha_inicio', '2026-08-09')
-        f_fin = request.args.get('fecha_fin', f_in)
-        hora_inicio = request.args.get('hora_inicio', '00:00:00')
-        hora_fin = request.args.get('hora_fin', '23:59:59')
-        
-        limite_velocidad = int(request.args.get('limite_velocidad', 80))
-        min_ralenti = int(request.args.get('min_ralenti', 5))
+        f_in = request.args.get('fecha_inicio', '2026-08-09')
+        f_fin = request.args.get('fecha_fin', f_in)
+        hora_inicio = request.args.get('hora_inicio', '00:00:00')
+        hora_fin = request.args.get('hora_fin', '23:59:59')
+        
+        limite_velocidad = int(request.args.get('limite_velocidad', 80))
+        min_ralenti = int(request.args.get('min_ralenti', 5))
 
         def normalizar_fecha(fecha_str):
             try:
