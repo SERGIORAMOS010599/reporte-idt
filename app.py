@@ -260,15 +260,15 @@ def index():
 
 @app.route('/api_unidades')
 def api_unidades():
-    try:
-        res = requests.get(f"{BASE_URL}/unit/list.json", params={'key': API_KEY}, timeout=15)
-        return jsonify(res.json().get('data', {}).get('units', []))
-    except: return jsonify([]), 500
-
+    try:
+        res = requests.get(f"{BASE_URL}/unit/list.json", params={'key': API_KEY}, timeout=15)
+        return jsonify(res.json().get('data', {}).get('units', []))
+    except: 
+        return jsonify([]), 500
 
 @app.route('/generar_excel')
 def generar_excel():
-    try:
+    try:
         from flask import request, send_file
         import requests
         import openpyxl
