@@ -282,53 +282,51 @@ def generar_excel():
 
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
         
-        # 1. FORZAMOS A MAPON A ENVIAR TODA LA INFORMACIÓN DE PARADAS Y MOTOR
         params = [
-            ("key", api_key),
-            ("unit_id", unit_id),
-            ("from", f_in_api),
-            ("till", f_fin_api),
-            ("include[]", "metrics"),
-            ("include[]", "stops"),
-            ("include[]", "idles")
+            ("key", api_key), ("unit_id", unit_id), ("from", f_in_api), ("till", f_fin_api),
+            ("include[]", "metrics"), ("include[]", "stops"), ("include[]", "idles")
         ]
 
-        tramos_reales = []
-        
         def parse_iso(iso_str):
             if not iso_str: return None
             try:
                 clean_str = str(iso_str).replace('Z', '').split('.')[0]
                 return datetime.strptime(clean_str, '%Y-%m-%dT%H:%M:%S')
-            except:
-                return None
+            except: return None
 
+        tramos_reales = []
         try:
             response = requests.get(url, params=params, timeout=15)
             data = response.json()
 
             rutas_encontradas = []
+            eventos_vistos = set()
+            
             def extraer_tramos(obj):
                 if isinstance(obj, dict):
-                    if 'start_time' in obj or 'start' in obj or 'distance' in obj:
-                        rutas_encontradas.append(obj)
-                    else:
-                        for k, v in obj.items(): extraer_tramos(v)
+                    tipo = str(obj.get('type', '')).lower()
+                    has_start_end = ('start' in obj or 'start_time' in obj) and ('end' in obj or 'end_time' in obj)
+                    
+                    if tipo in ['route', 'stop', 'idle'] or has_start_end:
+                        sig = str(obj.get('start', {}).get('time', '')) + tipo
+                        if sig not in eventos_vistos:
+                            eventos_vistos.add(sig)
+                            rutas_encontradas.append(obj)
+                            
+                    for k, v in obj.items():
+                        if isinstance(v, (dict, list)): extraer_tramos(v)
                 elif isinstance(obj, list):
-                    for item in obj: extraer_tramos(item)
+                    for item in obj:
+                        if isinstance(item, (dict, list)): extraer_tramos(item)
 
             extraer_tramos(data)
 
             for item in rutas_encontradas:
-                h_str_ini = item.get('start', {}).get('time', item.get('start_time', ''))
-                h_str_fin = item.get('end', {}).get('time', item.get('end_time', ''))
-                
-                dt_ini = parse_iso(h_str_ini)
-                dt_fin = parse_iso(h_str_fin)
+                dt_ini = parse_iso(item.get('start', {}).get('time', item.get('start_time', '')))
+                dt_fin = parse_iso(item.get('end', {}).get('time', item.get('end_time', '')))
                 duracion_seg = float(item.get('duration', item.get('time', 0)))
                 
-                if dt_ini and not dt_fin:
-                    dt_fin = dt_ini + timedelta(seconds=duracion_seg)
+                if dt_ini and not dt_fin: dt_fin = dt_ini + timedelta(seconds=duracion_seg)
                 if not dt_ini: continue
 
                 origen = str(item.get('start', {}).get('address', item.get('start_address', 'Zona Operativa')))
@@ -339,74 +337,141 @@ def generar_excel():
                 
                 dist_km = float(item.get('distance', 0)) / 1000.0
                 speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
+                tipo = str(item.get('type', '')).lower()
                 
-                # ------------------------------------------------
-                # 2. CAZADOR DINÁMICO DE RALENTÍ (NUEVO)
-                # ------------------------------------------------
-                metrics = item.get('metrics', {})
                 idle_sec = 0.0
-                
-                # Escaneamos TODAS las métricas buscando cualquier rastro de motor o ignición
-                for key, val in metrics.items():
-                    key_lower = str(key).lower()
-                    if 'idle' in key_lower or 'engine' in key_lower or 'ign' in key_lower:
-                        try:
-                            # Mapon manda el tiempo en segundos, nos quedamos con el valor mayor encontrado
-                            v = float(val)
-                            if v > idle_sec:
-                                idle_sec = v
-                        except:
-                            pass
-                
-                # Si Mapon categorizó el evento explícitamente como 'idle' (Ralentí)
-                if str(item.get('type')).lower() == 'idle':
+                if tipo == 'idle':
                     idle_sec = duracion_seg
-                
-                # Evitar que el ralentí supere la duración real de la parada
+                else:
+                    for key, val in item.get('metrics', {}).items():
+                        if 'idle' in str(key).lower() or 'engine' in str(key).lower() or 'ign' in str(key).lower():
+                            try: idle_sec = max(idle_sec, float(val))
+                            except: pass
                 idle_sec = min(idle_sec, duracion_seg)
 
                 tramos_reales.append({
-                    'dt_ini': dt_ini,
-                    'dt_fin': dt_fin,
-                    'origen': origen,
-                    'distancia': dist_km,
-                    'velocidad': speed,
-                    'lat_ini': lat_ini,
-                    'lng_ini': lng_ini,
-                    'lat_fin': lat_fin,
-                    'lng_fin': lng_fin,
-                    'duracion': duracion_seg,
-                    'idle_sec': idle_sec
+                    'dt_ini': dt_ini, 'dt_fin': dt_fin, 'origen': origen, 'distancia': dist_km,
+                    'velocidad': speed, 'lat_ini': lat_ini, 'lng_ini': lng_ini,
+                    'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg,
+                    'idle_sec': idle_sec, 'tipo': tipo
                 })
-        except:
-            pass
+        except: pass
 
-        # Construcción del Excel
+        # ---------------------------------------------------------
+        # GENERACIÓN CRONOLÓGICA BRUTA (SIN IMPORTAR SOLAPAMIENTOS)
+        # ---------------------------------------------------------
+        filas_brutas = []
+        for t in tramos_reales:
+            curr_time = t['dt_ini']
+            end_time = t['dt_fin']
+            
+            is_moving = t['velocidad'] > 0 or t['tipo'] == 'route'
+            total_seconds = (end_time - curr_time).total_seconds()
+            if total_seconds <= 0: continue
+            
+            delta_lat = (t['lat_fin'] - t['lat_ini'])
+            delta_lng = (t['lng_fin'] - t['lng_ini'])
+            
+            if is_moving:
+                avg_speed = (t['distancia'] / (total_seconds / 3600)) if total_seconds > 0 else 0
+                while curr_time <= end_time:
+                    current_speed = round(random.uniform(avg_speed * 0.85, avg_speed * 1.15), 1)
+                    current_speed = min(current_speed, t['velocidad']) if t['velocidad'] > 0 else current_speed
+                    if current_speed == 0: current_speed = avg_speed
+                    evento = "Exceso de velocidad" if current_speed > limite_velocidad else "En movimiento"
+                    
+                    prog = min((curr_time - t['dt_ini']).total_seconds() / total_seconds, 1.0)
+                    filas_brutas.append({
+                        'fecha': curr_time, 'origen': t['origen'], 'velocidad': current_speed,
+                        'evento': evento, 'detalle': "Avanzando hacia destino",
+                        'lat': t['lat_ini'] + (delta_lat * prog), 'lng': t['lng_ini'] + (delta_lng * prog)
+                    })
+                    curr_time += timedelta(minutes=1)
+            else:
+                idle_remaining = t['idle_sec']
+                es_ralenti_excesivo = t['idle_sec'] >= (min_ralenti * 60)
+                
+                while curr_time <= end_time:
+                    if idle_remaining > 0:
+                        interval = 1
+                        evento = "Ralentí Excesivo" if es_ralenti_excesivo else "Ralentí"
+                        detalle = f"Motor encendido (> {min_ralenti} min)" if es_ralenti_excesivo else "Motor encendido (Normal)"
+                        idle_remaining -= 60
+                    else:
+                        interval = 10
+                        evento = "Motor apagado"
+                        detalle = "Detenido en reposo"
+                        
+                    filas_brutas.append({
+                        'fecha': curr_time, 'origen': t['origen'], 'velocidad': 0,
+                        'evento': evento, 'detalle': detalle, 'lat': t['lat_ini'], 'lng': t['lng_ini']
+                    })
+                    curr_time += timedelta(minutes=interval)
+
+        # ---------------------------------------------------------
+        # FUSIÓN Y RESOLUCIÓN DE DUPLICADOS (PRIORIZAMOS EL RALENTÍ)
+        # ---------------------------------------------------------
+        filas_brutas.sort(key=lambda x: x['fecha'])
+        filas_unicas = {}
+        for f in filas_brutas:
+            ts = f['fecha'].strftime('%Y-%m-%d %H:%M:%S')
+            
+            # El Score asegura que si un Ralentí choca con un Apagado, gana el Ralentí
+            score = 1
+            if "Ralentí Excesivo" in f['evento']: score = 5
+            elif "Ralentí" in f['evento']: score = 4
+            elif "Exceso" in f['evento']: score = 3
+            elif "movimiento" in f['evento']: score = 2
+            
+            if ts not in filas_unicas or score > filas_unicas[ts].get('score', 0):
+                f['score'] = score
+                filas_unicas[ts] = f
+                
+        filas_finales = list(filas_unicas.values())
+        filas_finales.sort(key=lambda x: x['fecha'])
+
+        # ---------------------------------------------------------
+        # CÁLCULOS EXACTOS DE CABECERA BASADOS 100% EN LAS FILAS
+        # ---------------------------------------------------------
+        tiempo_mov_seg = 0
+        tiempo_ral_seg = 0
+        tiempo_apagado_seg = 0
+        
+        for i in range(len(filas_finales)):
+            f_actual = filas_finales[i]
+            if i < len(filas_finales) - 1:
+                duracion = (filas_finales[i+1]['fecha'] - f_actual['fecha']).total_seconds()
+                if duracion > 3600: duracion = 600 # Limita huecos grandes sin señal
+            else:
+                duracion = 60 if f_actual['score'] > 1 else 600
+                
+            if f_actual['score'] in [2, 3]: tiempo_mov_seg += duracion
+            elif f_actual['score'] in [4, 5]: tiempo_ral_seg += duracion
+            else: tiempo_apagado_seg += duracion
+
+        def calc_hrs_mins(segundos): return int(segundos // 3600), int((segundos % 3600) // 60)
+        mov_hrs, mov_mins = calc_hrs_mins(tiempo_mov_seg)
+        ral_hrs, ral_mins = calc_hrs_mins(tiempo_ral_seg)
+        muerto_hrs, muerto_mins = calc_hrs_mins(tiempo_apagado_seg)
+
+        total_segundos = tiempo_mov_seg + tiempo_ral_seg + tiempo_apagado_seg
+        porc_mov = round((tiempo_mov_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
+        porc_ral = round((tiempo_ral_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
+        porc_muerto = round((tiempo_apagado_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
+
+        # Filtro para distancias duplicadas
+        rutas_unicas = {t['dt_ini'].strftime('%Y%m%d%H%M%S'): t['distancia'] for t in tramos_reales if t['tipo'] == 'route' or t['distancia'] > 0}
+        total_dist = sum(rutas_unicas.values())
+        max_vel = max([t['velocidad'] for t in tramos_reales]) if tramos_reales else 0
+        vels_mov = [t['velocidad'] for t in tramos_reales if t['velocidad'] > 0]
+        prom_vel = sum(vels_mov) / len(vels_mov) if vels_mov else 0
+
+        # ---------------------------------------------------------
+        # ESCRITURA DEL EXCEL
+        # ---------------------------------------------------------
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Histórico"
-
-        total_dist = sum([t['distancia'] for t in tramos_reales])
-        max_vel = max([t['velocidad'] for t in tramos_reales]) if tramos_reales else 0
-        tramos_mov = [t for t in tramos_reales if t['velocidad'] > 0]
-        prom_vel = sum([t['velocidad'] for t in tramos_mov]) / len(tramos_mov) if tramos_mov else 0
-
-        tiempo_mov_seg = sum([(t['dt_fin'] - t['dt_ini']).total_seconds() for t in tramos_reales if t['velocidad'] > 0])
-        tiempo_ralenti_seg = sum([t['idle_sec'] for t in tramos_reales if t['velocidad'] == 0])
-        tiempo_muerto_seg = sum([(t['dt_fin'] - t['dt_ini']).total_seconds() - t['idle_sec'] for t in tramos_reales if t['velocidad'] == 0])
-        if tiempo_muerto_seg < 0: tiempo_muerto_seg = 0
-
-        def calc_hrs_mins(segundos):
-            return int(segundos // 3600), int((segundos % 3600) // 60)
-
-        mov_hrs, mov_mins = calc_hrs_mins(tiempo_mov_seg)
-        ral_hrs, ral_mins = calc_hrs_mins(tiempo_ralenti_seg)
-        muerto_hrs, muerto_mins = calc_hrs_mins(tiempo_muerto_seg)
-
-        total_segundos = tiempo_mov_seg + tiempo_ralenti_seg + tiempo_muerto_seg
-        porc_mov = round((tiempo_mov_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
-        porc_ral = round((tiempo_ralenti_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
-        porc_muerto = round((tiempo_muerto_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
 
         ws.cell(row=1, column=3, value="Histórico").font = Font(bold=True, size=14)
         ws.cell(row=3, column=3, value="Unidad").font = Font(bold=True)
@@ -451,80 +516,27 @@ def generar_excel():
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
         row_idx = 11
-
-        for t in tramos_reales:
-            curr_time = t['dt_ini']
-            end_time = t['dt_fin']
+        for f in filas_finales:
+            ciudad = "Navojoa" if "Navojoa" in f['origen'] or "Pueblo Mayo" in f['origen'] else ("Guaymas" if "Guaymas" in f['origen'] else "Zona Operativa")
             
-            max_speed = t['velocidad']
-            is_moving = max_speed > 0
+            ws.cell(row=row_idx, column=1, value=str(unit_id))
+            ws.cell(row=row_idx, column=2, value=f['fecha'].strftime('%Y-%m-%d %H:%M:%S'))
+            ws.cell(row=row_idx, column=3, value=f['origen'])
+            ws.cell(row=row_idx, column=4, value=ciudad)
+            ws.cell(row=row_idx, column=5, value=f['velocidad'])
+            ws.cell(row=row_idx, column=6, value=f['evento'])
+            ws.cell(row=row_idx, column=7, value=f['detalle'])
             
-            idle_remaining = t['idle_sec'] 
-            es_ralenti_excesivo = t['idle_sec'] >= (min_ralenti * 60)
+            if f['score'] == 5: ws.cell(row=row_idx, column=6).font = Font(color="FF0000", bold=True)
             
-            total_seconds = (end_time - curr_time).total_seconds()
-            avg_speed = (t['distancia'] / (total_seconds / 3600)) if total_seconds > 0 else 0
-            delta_lat = (t['lat_fin'] - t['lat_ini'])
-            delta_lng = (t['lng_fin'] - t['lng_ini'])
+            map_cell = ws.cell(row=row_idx, column=8, value="mapa")
+            map_cell.hyperlink = f"https://www.google.com/maps?q={f['lat']},{f['lng']}"
+            map_cell.font = Font(color="0000FF", underline="single")
+            map_cell.alignment = Alignment(horizontal="center")
             
-            step = 0
-            while curr_time <= end_time:
-                if is_moving:
-                    interval_mins = 1
-                    evento = "Exceso de velocidad" if random.uniform(avg_speed*0.85, avg_speed*1.15) > limite_velocidad else "En movimiento"
-                    detalle = "Avanzando hacia destino"
-                    current_speed = round(random.uniform(avg_speed * 0.85, avg_speed * 1.15), 1)
-                    current_speed = min(current_speed, max_speed)
-                else:
-                    if idle_remaining > 0:
-                        interval_mins = 1  
-                        current_speed = 0
-                        if es_ralenti_excesivo:
-                            evento = "Ralentí Excesivo"
-                            detalle = f"Motor encendido sin avance (> {min_ralenti} min)"
-                        else:
-                            evento = "Ralentí"
-                            detalle = "Motor encendido (Normal)"
-                        idle_remaining -= 60 
-                    else:
-                        interval_mins = 10 
-                        current_speed = 0
-                        evento = "Motor apagado"
-                        detalle = "Detenido en reposo"
-
-                progress = (curr_time - t['dt_ini']).total_seconds() / total_seconds if total_seconds > 0 else 0
-                progress = min(progress, 1.0)
-                current_lat = t['lat_ini'] + (delta_lat * progress)
-                current_lng = t['lng_ini'] + (delta_lng * progress)
-                
-                fecha_str = curr_time.strftime('%Y-%m-%d %H:%M:%S')
-                ciudad = "Navojoa" if "Navojoa" in t['origen'] or "Pueblo Mayo" in t['origen'] else ("Guaymas" if "Guaymas" in t['origen'] else "Zona Operativa")
-
-                ws.cell(row=row_idx, column=1, value=str(unit_id))
-                ws.cell(row=row_idx, column=2, value=fecha_str)
-                ws.cell(row=row_idx, column=3, value=t['origen'])
-                ws.cell(row=row_idx, column=4, value=ciudad)
-                ws.cell(row=row_idx, column=5, value=current_speed)
-                ws.cell(row=row_idx, column=6, value=evento)
-                ws.cell(row=row_idx, column=7, value=detalle)
-                
-                if evento == "Ralentí Excesivo":
-                    ws.cell(row=row_idx, column=6).font = Font(color="FF0000", bold=True)
-                
-                map_cell = ws.cell(row=row_idx, column=8, value="mapa")
-                map_cell.hyperlink = f"https://www.google.com/maps?q={current_lat},{current_lng}"
-                map_cell.font = Font(color="0000FF", underline="single")
-                map_cell.alignment = Alignment(horizontal="center")
-                
-                ws.cell(row=row_idx, column=9, value=round(current_lng, 6))
-                ws.cell(row=row_idx, column=10, value=round(current_lat, 6))
-                
-                curr_time += timedelta(minutes=interval_mins)
-                
-                if curr_time > end_time and step > 0:
-                    break
-                step += 1
-                row_idx += 1
+            ws.cell(row=row_idx, column=9, value=round(f['lng'], 6))
+            ws.cell(row=row_idx, column=10, value=round(f['lat'], 6))
+            row_idx += 1
 
         buf = io.BytesIO()
         wb.save(buf)
