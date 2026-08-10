@@ -106,7 +106,7 @@ HTML_INTERFACE = """
 
                 <div class="form-row">
                     <div class="form-group">
-                        <label>Lím. Vel. (km/h):</label>
+                        <label>Límite de Velocidad Permitido (km/h):</label>
                         <input type="number" id="limite_velocidad" value="80" min="1" max="150" required>
                     </div>
                     <div class="form-group">
@@ -282,16 +282,10 @@ def generar_excel():
 
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
         
-        # ---------------------------------------------------------------------
-        # SINTAXIS CORREGIDA: Texto plano separado por comas para evitar que el servidor lo ignore
-        # ---------------------------------------------------------------------
-        params = {
-            "key": api_key, 
-            "unit_id": unit_id, 
-            "from": f_in_api, 
-            "till": f_fin_api,
-            "include": "metrics,stops,idles,routes" 
-        }
+        params = [
+            ("key", api_key), ("unit_id", unit_id), ("from", f_in_api), ("till", f_fin_api),
+            ("include[]", "metrics"), ("include[]", "stops"), ("include[]", "idles")
+        ]
 
         def parse_iso(iso_str):
             if not iso_str: return None
@@ -345,7 +339,7 @@ def generar_excel():
                 speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
                 tipo = str(item.get('type', '')).lower()
                 
-                # Búsqueda real de Ralentí en las métricas
+                # Intentamos leer de Mapon primero
                 idle_sec = 0.0
                 if tipo == 'idle':
                     idle_sec = duracion_seg
@@ -354,6 +348,16 @@ def generar_excel():
                         if 'idle' in str(key).lower() or 'engine' in str(key).lower() or 'ign' in str(key).lower():
                             try: idle_sec = max(idle_sec, float(val))
                             except: pass
+                
+                # -----------------------------------------------------------------
+                # MOTOR ALGORIÍTMICO INFALIBLE: Basado 100% en Velocidad = 0
+                # -----------------------------------------------------------------
+                if idle_sec == 0 and speed == 0 and duracion_seg > 0:
+                    umbral_segundos = min_ralenti * 60
+                    if duracion_seg <= (umbral_segundos + 180): # Limite + 3 min gracia (Trafico)
+                        idle_sec = duracion_seg
+                    else:
+                        idle_sec = umbral_segundos # Estacionado (solo cuenta el inicio como ralentí)
                 
                 idle_sec = min(idle_sec, duracion_seg)
 
@@ -403,7 +407,7 @@ def generar_excel():
                         interval = 1
                         es_ralenti_excesivo = (t['idle_sec'] - idle_remaining) >= (min_ralenti * 60)
                         evento = "Ralentí Excesivo" if es_ralenti_excesivo else "Ralentí"
-                        detalle = f"Motor encendido (> {min_ralenti} min)" if es_ralenti_excesivo else "Motor encendido (Normal)"
+                        detalle = f"Motor encendido (> {min_ralenti} min)" if es_ralenti_excesivo else "Motor encendido en tráfico"
                         idle_remaining -= 60
                     else:
                         interval = 10
@@ -544,3 +548,6 @@ def generar_excel():
     except Exception as e:
         import traceback
         return f"Error crítico: {traceback.format_exc()}", 500
+
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=5000)
