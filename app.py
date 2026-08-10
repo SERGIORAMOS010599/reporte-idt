@@ -245,38 +245,55 @@ def generar_excel():
         import os
         from datetime import datetime
 
-        # 1. Parámetros de tu interfaz web
+        # 1. Parámetros
         unit_id = request.args.get('unit_id', '868807')
-        # Limpiar el ID si viene con texto extra, ej: "INTERNATIONAL PROSTAR 76 TRACTO (ID: 868807)"
         if "ID:" in unit_id:
             unit_id = unit_id.split("ID:")[1].replace(")", "").strip()
 
+        # 2. Formateo Extremo de Fechas para la API de Mapon
         f_in = request.args.get('fecha_inicio', '2026-08-09')
         f_fin = request.args.get('fecha_fin', f_in)
-        
-        # Reformatear fechas de DD/MM/YYYY a YYYY-MM-DD para la API si es necesario
-        try:
-            if "/" in f_in:
-                f_in = datetime.strptime(f_in, '%d/%m/%Y').strftime('%Y-%m-%d')
-            if "/" in f_fin:
-                f_fin = datetime.strptime(f_fin, '%d/%m/%Y').strftime('%Y-%m-%d')
-        except:
-            pass
-
         hora_inicio = request.args.get('hora_inicio', '00:00:00')
         hora_fin = request.args.get('hora_fin', '23:59:59')
-        
-        # ⚠️ IMPORTANTE: Pon tu API Key real aquí si no está en las variables de entorno de Render
-        api_key = os.environ.get('MAPON_API_KEY', 'PON_TU_API_KEY_AQUI')
 
-        # 2. Petición real a la API de Mapon
-        # El endpoint correcto para el historial de rutas suele ser route/list.json
+        # Convertimos cualquier formato raro al estándar de base de datos YYYY-MM-DD
+        def normalizar_fecha(fecha_str):
+            try:
+                # Si viene como DD/MM/YYYY
+                if "/" in fecha_str:
+                    return datetime.strptime(fecha_str, '%d/%m/%Y').strftime('%Y-%m-%d')
+                # Si ya viene como YYYY-MM-DD
+                elif "-" in fecha_str and len(fecha_str) == 10:
+                    return fecha_str
+            except:
+                pass
+            return '2026-08-09' # Fallback seguro
+
+        # Limpiamos las horas (si vienen en 12h AM/PM las pasamos a 24h)
+        def normalizar_hora(hora_str, es_fin=False):
+            try:
+                if "AM" in hora_str.upper() or "PM" in hora_str.upper():
+                    return datetime.strptime(hora_str.strip(), '%I:%M %p').strftime('%H:%M:%00')
+                if len(hora_str) == 5: # HH:MM
+                    return f"{hora_str}:00"
+                if len(hora_str) == 8: # HH:MM:SS
+                    return hora_str
+            except:
+                pass
+            return "23:59:59" if es_fin else "00:00:00"
+
+        f_in_api = f"{normalizar_fecha(f_in)} {normalizar_hora(hora_inicio)}"
+        f_fin_api = f"{normalizar_fecha(f_fin)} {normalizar_hora(hora_fin, True)}"
+
+        api_key = os.environ.get('MAPON_API_KEY')
+
+        # 3. Petición a Mapon (Ahora con el parámetro 'from' impecable)
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
         params = {
             "key": api_key,
             "unit_id": unit_id,
-            "from": f"{f_in} 00:00:00",
-            "till": f"{f_fin} 23:59:59"
+            "from": f_in_api,
+            "till": f_fin_api
         }
 
         tramos_reales = []
@@ -285,11 +302,8 @@ def generar_excel():
         try:
             response = requests.get(url, params=params, timeout=15)
             data = response.json()
-            
-            # Guardamos la respuesta cruda para depuración si algo sale mal
-            api_debug_info = str(data)[:1000] # Primeros 1000 caracteres de lo que responde Mapon
+            api_debug_info = str(data)[:500] 
 
-            # Intentamos parsear la estructura habitual de Mapon
             rutas = []
             if isinstance(data, dict) and 'data' in data:
                 if 'routes' in data['data']:
@@ -300,7 +314,6 @@ def generar_excel():
                 rutas = data
 
             for item in rutas:
-                # Extraemos según estructura Mapon
                 h_ini = str(item.get('start', {}).get('time', item.get('start_time', '00:00')))[-8:-3]
                 origen = str(item.get('start', {}).get('address', item.get('start_address', 'Zona Operativa')))
                 dist = float(item.get('distance', 0))
@@ -313,9 +326,9 @@ def generar_excel():
                     'velocidad': speed
                 })
         except Exception as api_err:
-            api_debug_info = f"Error conectando a la API: {str(api_err)}"
+            api_debug_info = f"Error conectando: {str(api_err)}"
 
-        # 3. Construcción del Excel Oficial
+        # 4. Construcción del Excel
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Histórico"
@@ -327,12 +340,12 @@ def generar_excel():
         ws.cell(row=5, column=1, value="Recorrido Aprox:").font = Font(bold=True)
         ws.cell(row=5, column=3, value="Tiempo en Movimiento:").font = Font(bold=True)
         ws.cell(row=5, column=5, value="Fecha Inicial:").font = Font(bold=True)
-        ws.cell(row=5, column=6, value=str(f_in))
+        ws.cell(row=5, column=6, value=f_in_api)
 
         ws.cell(row=6, column=1, value="Velocidad Máxima:").font = Font(bold=True)
         ws.cell(row=6, column=3, value="Tiempo Muerto").font = Font(bold=True)
         ws.cell(row=6, column=5, value="Fecha Final:").font = Font(bold=True)
-        ws.cell(row=6, column=6, value=str(f_fin))
+        ws.cell(row=6, column=6, value=f_fin_api)
 
         ws.cell(row=7, column=1, value="Velocidad Promedio:").font = Font(bold=True)
         ws.cell(row=7, column=3, value="Horas Trabajadas:").font = Font(bold=True)
@@ -359,21 +372,23 @@ def generar_excel():
 
         row_idx = 11
 
-        # Si NO llegaron datos, imprimimos EXACTAMENTE qué respondió la API en el Excel
         if not tramos_reales:
-            ws.cell(row=row_idx, column=1, value="INFO DE DIAGNÓSTICO:")
+            ws.cell(row=row_idx, column=1, value="API INFO:")
             ws.cell(row=row_idx, column=2, value=api_debug_info)
-            ws.cell(row=row_idx, column=3, value=f"Endpoint usado: {url}")
-            ws.cell(row=row_idx, column=4, value=f"ID procesado: {unit_id}")
+            ws.cell(row=row_idx, column=3, value=f"from: {f_in_api}")
+            ws.cell(row=row_idx, column=4, value=f"till: {f_fin_api}")
         else:
-            # Si llegaron datos, calculamos y llenamos todo real
             total_dist = sum([t['distancia'] for t in tramos_reales])
             max_vel = max([t['velocidad'] for t in tramos_reales])
+            tramos_mov = [t for t in tramos_reales if t['velocidad'] > 0]
+            prom_vel = sum([t['velocidad'] for t in tramos_mov]) / len(tramos_mov) if tramos_mov else 0
+
             ws.cell(row=5, column=2, value=f"{round(total_dist, 2)} km")
             ws.cell(row=6, column=2, value=f"{round(max_vel, 1)} km/h")
+            ws.cell(row=7, column=2, value=f"{round(prom_vel, 1)} km/h")
 
             for t in tramos_reales:
-                fecha_str = f"{f_in} {t['hora']}:00"
+                fecha_str = f"{normalizar_fecha(f_in)} {t['hora']}:00"
                 speed = t['velocidad']
                 evento = "Exceso de velocidad" if speed > 80 else ("Motor encendido" if speed > 0 else "Motor apagado")
                 detalle = f"Distancia: {t['distancia']} km" if speed > 0 else "Detenido"
@@ -386,7 +401,6 @@ def generar_excel():
                 ws.cell(row=row_idx, column=6, value=evento)
                 ws.cell(row=row_idx, column=7, value=detalle)
                 
-                # Hipervínculo ficticio como base (La API necesita endpoint de rutas GPS para los puntos exactos)
                 map_cell = ws.cell(row=row_idx, column=8, value="mapa")
                 map_cell.hyperlink = f"https://www.google.com/maps?q=27.19289,-109.55168"
                 map_cell.font = Font(color="0000FF", underline="single")
@@ -398,10 +412,7 @@ def generar_excel():
         wb.save(buf)
         buf.seek(0)
         
-        return send_file(buf, 
-                         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                         as_attachment=True, 
-                         download_name="Historico_API_Diag.xlsx")
+        return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", as_attachment=True, download_name="Historico_Oficial.xlsx")
                          
     except Exception as e:
         import traceback
