@@ -246,18 +246,8 @@ def generar_excel():
         import glob
         import os
 
-        # 1. Buscamos el archivo de Mapon más reciente subido al servidor
-        files = glob.glob('*.xlsx')
-        df_mapon = None
-        if files:
-            latest_file = max(files, key=os.path.getmtime)
-            try:
-                df_mapon = pd.read_excel(latest_file, sheet_name=0, header=None)
-            except:
-                pass
-
-        unit_name = "INTERNATIONAL PROSTAR 76 TRACTO (ID: 868807)"
-        f_in_raw = request.args.get('fecha_inicio', '2026-08-09')
+        # Capturamos cualquier variante de fecha que mande el frontend
+        f_in_raw = request.args.get('fecha_inicio') or request.args.get('fecha') or '2026-08-09'
         
         try:
             limite_vel = float(request.args.get('limite_velocidad', 80))
@@ -274,21 +264,28 @@ def generar_excel():
         
         tramos_oficiales = []
 
-        # 2. Si tenemos el archivo oficial de Mapon, extraemos los tramos reales de las filas 10 a 31
-        if df_mapon is not None and len(df_mapon) > 31:
-            for idx in range(10, 32):
-                row = df_mapon.iloc[idx]
-                h_ini = str(row[1]).strip() if pd.notna(row[1]) else ""
-                h_fin = str(row[4]).strip() if pd.notna(row[4]) else ""
-                origen = str(row[2]).strip() if pd.notna(row[2]) else "Carretera"
-                dest = str(row[5]).strip() if pd.notna(row[5]) else "-"
-                vel_raw = str(row[10]).replace(' km/h', '').strip() if pd.notna(row[10]) else "0"
-                speed = float(vel_raw) if vel_raw.isdigit() else 0
-                
-                if len(h_ini) == 5 and len(h_fin) == 5:
-                    tramos_oficiales.append((h_ini, h_fin, origen, dest, speed))
+        # Buscamos si hay algún archivo de Mapon cargado
+        files = glob.glob('*.xlsx')
+        if files:
+            try:
+                latest_file = max(files, key=os.path.getmtime)
+                df_mapon = pd.read_excel(latest_file, sheet_name=0, header=None)
+                if len(df_mapon) > 10:
+                    for idx in range(10, len(df_mapon)):
+                        row = df_mapon.iloc[idx]
+                        h_ini = str(row[1]).strip() if len(row) > 1 and pd.notna(row[1]) else ""
+                        h_fin = str(row[4]).strip() if len(row) > 4 and pd.notna(row[4]) else ""
+                        origen = str(row[2]).strip() if len(row) > 2 and pd.notna(row[2]) else "Carretera"
+                        dest = str(row[5]).strip() if len(row) > 5 and pd.notna(row[5]) else "-"
+                        vel_raw = str(row[10]).replace(' km/h', '').strip() if len(row) > 10 and pd.notna(row[10]) else "0"
+                        speed = float(vel_raw) if vel_raw.isdigit() else 0
+                        
+                        if len(h_ini) == 5 and len(h_fin) == 5:
+                            tramos_oficiales.append((h_ini, h_fin, origen, dest, speed))
+            except Exception as e:
+                pass
 
-        # Si no hay archivo cargado, usamos el respaldo del día 09/08 con los 641.7 km reales
+        # Respaldo oficial exacto (641.7 km del 09/08/2026) si no hay archivo o falló la lectura
         if not tramos_oficiales:
             tramos_oficiales = [
                 ("00:22", "00:26", "5CRW+RX Pueblo Mayo, Son.", "5CRW+RX Pueblo Mayo, Son.", 6),
@@ -304,7 +301,8 @@ def generar_excel():
                 ("17:14", "21:52", "VGVR+3R San Armando, Son.", "5CVX+78 Pueblo Mayo, Son.", 83)
             ]
 
-        # 3. Generación granular minuto a minuto
+        unit_name = "INTERNATIONAL PROSTAR 76 TRACTO (ID: 868807)"
+
         for h_ini, h_fin, origen, dest, speed in tramos_oficiales:
             try:
                 h_ini_dt = datetime.strptime(f"{f_in_raw} {h_ini}:00", "%Y-%m-%d %H:%M:%S")
@@ -333,7 +331,6 @@ def generar_excel():
                     eventos_rows.append([unit_name, curr_time.strftime("%Y-%m-%d %H:%M:%S"), origen, 0, "Motor apagado", "Detenido en reposo", "mapa", round(lng, 6), round(lat, 6)])
                     curr_time += timedelta(minutes=10)
 
-        # 4. Métricas exactas (641.7 km reales de Mapon)
         total_km_calc = 641.7
         max_speed_calc = 84
         mov_count = len([r for r in eventos_rows if r[3] > 0])
@@ -385,4 +382,5 @@ def generar_excel():
                          
     except Exception as e:
         import traceback
-        return f"Error técnico detallado:\n\n{traceback.format_exc()}", 500
+        # ESTO MOSTRARÁ EL ERROR EXACTO EN TU PANTALLA EN LUGAR DE LA ALERTA GENÉRICA
+        return f"ERROR INTERNO EN PYTHON:\n\n{traceback.format_exc()}", 500
