@@ -299,7 +299,6 @@ def generar_excel():
             except:
                 pass
 
-        # ESTRICTO: Si no hay información real de Mapon, se rechaza la generación. Cero datos falsos.
         if not tramos_reales:
             return "Error: No se encontró información real de Mapon para procesar el reporte.", 400
 
@@ -338,7 +337,6 @@ def generar_excel():
         ws.cell(row=8, column=5, value="Clase:").font = Font(bold=True)
         ws.cell(row=8, column=6, value="Troque de 2 ejes, 6 llantas (dobles traseras)")
 
-        # Encabezados de la Tabla Detallada (Fila 10) - Las 10 columnas exactas del cliente
         headers = [
             "Vehículo", "Fecha", "Dirección", "Ciudad", 
             "Velocidad (Km/h)", "Evento", "Detalle", "Mapa", "Longitud", "Latitud"
@@ -351,7 +349,6 @@ def generar_excel():
             cell.fill = header_fill
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        # Inserción exclusiva de los tramos reales extraídos
         row_idx = 11
         lat_base = 27.19289
         lng_base = -109.55168
@@ -398,4 +395,4 @@ def generar_excel():
                          
     except Exception as e:
         import traceback
-        return f"Error técnico al procesar datos reales:\n\n{traceback.format_exc()}", 500s
+        return f"Error técnico al procesar datos reales:\n\n{traceback.format_exc()}", 500
