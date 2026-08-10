@@ -364,47 +364,65 @@ def generar_excel():
         tramos_mov = [t for t in tramos_reales if t['velocidad'] > 0]
         prom_vel = sum([t['velocidad'] for t in tramos_mov]) / len(tramos_mov) if tramos_mov else 0
         
-        # ---------------------------------------------------------
-        # CÁLCULOS EXACTOS DE TIEMPO (RESTANDO FECHAS)
+       # ---------------------------------------------------------
+        # CÁLCULOS EXACTOS DE TIEMPO (MOVIMIENTO, RALENTÍ Y APAGADO)
         # ---------------------------------------------------------
         total_dist = sum([t['distancia'] for t in tramos_reales])
         max_vel = max([t['velocidad'] for t in tramos_reales]) if tramos_reales else 0
         tramos_mov = [t for t in tramos_reales if t['velocidad'] > 0]
         prom_vel = sum([t['velocidad'] for t in tramos_mov]) / len(tramos_mov) if tramos_mov else 0
 
-        # Calculamos los segundos reales de cada tramo restando el Fin menos el Inicio
-        tiempo_movimiento_seg = sum([(t['dt_fin'] - t['dt_ini']).total_seconds() for t in tramos_reales if t['velocidad'] > 0])
-        tiempo_muerto_seg = sum([(t['dt_fin'] - t['dt_ini']).total_seconds() for t in tramos_reales if t['velocidad'] == 0])
+        tiempo_mov_seg = sum([(t['dt_fin'] - t['dt_ini']).total_seconds() for t in tramos_reales if t['velocidad'] > 0])
+        tiempo_ralenti_seg = sum([t['idle_sec'] for t in tramos_reales if t['velocidad'] == 0])
+        tiempo_muerto_seg = sum([(t['dt_fin'] - t['dt_ini']).total_seconds() - t['idle_sec'] for t in tramos_reales if t['velocidad'] == 0])
+        if tiempo_muerto_seg < 0: tiempo_muerto_seg = 0
 
-        mov_hrs = int(tiempo_movimiento_seg // 3600)
-        mov_mins = int((tiempo_movimiento_seg % 3600) // 60)
-        muerto_hrs = int(tiempo_muerto_seg // 3600)
-        muerto_mins = int((tiempo_muerto_seg % 3600) // 60)
+        def calc_hrs_mins(segundos):
+            return int(segundos // 3600), int((segundos % 3600) // 60)
 
-        total_segundos = tiempo_movimiento_seg + tiempo_muerto_seg
-        porc_mov = round((tiempo_movimiento_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
+        mov_hrs, mov_mins = calc_hrs_mins(tiempo_mov_seg)
+        ral_hrs, ral_mins = calc_hrs_mins(tiempo_ralenti_seg)
+        muerto_hrs, muerto_mins = calc_hrs_mins(tiempo_muerto_seg)
+
+        total_segundos = tiempo_mov_seg + tiempo_ralenti_seg + tiempo_muerto_seg
+        porc_mov = round((tiempo_mov_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
+        porc_ral = round((tiempo_ralenti_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
         porc_muerto = round((tiempo_muerto_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
-        
+
+        # Resumen Superior con Ralentí
         ws.cell(row=1, column=3, value="Histórico").font = Font(bold=True, size=14)
         ws.cell(row=3, column=3, value="Unidad").font = Font(bold=True)
         ws.cell(row=3, column=4, value=str(unit_id))
 
+        fecha_ini_legible = f"{normalizar_fecha(f_in)} {normalizar_hora(hora_inicio)}"
+        fecha_fin_legible = f"{normalizar_fecha(f_fin)} {normalizar_hora(hora_fin, True)}"
+
         ws.cell(row=5, column=1, value="Recorrido Aprox:").font = Font(bold=True)
         ws.cell(row=5, column=2, value=f"{round(total_dist, 2)} km")
         ws.cell(row=5, column=3, value="Tiempo en Movimiento:").font = Font(bold=True)
-        ws.cell(row=5, column=4, value=f"{mov_hrs} hrs {mov_mins} mins ({porc_mov}%)") # <--- LÍNEA FALTANTE
+        ws.cell(row=5, column=4, value=f"{mov_hrs} hrs {mov_mins} mins ({porc_mov}%)")
         ws.cell(row=5, column=5, value="Fecha Inicial:").font = Font(bold=True)
-        ws.cell(row=5, column=6, value=f_in)
+        ws.cell(row=5, column=6, value=fecha_ini_legible)
 
         ws.cell(row=6, column=1, value="Velocidad Máxima:").font = Font(bold=True)
         ws.cell(row=6, column=2, value=f"{round(max_vel, 1)} km/h")
-        ws.cell(row=6, column=3, value="Tiempo Muerto:").font = Font(bold=True)
-        ws.cell(row=6, column=4, value=f"{muerto_hrs} hrs {muerto_mins} mins ({porc_muerto}%)") # <--- LÍNEA FALTANTE
+        ws.cell(row=6, column=3, value="Tiempo Muerto (Apagado):").font = Font(bold=True)
+        ws.cell(row=6, column=4, value=f"{muerto_hrs} hrs {muerto_mins} mins ({porc_muerto}%)")
+        ws.cell(row=6, column=5, value="Fecha Final:").font = Font(bold=True)
+        ws.cell(row=6, column=6, value=fecha_fin_legible)
 
         ws.cell(row=7, column=1, value="Velocidad Promedio:").font = Font(bold=True)
         ws.cell(row=7, column=2, value=f"{round(prom_vel, 1)} km/h")
-        ws.cell(row=7, column=3, value="Horas Trabajadas:").font = Font(bold=True)
-        ws.cell(row=7, column=4, value="24.0 hrs")
+        ws.cell(row=7, column=3, value="Tiempo en Ralentí:").font = Font(bold=True)
+        ws.cell(row=7, column=4, value=f"{ral_hrs} hrs {ral_mins} mins ({porc_ral}%)").font = Font(color="FF0000") # Resaltado
+        ws.cell(row=7, column=5, value="Consumo Combustible:").font = Font(bold=True)
+        ws.cell(row=7, column=6, value="A calcular")
+
+        ws.cell(row=8, column=1, value="Costo Combustible:").font = Font(bold=True)
+        ws.cell(row=8, column=3, value="Horas de Motor (Trabajo):").font = Font(bold=True)
+        ws.cell(row=8, column=4, value=f"{mov_hrs + ral_hrs} hrs {mov_mins + ral_mins} mins")
+        ws.cell(row=8, column=5, value="Clase:").font = Font(bold=True)
+        ws.cell(row=8, column=6, value="Troque de 2 ejes, 6 llantas")
 
         headers = ["Vehículo", "Fecha", "Dirección", "Ciudad", "Velocidad (Km/h)", "Evento", "Detalle", "Mapa", "Longitud", "Latitud"]
         header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -417,53 +435,54 @@ def generar_excel():
         row_idx = 11
 
         # ---------------------------------------------------------
-        # ALGORITMO DE EXPANSIÓN CON VELOCIDAD REALISTA
+        # ALGORITMO DE EXPANSIÓN (MOVIMIENTO, RALENTÍ Y APAGADO)
         # ---------------------------------------------------------
+        import random 
+
         for t in tramos_reales:
             curr_time = t['dt_ini']
             end_time = t['dt_fin']
             
             max_speed = t['velocidad']
             is_moving = max_speed > 0
-            
-            interval_mins = 1 if is_moving else 10
+            idle_remaining = t['idle_sec'] # Segundos disponibles de ralentí para esta parada
             
             total_seconds = (end_time - curr_time).total_seconds()
-            total_intervals = int(total_seconds // (interval_mins * 60))
-            if total_intervals <= 0: total_intervals = 1
             
             avg_speed = (t['distancia'] / (total_seconds / 3600)) if total_seconds > 0 else 0
-            
-            delta_lat = (t['lat_fin'] - t['lat_ini']) / total_intervals
-            delta_lng = (t['lng_fin'] - t['lng_ini']) / total_intervals
+            delta_lat = (t['lat_fin'] - t['lat_ini'])
+            delta_lng = (t['lng_fin'] - t['lng_ini'])
             
             step = 0
             while curr_time <= end_time:
-                current_lat = t['lat_ini'] + (delta_lat * step)
-                current_lng = t['lng_ini'] + (delta_lng * step)
+                # Determinar estado y frecuencia de este bloque de tiempo
+                if is_moving:
+                    interval_mins = 1
+                    evento = "Exceso de velocidad" if random.uniform(avg_speed*0.85, avg_speed*1.15) > 80 else "En movimiento"
+                    detalle = "Avanzando hacia destino"
+                    current_speed = round(random.uniform(avg_speed * 0.85, avg_speed * 1.15), 1)
+                    current_speed = min(current_speed, max_speed)
+                else:
+                    if idle_remaining > 0:
+                        interval_mins = 1  # Minuto a minuto mientras hay ralentí
+                        current_speed = 0
+                        evento = "Ralentí (Motor Encendido)"
+                        detalle = "Detenido con motor encendido"
+                        idle_remaining -= 60 # Restamos 1 minuto (60 seg) al contador de ralentí
+                    else:
+                        interval_mins = 10 # Pasamos a 10 minutos cuando se apaga
+                        current_speed = 0
+                        evento = "Motor apagado"
+                        detalle = "Detenido en reposo"
+
+                # Progreso de coordenadas si está en movimiento
+                progress = (curr_time - t['dt_ini']).total_seconds() / total_seconds if total_seconds > 0 else 0
+                progress = min(progress, 1.0)
+                current_lat = t['lat_ini'] + (delta_lat * progress)
+                current_lng = t['lng_ini'] + (delta_lng * progress)
                 
                 fecha_str = curr_time.strftime('%Y-%m-%d %H:%M:%S')
-                ciudad = "Navojoa" if "Navojoa" in t['origen'] or "Pueblo Mayo" in t['origen'] else "Zona Operativa"
-                
-                if is_moving:
-                    current_speed = random.uniform(avg_speed * 0.85, avg_speed * 1.15)
-                    
-                    if step == 0 or step >= total_intervals - 1:
-                        current_speed = current_speed * 0.6
-                    
-                    current_speed = min(current_speed, max_speed)
-                    
-                    if step == total_intervals // 2:
-                        current_speed = max_speed
-                        
-                    current_speed = round(current_speed, 1)
-                    
-                    evento = "Exceso de velocidad" if current_speed > 80 else "En movimiento"
-                    detalle = "Avanzando hacia destino"
-                else:
-                    current_speed = 0
-                    evento = "Motor apagado"
-                    detalle = "Detenido en reposo"
+                ciudad = "Navojoa" if "Navojoa" in t['origen'] or "Pueblo Mayo" in t['origen'] else ("Guaymas" if "Guaymas" in t['origen'] else "Zona Operativa")
 
                 ws.cell(row=row_idx, column=1, value=str(unit_id))
                 ws.cell(row=row_idx, column=2, value=fecha_str)
@@ -481,9 +500,13 @@ def generar_excel():
                 ws.cell(row=row_idx, column=9, value=round(current_lng, 6))
                 ws.cell(row=row_idx, column=10, value=round(current_lat, 6))
                 
+                # Avanzamos el reloj
                 curr_time += timedelta(minutes=interval_mins)
+                
+                # Si el próximo salto rebasa la fecha final del tramo, forzamos salida
+                if curr_time > end_time and step > 0:
+                    break
                 step += 1
-                if step > total_intervals: step = total_intervals
                 row_idx += 1
 
         buf = io.BytesIO()
