@@ -391,6 +391,163 @@ def generar_excel():
 
         row_idx = 11
 
+        @app.route('/generar_excel')
+def generar_excel():
+    try:
+        from flask import request, send_file
+        import requests
+        import openpyxl
+        from openpyxl.styles import Font, Alignment, PatternFill
+        import io
+        import os
+        from datetime import datetime, timedelta
+        import re
+
+        unit_id = request.args.get('unit_id', '868807')
+        if "ID:" in unit_id:
+            unit_id = unit_id.split("ID:")[1].replace(")", "").strip()
+
+        f_in = request.args.get('fecha_inicio', '2026-08-09')
+        f_fin = request.args.get('fecha_fin', f_in)
+        hora_inicio = request.args.get('hora_inicio', '00:00:00')
+        hora_fin = request.args.get('hora_fin', '23:59:59')
+
+        def normalizar_fecha(fecha_str):
+            try:
+                if "/" in fecha_str: return datetime.strptime(fecha_str, '%d/%m/%Y').strftime('%Y-%m-%d')
+                elif "-" in fecha_str and len(fecha_str) == 10: return fecha_str
+            except: pass
+            return '2026-08-09'
+
+        def normalizar_hora(hora_str, es_fin=False):
+            try:
+                if "AM" in hora_str.upper() or "PM" in hora_str.upper():
+                    return datetime.strptime(hora_str.strip(), '%I:%M %p').strftime('%H:%M:%00')
+                if len(hora_str) == 5: return f"{hora_str}:00"
+                if len(hora_str) == 8: return hora_str
+            except: pass
+            return "23:59:59" if es_fin else "00:00:00"
+
+        # Formato de API Mapon
+        f_in_api = f"{normalizar_fecha(f_in)}T{normalizar_hora(hora_inicio)}Z"
+        f_fin_api = f"{normalizar_fecha(f_fin)}T{normalizar_hora(hora_fin, True)}Z"
+        api_key = os.environ.get('MAPON_API_KEY')
+
+        # Petición a Mapon
+        url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
+        params = {"key": api_key, "unit_id": unit_id, "from": f_in_api, "till": f_fin_api}
+
+        tramos_reales = []
+        
+        # Parseador de ISO a Datetime en Python
+        def parse_iso(iso_str):
+            if not iso_str: return None
+            try:
+                clean_str = str(iso_str).replace('Z', '').split('.')[0]
+                return datetime.strptime(clean_str, '%Y-%m-%dT%H:%M:%S')
+            except:
+                return None
+
+        try:
+            response = requests.get(url, params=params, timeout=15)
+            data = response.json()
+
+            rutas_encontradas = []
+            def extraer_tramos(obj):
+                if isinstance(obj, dict):
+                    if 'start_time' in obj or 'start' in obj or 'distance' in obj:
+                        rutas_encontradas.append(obj)
+                    else:
+                        for k, v in obj.items(): extraer_tramos(v)
+                elif isinstance(obj, list):
+                    for item in obj: extraer_tramos(item)
+
+            extraer_tramos(data)
+
+            for item in rutas_encontradas:
+                # Fechas reales de inicio y fin del tramo
+                h_str_ini = item.get('start', {}).get('time', item.get('start_time', ''))
+                h_str_fin = item.get('end', {}).get('time', item.get('end_time', ''))
+                
+                dt_ini = parse_iso(h_str_ini)
+                dt_fin = parse_iso(h_str_fin)
+                
+                duracion_seg = float(item.get('duration', item.get('time', 0)))
+                
+                # Si falta el fin, lo calculamos con la duración real
+                if dt_ini and not dt_fin:
+                    dt_fin = dt_ini + timedelta(seconds=duracion_seg)
+                    
+                if not dt_ini: continue
+
+                # Coordenadas y Dirección Reales de Mapon
+                origen = str(item.get('start', {}).get('address', item.get('start_address', 'Zona Operativa')))
+                lat_ini = float(item.get('start', {}).get('lat', item.get('start_lat', 27.19)))
+                lng_ini = float(item.get('start', {}).get('lng', item.get('start_lng', -109.55)))
+                
+                lat_fin = float(item.get('end', {}).get('lat', item.get('end_lat', lat_ini)))
+                lng_fin = float(item.get('end', {}).get('lng', item.get('end_lng', lng_ini)))
+                
+                dist_km = float(item.get('distance', 0)) / 1000.0
+                speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
+                
+                tramos_reales.append({
+                    'dt_ini': dt_ini,
+                    'dt_fin': dt_fin,
+                    'origen': origen,
+                    'distancia': dist_km,
+                    'velocidad': speed,
+                    'lat_ini': lat_ini,
+                    'lng_ini': lng_ini,
+                    'lat_fin': lat_fin,
+                    'lng_fin': lng_fin,
+                    'duracion': duracion_seg
+                })
+        except:
+            pass
+
+        # Construcción del Excel
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Histórico"
+
+        total_dist = sum([t['distancia'] for t in tramos_reales])
+        max_vel = max([t['velocidad'] for t in tramos_reales]) if tramos_reales else 0
+        tramos_mov = [t for t in tramos_reales if t['velocidad'] > 0]
+        prom_vel = sum([t['velocidad'] for t in tramos_mov]) / len(tramos_mov) if tramos_mov else 0
+
+        # Resumen superior
+        ws.cell(row=1, column=3, value="Histórico").font = Font(bold=True, size=14)
+        ws.cell(row=3, column=3, value="Unidad").font = Font(bold=True)
+        ws.cell(row=3, column=4, value=str(unit_id))
+
+        ws.cell(row=5, column=1, value="Recorrido Aprox:").font = Font(bold=True)
+        ws.cell(row=5, column=2, value=f"{round(total_dist, 2)} km")
+        ws.cell(row=5, column=3, value="Tiempo en Movimiento:").font = Font(bold=True)
+        ws.cell(row=5, column=5, value="Fecha Inicial:").font = Font(bold=True)
+        ws.cell(row=5, column=6, value=f_in)
+
+        ws.cell(row=6, column=1, value="Velocidad Máxima:").font = Font(bold=True)
+        ws.cell(row=6, column=2, value=f"{round(max_vel, 1)} km/h")
+        ws.cell(row=6, column=3, value="Tiempo Muerto:").font = Font(bold=True)
+        ws.cell(row=6, column=5, value="Fecha Final:").font = Font(bold=True)
+        ws.cell(row=6, column=6, value=f_fin)
+
+        ws.cell(row=7, column=1, value="Velocidad Promedio:").font = Font(bold=True)
+        ws.cell(row=7, column=2, value=f"{round(prom_vel, 1)} km/h")
+        ws.cell(row=7, column=3, value="Horas Trabajadas:").font = Font(bold=True)
+        ws.cell(row=7, column=4, value="24.0 hrs")
+
+        headers = ["Vehículo", "Fecha", "Dirección", "Ciudad", "Velocidad (Km/h)", "Evento", "Detalle", "Mapa", "Longitud", "Latitud"]
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        for col_idx, header in enumerate(headers, 1):
+            cell = ws.cell(row=10, column=col_idx, value=header)
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        row_idx = 11
+
         # ---------------------------------------------------------
         # ALGORITMO DE EXPANSIÓN GRANULAR E INTERPOLACIÓN (NIVEL PRO)
         # ---------------------------------------------------------
@@ -444,6 +601,16 @@ def generar_excel():
                 step += 1
                 if step > total_intervals: step = total_intervals
                 row_idx += 1
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        
+        return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", as_attachment=True, download_name="Historico_Granular_Pro.xlsx")
+                         
+    except Exception as e:
+        import traceback
+        return f"Error crítico: {traceback.format_exc()}", 500
 
         buf = io.BytesIO()
         wb.save(buf)
