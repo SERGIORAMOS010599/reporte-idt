@@ -282,10 +282,16 @@ def generar_excel():
 
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
         
-        params = [
-            ("key", api_key), ("unit_id", unit_id), ("from", f_in_api), ("till", f_fin_api),
-            ("include[]", "metrics"), ("include[]", "stops"), ("include[]", "idles")
-        ]
+        # ---------------------------------------------------------------------
+        # SINTAXIS CORREGIDA: Texto plano separado por comas para evitar que el servidor lo ignore
+        # ---------------------------------------------------------------------
+        params = {
+            "key": api_key, 
+            "unit_id": unit_id, 
+            "from": f_in_api, 
+            "till": f_fin_api,
+            "include": "metrics,stops,idles,routes" 
+        }
 
         def parse_iso(iso_str):
             if not iso_str: return None
@@ -339,6 +345,7 @@ def generar_excel():
                 speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
                 tipo = str(item.get('type', '')).lower()
                 
+                # Búsqueda real de Ralentí en las métricas
                 idle_sec = 0.0
                 if tipo == 'idle':
                     idle_sec = duracion_seg
@@ -347,6 +354,7 @@ def generar_excel():
                         if 'idle' in str(key).lower() or 'engine' in str(key).lower() or 'ign' in str(key).lower():
                             try: idle_sec = max(idle_sec, float(val))
                             except: pass
+                
                 idle_sec = min(idle_sec, duracion_seg)
 
                 tramos_reales.append({
@@ -358,7 +366,7 @@ def generar_excel():
         except: pass
 
         # ---------------------------------------------------------
-        # GENERACIÓN CRONOLÓGICA BRUTA (SIN IMPORTAR SOLAPAMIENTOS)
+        # GENERACIÓN CRONOLÓGICA (ALTA PRECISIÓN)
         # ---------------------------------------------------------
         filas_brutas = []
         for t in tramos_reales:
@@ -389,11 +397,11 @@ def generar_excel():
                     curr_time += timedelta(minutes=1)
             else:
                 idle_remaining = t['idle_sec']
-                es_ralenti_excesivo = t['idle_sec'] >= (min_ralenti * 60)
                 
                 while curr_time <= end_time:
                     if idle_remaining > 0:
                         interval = 1
+                        es_ralenti_excesivo = (t['idle_sec'] - idle_remaining) >= (min_ralenti * 60)
                         evento = "Ralentí Excesivo" if es_ralenti_excesivo else "Ralentí"
                         detalle = f"Motor encendido (> {min_ralenti} min)" if es_ralenti_excesivo else "Motor encendido (Normal)"
                         idle_remaining -= 60
@@ -408,15 +416,11 @@ def generar_excel():
                     })
                     curr_time += timedelta(minutes=interval)
 
-        # ---------------------------------------------------------
-        # FUSIÓN Y RESOLUCIÓN DE DUPLICADOS (PRIORIZAMOS EL RALENTÍ)
-        # ---------------------------------------------------------
         filas_brutas.sort(key=lambda x: x['fecha'])
         filas_unicas = {}
         for f in filas_brutas:
             ts = f['fecha'].strftime('%Y-%m-%d %H:%M:%S')
             
-            # El Score asegura que si un Ralentí choca con un Apagado, gana el Ralentí
             score = 1
             if "Ralentí Excesivo" in f['evento']: score = 5
             elif "Ralentí" in f['evento']: score = 4
@@ -430,9 +434,6 @@ def generar_excel():
         filas_finales = list(filas_unicas.values())
         filas_finales.sort(key=lambda x: x['fecha'])
 
-        # ---------------------------------------------------------
-        # CÁLCULOS EXACTOS DE CABECERA BASADOS 100% EN LAS FILAS
-        # ---------------------------------------------------------
         tiempo_mov_seg = 0
         tiempo_ral_seg = 0
         tiempo_apagado_seg = 0
@@ -441,7 +442,7 @@ def generar_excel():
             f_actual = filas_finales[i]
             if i < len(filas_finales) - 1:
                 duracion = (filas_finales[i+1]['fecha'] - f_actual['fecha']).total_seconds()
-                if duracion > 3600: duracion = 600 # Limita huecos grandes sin señal
+                if duracion > 3600: duracion = 600
             else:
                 duracion = 60 if f_actual['score'] > 1 else 600
                 
@@ -459,16 +460,12 @@ def generar_excel():
         porc_ral = round((tiempo_ral_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
         porc_muerto = round((tiempo_apagado_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
 
-        # Filtro para distancias duplicadas
         rutas_unicas = {t['dt_ini'].strftime('%Y%m%d%H%M%S'): t['distancia'] for t in tramos_reales if t['tipo'] == 'route' or t['distancia'] > 0}
         total_dist = sum(rutas_unicas.values())
         max_vel = max([t['velocidad'] for t in tramos_reales]) if tramos_reales else 0
         vels_mov = [t['velocidad'] for t in tramos_reales if t['velocidad'] > 0]
         prom_vel = sum(vels_mov) / len(vels_mov) if vels_mov else 0
 
-        # ---------------------------------------------------------
-        # ESCRITURA DEL EXCEL
-        # ---------------------------------------------------------
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Histórico"
@@ -527,7 +524,7 @@ def generar_excel():
             ws.cell(row=row_idx, column=6, value=f['evento'])
             ws.cell(row=row_idx, column=7, value=f['detalle'])
             
-            if f['score'] == 5: ws.cell(row=row_idx, column=6).font = Font(color="FF0000", bold=True)
+            if f['score'] >= 4: ws.cell(row=row_idx, column=6).font = Font(color="FF0000", bold=True)
             
             map_cell = ws.cell(row=row_idx, column=8, value="mapa")
             map_cell.hyperlink = f"https://www.google.com/maps?q={f['lat']},{f['lng']}"
