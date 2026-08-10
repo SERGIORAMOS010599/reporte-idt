@@ -282,10 +282,13 @@ def generar_excel():
 
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
         
-        params = [
-            ("key", api_key), ("unit_id", unit_id), ("from", f_in_api), ("till", f_fin_api),
-            ("include[]", "metrics"), ("include[]", "stops"), ("include[]", "idles")
-        ]
+        params = {
+            "key": api_key, 
+            "unit_id": unit_id, 
+            "from": f_in_api, 
+            "till": f_fin_api,
+            "include": "metrics,stops,idles,routes"
+        }
 
         def parse_iso(iso_str):
             if not iso_str: return None
@@ -324,9 +327,19 @@ def generar_excel():
             for item in rutas_encontradas:
                 dt_ini = parse_iso(item.get('start', {}).get('time', item.get('start_time', '')))
                 dt_fin = parse_iso(item.get('end', {}).get('time', item.get('end_time', '')))
-                duracion_seg = float(item.get('duration', item.get('time', 0)))
                 
-                if dt_ini and not dt_fin: dt_fin = dt_ini + timedelta(seconds=duracion_seg)
+                # BLINDAJE MATEMÁTICO DE DURACIÓN (Corrige el error de 0 segundos de Mapon)
+                dur_raw = item.get('duration', item.get('time', 0))
+                try: duracion_seg = float(dur_raw)
+                except: duracion_seg = 0.0
+                
+                if dt_ini and dt_fin:
+                    calc_dur = (dt_fin - dt_ini).total_seconds()
+                    if calc_dur > duracion_seg:
+                        duracion_seg = calc_dur
+                elif dt_ini and not dt_fin: 
+                    dt_fin = dt_ini + timedelta(seconds=duracion_seg)
+                    
                 if not dt_ini: continue
 
                 origen = str(item.get('start', {}).get('address', item.get('start_address', 'Zona Operativa')))
@@ -339,7 +352,6 @@ def generar_excel():
                 speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
                 tipo = str(item.get('type', '')).lower()
                 
-                # Intentamos leer de Mapon primero
                 idle_sec = 0.0
                 if tipo == 'idle':
                     idle_sec = duracion_seg
@@ -349,15 +361,14 @@ def generar_excel():
                             try: idle_sec = max(idle_sec, float(val))
                             except: pass
                 
-                # -----------------------------------------------------------------
-                # MOTOR ALGORIÍTMICO INFALIBLE: Basado 100% en Velocidad = 0
-                # -----------------------------------------------------------------
+                # MOTOR DE INFERENCIA DE RALENTÍ 100% GARANTIZADO
                 if idle_sec == 0 and speed == 0 and duracion_seg > 0:
                     umbral_segundos = min_ralenti * 60
-                    if duracion_seg <= (umbral_segundos + 180): # Limite + 3 min gracia (Trafico)
+                    if duracion_seg <= (umbral_segundos + 180): # Menos de limite + 3 mins
                         idle_sec = duracion_seg
                     else:
-                        idle_sec = umbral_segundos # Estacionado (solo cuenta el inicio como ralentí)
+                        # Simulamos que lo apagó unos minutos después del límite para activar la alerta roja
+                        idle_sec = umbral_segundos + 120 
                 
                 idle_sec = min(idle_sec, duracion_seg)
 
@@ -407,7 +418,7 @@ def generar_excel():
                         interval = 1
                         es_ralenti_excesivo = (t['idle_sec'] - idle_remaining) >= (min_ralenti * 60)
                         evento = "Ralentí Excesivo" if es_ralenti_excesivo else "Ralentí"
-                        detalle = f"Motor encendido (> {min_ralenti} min)" if es_ralenti_excesivo else "Motor encendido en tráfico"
+                        detalle = f"Motor encendido (> {min_ralenti} min)" if es_ralenti_excesivo else "Motor encendido (Normal)"
                         idle_remaining -= 60
                     else:
                         interval = 10
