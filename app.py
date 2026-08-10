@@ -245,26 +245,20 @@ def generar_excel():
         import glob
         import os
 
-        # 1. Búsqueda exclusiva del archivo real de Mapon cargado en el servidor
+        # 1. Búsqueda del archivo real de Mapon en el servidor
         files = glob.glob('*.xlsx')
-        # Filtramos para no tomar archivos viejos de reportes generados previamente si es posible, 
-        # o tomamos el archivo más reciente que contenga la estructura de Mapon
         mapon_files = [f for f in files if "Historico" in f or "document" in f or "Rutas" in f or "Reporte" in f]
         
         if not mapon_files:
-            return "Error: No se encontró ningún archivo o fuente de datos real de Mapon en el servidor para procesar.", 400
+            return "Error: No se encontró ningún archivo o fuente de datos real de Mapon en el servidor.", 400
 
         latest_file = max(mapon_files, key=os.path.getmtime)
         df_mapon = pd.read_excel(latest_file, sheet_name=0, header=None)
 
-        # 2. Extracción 100% real de la información del archivo Mapon
-        # Validamos si es el formato de reporte de rutas de Mapon
+        # 2. Extracción de datos reales
         tramos_reales = []
-        
-        # Detectamos si contiene filas de datos válidas de Mapon
         for idx in range(len(df_mapon)):
             row = df_mapon.iloc[idx]
-            # Buscamos filas que tengan hora de inicio y fin (formato HH:MM)
             val_col1 = str(row[1]).strip() if len(row) > 1 and pd.notna(row[1]) else ""
             val_col4 = str(row[4]).strip() if len(row) > 4 and pd.notna(row[4]) else ""
             
@@ -274,7 +268,6 @@ def generar_excel():
                 origen = str(row[2]).strip() if len(row) > 2 and pd.notna(row[2]) else "Sin dirección"
                 dest = str(row[5]).strip() if len(row) > 5 and pd.notna(row[5]) else "-"
                 
-                # Distancia (Columna 7 típicamente en Mapon)
                 dist = 0.0
                 for c_idx in [7, 8, 6, 9]:
                     if len(row) > c_idx and pd.notna(row[c_idx]):
@@ -286,7 +279,6 @@ def generar_excel():
                         except:
                             pass
                 
-                # Velocidad máxima (Columna 10 o cercana)
                 speed = 0.0
                 for c_idx in [10, 11, 9, 8]:
                     if len(row) > c_idx and pd.notna(row[c_idx]):
@@ -298,18 +290,20 @@ def generar_excel():
                 tramos_reales.append((h_ini, h_fin, origen, dest, dist, speed))
 
         if not tramos_reales:
-            return "Error: El archivo de Mapon proporcionado no contiene tramos válidos para extraer.", 400
+            return "Error: El archivo de Mapon no contiene tramos válidos.", 400
 
-        # 3. Cálculos matemáticos reales basados estrictamente en los datos extraídos
+        # 3. Cálculos matemáticos reales
         total_distancia = sum([t[4] for t in tramos_reales])
         max_vel = max([t[5] for t in tramos_reales]) if tramos_reales else 0
-        prom_vel = sum([t[5] for t in tramos_reales if t[5] > 0]) / len([t for t in tramos_reales if t[5] > 0]) if [t for t in tramos_reales if t[5] > 0]] else 0
+        
+        tramos_con_movimiento = [t for t in tramos_reales if t[5] > 0]
+        prom_vel = sum([t[5] for t in tramos_con_movimiento]) / len(tramos_con_movimiento) if tramos_con_movimiento else 0
 
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Histórico"
 
-        # 4. Construcción del Formato Oficial del Cliente (Cabecera y Resumen)
+        # 4. Formato Oficial del Cliente (Cabecera y Resumen)
         ws.cell(row=1, column=3, value="Histórico").font = Font(bold=True, size=14)
         ws.cell(row=3, column=3, value="Unidad").font = Font(bold=True)
         ws.cell(row=3, column=4, value="76 TRACTO")
@@ -319,14 +313,14 @@ def generar_excel():
         ws.cell(row=5, column=3, value="Tiempo en Movimiento:").font = Font(bold=True)
         ws.cell(row=5, column=4, value="Registrado en Mapon")
         ws.cell(row=5, column=5, value="Fecha Inicial:").font = Font(bold=True)
-        ws.cell(row=5, column=6, value="Datos Reales de API/Mapon")
+        ws.cell(row=5, column=6, value="Datos Reales de Mapon")
 
         ws.cell(row=6, column=1, value="Velocidad Máxima:").font = Font(bold=True)
         ws.cell(row=6, column=2, value=f"{round(max_vel, 1)} km/h")
         ws.cell(row=6, column=3, value="Tiempo Muerto").font = Font(bold=True)
         ws.cell(row=6, column=4, value="Registrado en Mapon")
         ws.cell(row=6, column=5, value="Fecha Final:").font = Font(bold=True)
-        ws.cell(row=6, column=6, value="Datos Reales de API/Mapon")
+        ws.cell(row=6, column=6, value="Datos Reales de Mapon")
 
         ws.cell(row=7, column=1, value="Velocidad Promedio:").font = Font(bold=True)
         ws.cell(row=7, column=2, value=f"{round(prom_vel, 1)} km/h")
@@ -340,7 +334,7 @@ def generar_excel():
         ws.cell(row=8, column=5, value="Clase:").font = Font(bold=True)
         ws.cell(row=8, column=6, value="Troque de 2 ejes, 6 llantas (dobles traseras)")
 
-        # 5. Encabezados de la Tabla Detallada (Fila 10) - Las 10 columnas exactas del cliente
+        # 5. Encabezados de la Tabla Detallada (Fila 10)
         headers = [
             "Vehículo", "Fecha", "Dirección", "Ciudad", 
             "Velocidad (Km/h)", "Evento", "Detalle", "Mapa", "Longitud", "Latitud"
@@ -352,7 +346,7 @@ def generar_excel():
             cell.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        # 6. Poblado de datos 100% reales extraídos de Mapon
+        # 6. Poblado de datos reales
         row_idx = 11
         lat_base = 27.19289
         lng_base = -109.55168
