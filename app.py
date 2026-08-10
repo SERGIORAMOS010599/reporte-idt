@@ -250,46 +250,41 @@ def generar_excel():
         if "ID:" in unit_id:
             unit_id = unit_id.split("ID:")[1].replace(")", "").strip()
 
-        # 2. Formateo Extremo de Fechas para la API de Mapon
         f_in = request.args.get('fecha_inicio', '2026-08-09')
         f_fin = request.args.get('fecha_fin', f_in)
         hora_inicio = request.args.get('hora_inicio', '00:00:00')
         hora_fin = request.args.get('hora_fin', '23:59:59')
 
-        # Convertimos cualquier formato raro al estándar de base de datos YYYY-MM-DD
         def normalizar_fecha(fecha_str):
             try:
-                # Si viene como DD/MM/YYYY
                 if "/" in fecha_str:
                     return datetime.strptime(fecha_str, '%d/%m/%Y').strftime('%Y-%m-%d')
-                # Si ya viene como YYYY-MM-DD
                 elif "-" in fecha_str and len(fecha_str) == 10:
                     return fecha_str
             except:
                 pass
-            return '2026-08-09' # Fallback seguro
+            return '2026-08-09'
 
-        # Limpiamos las horas (si vienen en 12h AM/PM las pasamos a 24h)
         def normalizar_hora(hora_str, es_fin=False):
             try:
                 if "AM" in hora_str.upper() or "PM" in hora_str.upper():
                     return datetime.strptime(hora_str.strip(), '%I:%M %p').strftime('%H:%M:%00')
-                if len(hora_str) == 5: # HH:MM
+                if len(hora_str) == 5:
                     return f"{hora_str}:00"
-                if len(hora_str) == 8: # HH:MM:SS
+                if len(hora_str) == 8:
                     return hora_str
             except:
                 pass
             return "23:59:59" if es_fin else "00:00:00"
 
-       # Formato ISO 8601 Estricto que exigen las APIs de Mapon
+        # ISO 8601
         f_in_api = f"{normalizar_fecha(f_in)}T{normalizar_hora(hora_inicio)}Z"
         f_fin_api = f"{normalizar_fecha(f_fin)}T{normalizar_hora(hora_fin, True)}Z"
 
         api_key = os.environ.get('MAPON_API_KEY')
 
-        # 3. Petición a Mapon (Ahora con el parámetro 'from' impecable)
-        url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
+        # 3. Petición a Mapon (Usamos el endpoint original de tu librería)
+        url = "https://gps.idttecnologias.mx/api/v1/routeplanning_routes/list.json"
         params = {
             "key": api_key,
             "unit_id": unit_id,
@@ -299,26 +294,43 @@ def generar_excel():
 
         tramos_reales = []
         api_debug_info = ""
+        data = None
 
         try:
             response = requests.get(url, params=params, timeout=15)
             data = response.json()
-            api_debug_info = str(data)[:500] 
+            api_debug_info = str(data)[:1000] 
 
-            rutas = []
-            if isinstance(data, dict) and 'data' in data:
-                if 'routes' in data['data']:
-                    rutas = data['data']['routes']
-                else:
-                    rutas = data['data']
-            elif isinstance(data, list):
-                rutas = data
+            # Extracción recursiva a prueba de balas (No importa cómo anide Mapon los datos)
+            rutas_encontradas = []
+            
+            def extraer_tramos(obj):
+                if isinstance(obj, dict):
+                    # Si el diccionario tiene llaves típicas de un tramo, lo guardamos
+                    if 'start_time' in obj or 'start' in obj or 'distance' in obj:
+                        rutas_encontradas.append(obj)
+                    else:
+                        for k, v in obj.items():
+                            extraer_tramos(v)
+                elif isinstance(obj, list):
+                    for item in obj:
+                        extraer_tramos(item)
 
-            for item in rutas:
+            extraer_tramos(data)
+
+            # Procesamos de forma segura los diccionarios encontrados
+            for item in rutas_encontradas:
                 h_ini = str(item.get('start', {}).get('time', item.get('start_time', '00:00')))[-8:-3]
+                if not h_ini or h_ini == "00:00":
+                    h_ini = str(item.get('time', '00:00'))[-8:-3]
+                
                 origen = str(item.get('start', {}).get('address', item.get('start_address', 'Zona Operativa')))
-                dist = float(item.get('distance', 0))
-                speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
+                
+                dist_raw = item.get('distance', 0)
+                dist = float(dist_raw) if dist_raw is not None else 0.0
+                
+                speed_raw = item.get('metrics', {}).get('max_speed', item.get('max_speed', 0))
+                speed = float(speed_raw) if speed_raw is not None else 0.0
                 
                 tramos_reales.append({
                     'hora': h_ini if h_ini else "00:00",
@@ -327,9 +339,9 @@ def generar_excel():
                     'velocidad': speed
                 })
         except Exception as api_err:
-            api_debug_info = f"Error conectando: {str(api_err)}"
+            api_debug_info = f"Error Parseando JSON: {str(api_err)} | Data cruda: {str(data)[:500]}"
 
-        # 4. Construcción del Excel
+        # 4. Construcción del Excel Oficial
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Histórico"
@@ -373,6 +385,7 @@ def generar_excel():
 
         row_idx = 11
 
+        # Si NO extrajo tramos a pesar de todo, guardamos la respuesta de la API para ver qué estructura nos envió Mapon
         if not tramos_reales:
             ws.cell(row=row_idx, column=1, value="API INFO:")
             ws.cell(row=row_idx, column=2, value=api_debug_info)
