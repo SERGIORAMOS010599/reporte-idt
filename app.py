@@ -238,98 +238,103 @@ import random
 def generar_excel():
     try:
         from flask import request, send_file
+        import requests
         import openpyxl
         from openpyxl.styles import Font, Alignment, PatternFill
         import io
-        import glob
         import os
-        import zipfile
-        import xml.etree.ElementTree as ET
+        from datetime import datetime
 
-        # 1. Parámetros de la interfaz web
-        unit_id = request.args.get('unit_id') or request.args.get('unidad') or '868807'
-        f_in = request.args.get('fecha_inicio') or request.args.get('fecha') or '2026-08-09'
-        f_fin = request.args.get('fecha_fin') or f_in
+        # 1. Parámetros de tu interfaz web
+        unit_id = request.args.get('unit_id', '868807')
+        # Limpiar el ID si viene con texto extra, ej: "INTERNATIONAL PROSTAR 76 TRACTO (ID: 868807)"
+        if "ID:" in unit_id:
+            unit_id = unit_id.split("ID:")[1].replace(")", "").strip()
 
-        # 2. Búsqueda segura del archivo de Mapon en el servidor mediante XML directo (evita errores de estilos)
-        files = glob.glob('*.xlsx')
-        mapon_files = [f for f in files if "document" in f or "Historico" in f or "Rutas" in f or "Reporte" in f]
+        f_in = request.args.get('fecha_inicio', '2026-08-09')
+        f_fin = request.args.get('fecha_fin', f_in)
         
+        # Reformatear fechas de DD/MM/YYYY a YYYY-MM-DD para la API si es necesario
+        try:
+            if "/" in f_in:
+                f_in = datetime.strptime(f_in, '%d/%m/%Y').strftime('%Y-%m-%d')
+            if "/" in f_fin:
+                f_fin = datetime.strptime(f_fin, '%d/%m/%Y').strftime('%Y-%m-%d')
+        except:
+            pass
+
+        hora_inicio = request.args.get('hora_inicio', '00:00:00')
+        hora_fin = request.args.get('hora_fin', '23:59:59')
+        
+        # ⚠️ IMPORTANTE: Pon tu API Key real aquí si no está en las variables de entorno de Render
+        api_key = os.environ.get('MAPON_API_KEY', 'PON_TU_API_KEY_AQUI')
+
+        # 2. Petición real a la API de Mapon
+        # El endpoint correcto para el historial de rutas suele ser route/list.json
+        url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
+        params = {
+            "key": api_key,
+            "unit_id": unit_id,
+            "from": f"{f_in} 00:00:00",
+            "till": f"{f_fin} 23:59:59"
+        }
+
         tramos_reales = []
-        if mapon_files:
-            latest_file = max(mapon_files, key=os.path.getmtime)
-            try:
-                with zipfile.ZipFile(latest_file, 'r') as z:
-                    strings = []
-                    if 'xl/sharedStrings.xml' in z.namelist():
-                        with z.open('xl/sharedStrings.xml') as f:
-                            s_tree = ET.parse(f)
-                            for si in s_tree.getroot().findall('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}si'):
-                                t = si.find('.//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t')
-                                strings.append(t.text if t is not None else '')
-                                
-                    with z.open('xl/worksheets/sheet1.xml') as f:
-                        sh_tree = ET.parse(f)
-                        for row in sh_tree.getroot().findall('.//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}row'):
-                            r_num = int(row.get('r', 0))
-                            if r_num >= 10: # Filas de datos del reporte de Mapon
-                                row_vals = {}
-                                for c in row.findall('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}c'):
-                                    cell_ref = c.get('r')
-                                    col_letter = ''.join([char for char in cell_ref if char.isalpha()])
-                                    t = c.get('t')
-                                    val = ''
-                                    if t == 'inlineStr':
-                                        t_el = c.find('.//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t')
-                                        if t_el is not None:
-                                            val = t_el.text
-                                    else:
-                                        v = c.find('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v')
-                                        if v is not None:
-                                            val = v.text
-                                            if t == 's' and val.isdigit() and int(val) < len(strings):
-                                                val = strings[int(val)]
-                                    row_vals[col_letter] = val
-                                
-                                h_ini = str(row_vals.get('B', '')).strip()
-                                origen = str(row_vals.get('C', '')).strip()
-                                vel = str(row_vals.get('K', '')).replace(' km/h', '').strip()
-                                
-                                if len(h_ini) == 5 and ':' in h_ini:
-                                    speed = float(vel) if vel.replace('.', '', 1).isdigit() else 0.0
-                                    tramos_reales.append((h_ini, origen if origen else "Zona Operativa", speed))
-            except:
-                pass
+        api_debug_info = ""
 
-        # Si no hay tramos extraídos, agregamos una fila informativa real para mantener la integridad del reporte
-        if not tramos_reales:
-            tramos_reales.append(("00:00", "Unidad activa en plataforma Mapon", 0.0))
+        try:
+            response = requests.get(url, params=params, timeout=15)
+            data = response.json()
+            
+            # Guardamos la respuesta cruda para depuración si algo sale mal
+            api_debug_info = str(data)[:1000] # Primeros 1000 caracteres de lo que responde Mapon
 
-        # 3. Construcción del Excel con el Formato Oficial Exacto del Cliente
+            # Intentamos parsear la estructura habitual de Mapon
+            rutas = []
+            if isinstance(data, dict) and 'data' in data:
+                if 'routes' in data['data']:
+                    rutas = data['data']['routes']
+                else:
+                    rutas = data['data']
+            elif isinstance(data, list):
+                rutas = data
+
+            for item in rutas:
+                # Extraemos según estructura Mapon
+                h_ini = str(item.get('start', {}).get('time', item.get('start_time', '00:00')))[-8:-3]
+                origen = str(item.get('start', {}).get('address', item.get('start_address', 'Zona Operativa')))
+                dist = float(item.get('distance', 0))
+                speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
+                
+                tramos_reales.append({
+                    'hora': h_ini if h_ini else "00:00",
+                    'origen': origen,
+                    'distancia': dist,
+                    'velocidad': speed
+                })
+        except Exception as api_err:
+            api_debug_info = f"Error conectando a la API: {str(api_err)}"
+
+        # 3. Construcción del Excel Oficial
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Histórico"
 
         ws.cell(row=1, column=3, value="Histórico").font = Font(bold=True, size=14)
         ws.cell(row=3, column=3, value="Unidad").font = Font(bold=True)
-        ws.cell(row=3, column=4, value=str(unit_id))
+        ws.cell(row=3, column=4, value=f"ID: {unit_id}")
 
         ws.cell(row=5, column=1, value="Recorrido Aprox:").font = Font(bold=True)
-        ws.cell(row=5, column=2, value="641.70 km")
         ws.cell(row=5, column=3, value="Tiempo en Movimiento:").font = Font(bold=True)
-        ws.cell(row=5, column=4, value="10 hrs 08 mins")
         ws.cell(row=5, column=5, value="Fecha Inicial:").font = Font(bold=True)
         ws.cell(row=5, column=6, value=str(f_in))
 
         ws.cell(row=6, column=1, value="Velocidad Máxima:").font = Font(bold=True)
-        ws.cell(row=6, column=2, value="84 km/h")
         ws.cell(row=6, column=3, value="Tiempo Muerto").font = Font(bold=True)
-        ws.cell(row=6, column=4, value="13 hrs 52 mins")
         ws.cell(row=6, column=5, value="Fecha Final:").font = Font(bold=True)
         ws.cell(row=6, column=6, value=str(f_fin))
 
         ws.cell(row=7, column=1, value="Velocidad Promedio:").font = Font(bold=True)
-        ws.cell(row=7, column=2, value="63 km/h")
         ws.cell(row=7, column=3, value="Horas Trabajadas:").font = Font(bold=True)
         ws.cell(row=7, column=4, value="24.0 hrs")
         ws.cell(row=7, column=5, value="Consumo Combustible:").font = Font(bold=True)
@@ -338,9 +343,8 @@ def generar_excel():
         ws.cell(row=8, column=1, value="Costo Combustible:").font = Font(bold=True)
         ws.cell(row=8, column=3, value="Costo Viaje:").font = Font(bold=True)
         ws.cell(row=8, column=5, value="Clase:").font = Font(bold=True)
-        ws.cell(row=8, column=6, value="Troque de 2 ejes, 6 llantas (dobles traseras)")
+        ws.cell(row=8, column=6, value="Troque de 2 ejes, 6 llantas")
 
-        # Encabezados de la Tabla Detallada (Fila 10) - Las 10 columnas exactas del cliente
         headers = [
             "Vehículo", "Fecha", "Dirección", "Ciudad", 
             "Velocidad (Km/h)", "Evento", "Detalle", "Mapa", "Longitud", "Latitud"
@@ -353,41 +357,42 @@ def generar_excel():
             cell.fill = header_fill
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        # 4. Inserción de los registros
         row_idx = 11
-        lat_base = 27.19289
-        lng_base = -109.55168
 
-        for h_ini, origen, speed in tramos_reales:
-            fecha_str = f"{f_in} {h_ini}:00"
-            ciudad = "Navojoa" if "Navojoa" in origen or "Pueblo Mayo" in origen else "Guaymas"
-            
-            if speed > 0:
-                evento = "Exceso de velocidad" if speed > 80 else "Motor encendido"
-                detalle = "-"
-            else:
-                evento = "Motor apagado"
-                detalle = "Detenido en reposo"
+        # Si NO llegaron datos, imprimimos EXACTAMENTE qué respondió la API en el Excel
+        if not tramos_reales:
+            ws.cell(row=row_idx, column=1, value="INFO DE DIAGNÓSTICO:")
+            ws.cell(row=row_idx, column=2, value=api_debug_info)
+            ws.cell(row=row_idx, column=3, value=f"Endpoint usado: {url}")
+            ws.cell(row=row_idx, column=4, value=f"ID procesado: {unit_id}")
+        else:
+            # Si llegaron datos, calculamos y llenamos todo real
+            total_dist = sum([t['distancia'] for t in tramos_reales])
+            max_vel = max([t['velocidad'] for t in tramos_reales])
+            ws.cell(row=5, column=2, value=f"{round(total_dist, 2)} km")
+            ws.cell(row=6, column=2, value=f"{round(max_vel, 1)} km/h")
 
-            ws.cell(row=row_idx, column=1, value=str(unit_id))
-            ws.cell(row=row_idx, column=2, value=fecha_str)
-            ws.cell(row=row_idx, column=3, value=origen)
-            ws.cell(row=row_idx, column=4, value=ciudad)
-            ws.cell(row=row_idx, column=5, value=speed)
-            ws.cell(row=row_idx, column=6, value=evento)
-            ws.cell(row=row_idx, column=7, value=detalle)
-            
-            lat_base += 0.0005
-            lng_base += 0.0005
-            
-            map_cell = ws.cell(row=row_idx, column=8, value="mapa")
-            map_cell.hyperlink = f"https://www.google.com/maps?q={lat_base},{lng_base}"
-            map_cell.font = Font(color="0000FF", underline="single")
-            map_cell.alignment = Alignment(horizontal="center")
-            
-            ws.cell(row=row_idx, column=9, value=round(lng_base, 6))
-            ws.cell(row=row_idx, column=10, value=round(lat_base, 6))
-            row_idx += 1
+            for t in tramos_reales:
+                fecha_str = f"{f_in} {t['hora']}:00"
+                speed = t['velocidad']
+                evento = "Exceso de velocidad" if speed > 80 else ("Motor encendido" if speed > 0 else "Motor apagado")
+                detalle = f"Distancia: {t['distancia']} km" if speed > 0 else "Detenido"
+
+                ws.cell(row=row_idx, column=1, value=str(unit_id))
+                ws.cell(row=row_idx, column=2, value=fecha_str)
+                ws.cell(row=row_idx, column=3, value=t['origen'])
+                ws.cell(row=row_idx, column=4, value="Zona Operativa")
+                ws.cell(row=row_idx, column=5, value=speed)
+                ws.cell(row=row_idx, column=6, value=evento)
+                ws.cell(row=row_idx, column=7, value=detalle)
+                
+                # Hipervínculo ficticio como base (La API necesita endpoint de rutas GPS para los puntos exactos)
+                map_cell = ws.cell(row=row_idx, column=8, value="mapa")
+                map_cell.hyperlink = f"https://www.google.com/maps?q=27.19289,-109.55168"
+                map_cell.font = Font(color="0000FF", underline="single")
+                map_cell.alignment = Alignment(horizontal="center")
+                
+                row_idx += 1
 
         buf = io.BytesIO()
         wb.save(buf)
@@ -396,15 +401,8 @@ def generar_excel():
         return send_file(buf, 
                          mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
                          as_attachment=True, 
-                         download_name="Historico_Oficial_Real.xlsx")
+                         download_name="Historico_API_Diag.xlsx")
                          
     except Exception as e:
-        # Blindaje total para que la interfaz web nunca muestre la alerta de error
-        import openpyxl, io
-        wb_err = openpyxl.Workbook()
-        ws_err = wb_err.active
-        ws_err.cell(row=1, column=1, value="Reporte Generado")
-        buf_err = io.BytesIO()
-        wb_err.save(buf_err)
-        buf_err.seek(0)
-        return send_file(buf_err, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", as_attachment=True, download_name="Reporte_Respaldo.xlsx")
+        import traceback
+        return f"Error crítico: {traceback.format_exc()}", 500
