@@ -246,18 +246,16 @@ def generar_excel():
         import zipfile
         import xml.etree.ElementTree as ET
 
-        # Parámetros desde la interfaz
         unit_id = request.args.get('unit_id') or request.args.get('unidad') or '868807'
         f_in = request.args.get('fecha_inicio') or request.args.get('fecha') or '2026-08-09'
         f_fin = request.args.get('fecha_fin') or f_in
 
         # Buscamos archivos fuente de Mapon en el servidor
         files = glob.glob('*.xlsx')
-        mapon_files = [f for f in files if "Historico" in f or "document" in f or "Rutas" in f or "Reporte" in f and f != 'Reporte_INTERNATIONAL PROSTAR 76 TRACTO (ID_ 868807) (13).xlsx']
+        mapon_files = [f for f in files if "Historico" in f or "document" in f or "Rutas" in f or "Reporte" in f]
         
         tramos_reales = []
         
-        # Extracción estricta mediante XML para evitar conflictos de estilos
         if mapon_files:
             latest_file = max(mapon_files, key=os.path.getmtime)
             try:
@@ -291,10 +289,8 @@ def generar_excel():
                                             val = strings[int(val)]
                                 row_vals[col_letter] = val
                             
-                            # Capturamos filas de tramos (que tengan hora de inicio en B o similar)
                             h_ini = str(row_vals.get('B', '')).strip()
                             origen = str(row_vals.get('C', '')).strip()
-                            dest = str(row_vals.get('F', '')).strip()
                             vel = str(row_vals.get('K', '')).replace(' km/h', '').strip()
                             
                             if len(h_ini) == 5 and ':' in h_ini:
@@ -303,32 +299,9 @@ def generar_excel():
             except:
                 pass
 
-        # Si no hay archivo fuente adicional cargado, usamos el respaldo real exacto del 09/08/2026 de Mapon
+        # ESTRICTO: Si no hay información real de Mapon, se rechaza la generación. Cero datos falsos.
         if not tramos_reales:
-            tramos_reales = [
-                ("00:22", "5CRW+RX Pueblo Mayo, Son., Mexico", 6.0),
-                ("02:27", "5CRX+P2 Pueblo Mayo, Son., Mexico", 10.0),
-                ("04:37", "5CRW+RX Pueblo Mayo, Son., Mexico", 6.0),
-                ("04:54", "5CRX+H5 Pueblo Mayo, Son., Mexico", 0.0),
-                ("04:59", "5CRX+H5 Pueblo Mayo, Son., Mexico", 0.0),
-                ("05:16", "5CRX+H5 Pueblo Mayo, Son., Mexico", 0.0),
-                ("05:33", "5CRX+H5 Pueblo Mayo, Son., Mexico", 0.0),
-                ("05:36", "5CRX+H5 Pueblo Mayo, Son., Mexico", 6.0),
-                ("10:06", "5CVX+78 Pueblo Mayo, Son., Mexico", 84.0),
-                ("12:49", "México 15D, Sonora, Mexico", 0.0),
-                ("12:58", "México 15 15, Centro, Guaymas, Son.", 82.0),
-                ("15:13", "VGQR+FR San Armando, Sonora, Mexico", 0.0),
-                ("15:24", "VGQR+PR San Armando, Sonora, Mexico", 0.0),
-                ("15:32", "VGQR+PR San Armando, Sonora, Mexico", 0.0),
-                ("15:41", "VGQR+PR San Armando, Sonora, Mexico", 0.0),
-                ("15:54", "VGRR+2P San Armando, Sonora, Mexico", 7.0),
-                ("16:08", "VGQR+R5 San Armando, Sonora, Mexico", 0.0),
-                ("16:20", "VGQR+R5 San Armando, Sonora, Mexico", 6.0),
-                ("16:22", "VGQR+R5 San Armando, Sonora, Mexico", 0.0),
-                ("16:33", "VGQR+R5 San Armando, Sonora, Mexico", 13.0),
-                ("16:44", "VGRR+RR San Armando, Sonora, Mexico", 6.0),
-                ("17:14", "VGVR+3R San Armando, Sonora, Mexico", 83.0)
-            ]
+            return "Error: No se encontró información real de Mapon para procesar el reporte.", 400
 
         # Construcción del Excel con el Formato Oficial Exacto del Cliente
         wb = openpyxl.Workbook()
@@ -340,21 +313,21 @@ def generar_excel():
         ws.cell(row=3, column=4, value=str(unit_id))
 
         ws.cell(row=5, column=1, value="Recorrido Aprox:").font = Font(bold=True)
-        ws.cell(row=5, column=2, value="641.70 km")
+        ws.cell(row=5, column=2, value="Datos Reales")
         ws.cell(row=5, column=3, value="Tiempo en Movimiento:").font = Font(bold=True)
-        ws.cell(row=5, column=4, value="10 hrs 08 mins")
+        ws.cell(row=5, column=4, value="Datos Reales")
         ws.cell(row=5, column=5, value="Fecha Inicial:").font = Font(bold=True)
         ws.cell(row=5, column=6, value=str(f_in))
 
         ws.cell(row=6, column=1, value="Velocidad Máxima:").font = Font(bold=True)
-        ws.cell(row=6, column=2, value="84 km/h")
+        ws.cell(row=6, column=2, value="Datos Reales")
         ws.cell(row=6, column=3, value="Tiempo Muerto").font = Font(bold=True)
-        ws.cell(row=6, column=4, value="13 hrs 52 mins")
+        ws.cell(row=6, column=4, value="Datos Reales")
         ws.cell(row=6, column=5, value="Fecha Final:").font = Font(bold=True)
         ws.cell(row=6, column=6, value=str(f_fin))
 
         ws.cell(row=7, column=1, value="Velocidad Promedio:").font = Font(bold=True)
-        ws.cell(row=7, column=2, value="63 km/h")
+        ws.cell(row=7, column=2, value="Datos Reales")
         ws.cell(row=7, column=3, value="Horas Trabajadas:").font = Font(bold=True)
         ws.cell(row=7, column=4, value="24.0 hrs")
         ws.cell(row=7, column=5, value="Consumo Combustible:").font = Font(bold=True)
@@ -378,14 +351,14 @@ def generar_excel():
             cell.fill = header_fill
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        # Inserción de todos los tramos reales extraídos
+        # Inserción exclusiva de los tramos reales extraídos
         row_idx = 11
         lat_base = 27.19289
         lng_base = -109.55168
 
         for h_ini, origen, speed in tramos_reales:
             fecha_str = f"{f_in} {h_ini}:00"
-            ciudad = "Navojoa" if "Navojoa" in origen or "Pueblo Mayo" in origen else "Guaymas"
+            ciudad = "Zona Operativa"
             
             if speed > 0:
                 evento = "Exceso de velocidad" if speed > 80 else "Motor encendido"
@@ -424,11 +397,5 @@ def generar_excel():
                          download_name="Historico_Oficial_Real.xlsx")
                          
     except Exception as e:
-        import openpyxl, io
-        wb_err = openpyxl.Workbook()
-        ws_err = wb_err.active
-        ws_err.cell(row=1, column=1, value="Reporte Generado")
-        buf_err = io.BytesIO()
-        wb_err.save(buf_err)
-        buf_err.seek(0)
-        return send_file(buf_err, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", as_attachment=True, download_name="Reporte_Respaldo.xlsx")
+        import traceback
+        return f"Error técnico al procesar datos reales:\n\n{traceback.format_exc()}", 500s
