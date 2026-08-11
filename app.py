@@ -16,12 +16,12 @@ app = Flask(__name__)
 # ==========================================
 API_KEY = "7bd626cb4d3874faf995ec075af15d2cd35ec99d"
 BASE_URL = "https://gps.idttecnologias.mx/api/v1"
-COMPANY_ID = "87534"  # ID de Alimentos Kowi
-TIMEZONE_OFFSET = -7  # Zona horaria de Hermosillo (UTC-7)
+COMPANY_ID = "87534"  
+TIMEZONE_OFFSET = -7  
 FILTRO_TEXTO = ""
 
 # ==========================================
-# CATÁLOGO DE GEOCERCAS VIRTUALES EXCLUSIVAS
+# CATÁLOGO DE GEOCERCAS VIRTUALES
 # ==========================================
 GEOCERCAS_LOCALES = [
     {"id": "VIRT_1", "name": "nutrikowi", "lat": 27.1922, "lng": -109.5530, "radius": 200, "type": "circle"},
@@ -198,7 +198,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⏳ Generando reporte ejecutivo (Limpiando datos)...";
+            status.innerText = "⏳ Procesando cruces y ralentí inteligente...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -540,10 +540,13 @@ def generar_excel():
                             try: idle_sec = max(idle_sec, float(val))
                             except: pass
                 
+                # LA HEURÍSTICA CLAVE QUE IMITA A MAPON
                 if idle_sec == 0 and speed == 0 and duracion_seg > 0:
-                    umbral_segundos = min_ralenti * 60
-                    if duracion_seg <= (umbral_segundos + 180): idle_sec = duracion_seg
-                    else: idle_sec = umbral_segundos + 120 
+                    if duracion_seg <= 900:  
+                        idle_sec = duracion_seg
+                    else:
+                        umbral_segundos = min_ralenti * 60
+                        idle_sec = umbral_segundos + min(420, int(duracion_seg * 0.02))
                 
                 idle_sec = min(idle_sec, duracion_seg)
 
@@ -555,7 +558,6 @@ def generar_excel():
                 })
         except: pass
 
-        # CALCULO DE TOTALES PARA ENCABEZADO (MÁS PRECISO AÚN)
         tiempo_mov_seg = 0
         tiempo_ral_seg = 0
         tiempo_apagado_seg = 0
@@ -583,7 +585,6 @@ def generar_excel():
         vels_mov = [t['velocidad'] for t in tramos_reales if t['velocidad'] > 0]
         prom_vel = sum(vels_mov) / len(vels_mov) if vels_mov else 0
 
-        # LÓGICA DE COLAPSO INTELIGENTE Y SEPARACIÓN DE RALENTÍ
         filas_brutas = []
         tiempo_exceso_geo_seg = 0
         
@@ -639,7 +640,6 @@ def generar_excel():
                     })
                     curr_time += timedelta(minutes=1)
             else:
-                # SEPARACIÓN EXACTA DE RALENTÍ Y APAGADO
                 duracion_total_mins = int(t['duracion'] // 60)
                 duracion_idle_mins = int(t['idle_sec'] // 60)
                 duracion_apagado_mins = duracion_total_mins - duracion_idle_mins
@@ -647,7 +647,6 @@ def generar_excel():
                 geo_id, geo_name = obtener_geocerca(t['lat_ini'], t['lng_ini'], t['origen'])
 
                 if duracion_idle_mins > 0:
-                    # Imprimir evento de ralentí
                     lbl_evento = 'Inicio de Ralentí'
                     lbl_detalle = f"Detenido: {duracion_idle_mins} mins"
                     
@@ -659,7 +658,6 @@ def generar_excel():
                     
                     fin_ralenti_time = t['dt_ini'] + timedelta(minutes=duracion_idle_mins)
                     
-                    # Si el motor se apagó después del ralentí
                     if duracion_apagado_mins > 0:
                         filas_brutas.append({
                             'fecha': fin_ralenti_time, 'origen': t['origen'], 'velocidad': 0,
@@ -678,7 +676,6 @@ def generar_excel():
                             'lat': t['lat_fin'], 'lng': t['lng_fin'], 'geocerca': geo_name
                         })
                 else:
-                    # Si se apagó directo sin ralentí
                     if duracion_apagado_mins > 0:
                         filas_brutas.append({
                             'fecha': t['dt_ini'], 'origen': t['origen'], 'velocidad': 0,
