@@ -76,7 +76,7 @@ HTML_INTERFACE = """
     <div class="card">
         <div class="header">
             <h2>📊 Reporte Ejecutivo Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Sincronizado y Resumido Automáticamente</p>
+            <p>IDT Tecnologías - Algoritmo de Cruce Exacto con Mapon</p>
         </div>
         
         <div class="main-container">
@@ -198,7 +198,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⏳ Empalmando métricas ocultas de Mapon...";
+            status.innerText = "⏳ Empalmando líneas de tiempo (Rutas vs Ralentí)...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -372,6 +372,7 @@ def generar_excel():
             return h if len(h) == 8 else h + ":00"
 
         geos_procesadas = list(GEOCERCAS_LOCALES)
+        
         try:
             endpoints = ['/territory/list.json', '/poi/list.json', '/object/list.json']
             for ep in endpoints:
@@ -471,7 +472,6 @@ def generar_excel():
         f_in_api = to_utc_str(f_in, hora_inicio)
         f_fin_api = to_utc_str(f_fin, hora_fin, True)
 
-        # SE SOLICITAN EXPRESAMENTE LOS IDLES COMO ARREGLO INDEPENDIENTE
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
         params = {
             "key": API_KEY, 
@@ -485,186 +485,175 @@ def generar_excel():
         try:
             response = requests.get(url, params=params, timeout=15)
             data = response.json()
+            rutas_encontradas = []
+            eventos_vistos = set()
             
-            # EXTRACCIÓN MAESTRA DE IDLES (EL SECRETO DE MAPON)
-            unit_data = data.get('data', {}).get('units', [])[0] if data.get('data', {}).get('units') else {}
-            rutas_array = unit_data.get('routes', [])
-            idles_array = unit_data.get('idles', [])
-            
-            parsed_idles = []
-            for idl in idles_array:
-                s_dt = parse_iso(idl.get('start', {}).get('time'))
-                e_dt = parse_iso(idl.get('end', {}).get('time'))
-                if s_dt and e_dt:
-                    parsed_idles.append((s_dt, e_dt))
+            def extraer_tramos(obj):
+                if isinstance(obj, dict):
+                    tipo = str(obj.get('type', '')).lower()
+                    has_start_end = ('start' in obj or 'start_time' in obj) and ('end' in obj or 'end_time' in obj)
+                    if tipo in ['route', 'stop', 'idle'] or has_start_end:
+                        sig = str(obj.get('start', {}).get('time', '')) + tipo
+                        if sig not in eventos_vistos:
+                            eventos_vistos.add(sig)
+                            rutas_encontradas.append(obj)
+                    for k, v in obj.items():
+                        if isinstance(v, (dict, list)): extraer_tramos(v)
+                elif isinstance(obj, list):
+                    for item in obj:
+                        if isinstance(item, (dict, list)): extraer_tramos(item)
 
-            for item in rutas_array:
-                dt_ini = parse_iso(item.get('start', {}).get('time'))
-                dt_fin = parse_iso(item.get('end', {}).get('time'))
+            extraer_tramos(data)
+
+            # Extraemos la lista pura de Idles y Stops para empalmarlos
+            list_routes = []
+            list_stops = []
+            list_idles = []
+
+            for item in rutas_encontradas:
+                dt_ini = parse_iso(item.get('start', {}).get('time', item.get('start_time', '')))
+                dt_fin = parse_iso(item.get('end', {}).get('time', item.get('end_time', '')))
                 if not dt_ini or not dt_fin: continue
 
-                duracion_seg = (dt_fin - dt_ini).total_seconds()
-                if duracion_seg <= 0: continue
-
-                origen = str(item.get('start', {}).get('address', 'Zona Operativa'))
-                lat_ini = float(item.get('start', {}).get('lat', 27.19))
-                lng_ini = float(item.get('start', {}).get('lng', -109.55))
-                lat_fin = float(item.get('end', {}).get('lat', lat_ini))
-                lng_fin = float(item.get('end', {}).get('lng', lng_ini))
+                origen = str(item.get('start', {}).get('address', item.get('start_address', 'Zona Operativa')))
+                lat_ini = float(item.get('start', {}).get('lat', item.get('start_lat', 27.19)))
+                lng_ini = float(item.get('start', {}).get('lng', item.get('start_lng', -109.55)))
+                lat_fin = float(item.get('end', {}).get('lat', item.get('end_lat', lat_ini)))
+                lng_fin = float(item.get('end', {}).get('lng', item.get('end_lng', lng_ini)))
                 
                 dist_km = float(item.get('distance', 0)) / 1000.0
                 speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
                 tipo = str(item.get('type', '')).lower()
-                
-                # CRUCE MATEMÁTICO: Calcular cuántos segundos de "idle" caen dentro de este "stop"
-                idle_sec = 0.0
-                if tipo == 'stop':
-                    for i_start, i_end in parsed_idles:
-                        overlap_start = max(dt_ini, i_start)
-                        overlap_end = min(dt_fin, i_end)
-                        if overlap_end > overlap_start:
-                            idle_sec += (overlap_end - overlap_start).total_seconds()
-                
-                idle_sec = min(idle_sec, duracion_seg)
+                duracion_seg = (dt_fin - dt_ini).total_seconds()
 
-                tramos_reales.append({
+                geo_id, geo_name = obtener_geocerca(lat_ini, lng_ini, origen)
+
+                obj_tramo = {
                     'dt_ini': dt_ini, 'dt_fin': dt_fin, 'origen': origen, 'distancia': dist_km,
                     'velocidad': speed, 'lat_ini': lat_ini, 'lng_ini': lng_ini,
                     'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg,
-                    'idle_sec': idle_sec, 'tipo': tipo
-                })
+                    'tipo': tipo, 'geo_name': geo_name
+                }
+
+                if tipo == 'route': list_routes.append(obj_tramo)
+                elif tipo == 'stop': list_stops.append(obj_tramo)
+                elif tipo == 'idle': list_idles.append(obj_tramo)
+
         except: pass
-
-        tiempo_mov_seg = 0
-        tiempo_ral_seg = 0
-        tiempo_apagado_seg = 0
-
-        for t in tramos_reales:
-            if t['tipo'] == 'route' or t['velocidad'] > 0:
-                tiempo_mov_seg += t['duracion']
-            else:
-                tiempo_ral_seg += t['idle_sec']
-                tiempo_apagado_seg += (t['duracion'] - t['idle_sec'])
-
-        def calc_hrs_mins(segundos): return int(segundos // 3600), int((segundos % 3600) // 60)
-        mov_hrs, mov_mins = calc_hrs_mins(tiempo_mov_seg)
-        ral_hrs, ral_mins = calc_hrs_mins(tiempo_ral_seg)
-        muerto_hrs, muerto_mins = calc_hrs_mins(tiempo_apagado_seg)
-
-        total_segundos = tiempo_mov_seg + tiempo_ral_seg + tiempo_apagado_seg
-        porc_mov = round((tiempo_mov_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
-        porc_ral = round((tiempo_ral_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
-        porc_muerto = round((tiempo_apagado_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
-
-        rutas_unicas = {t['dt_ini'].strftime('%Y%m%d%H%M%S'): t['distancia'] for t in tramos_reales if t['tipo'] == 'route' or t['distancia'] > 0}
-        total_dist = sum(rutas_unicas.values())
-        max_vel = max([t['velocidad'] for t in tramos_reales]) if tramos_reales else 0
-        vels_mov = [t['velocidad'] for t in tramos_reales if t['velocidad'] > 0]
-        prom_vel = sum(vels_mov) / len(vels_mov) if vels_mov else 0
 
         filas_brutas = []
         tiempo_exceso_geo_seg = 0
+        tiempo_mov_seg = 0
+        tiempo_ral_seg = 0
+        tiempo_apagado_seg = 0
         
-        for t in tramos_reales:
+        # 1. PROCESAMOS LAS RUTAS (MOVIMIENTO)
+        for t in list_routes:
+            tiempo_mov_seg += t['duracion']
             curr_time = t['dt_ini']
             end_time = t['dt_fin']
-            is_moving = t['velocidad'] > 0 or t['tipo'] == 'route'
-            total_seconds = (end_time - curr_time).total_seconds()
-            if total_seconds <= 0: continue
+            total_seconds = t['duracion']
             
             delta_lat = (t['lat_fin'] - t['lat_ini'])
             delta_lng = (t['lng_fin'] - t['lng_ini'])
             
-            if is_moving:
-                avg_speed = (t['distancia'] / (total_seconds / 3600)) if total_seconds > 0 else 0
-                while curr_time <= end_time:
-                    current_speed = round(random.uniform(avg_speed * 0.85, avg_speed * 1.15), 1)
-                    current_speed = min(current_speed, t['velocidad']) if t['velocidad'] > 0 else current_speed
-                    if current_speed == 0: current_speed = avg_speed
-                    
-                    prog = min((curr_time - t['dt_ini']).total_seconds() / total_seconds, 1.0)
-                    curr_lat = t['lat_ini'] + (delta_lat * prog)
-                    curr_lng = t['lng_ini'] + (delta_lng * prog)
-                    
-                    geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, t['origen'])
-                    
-                    evento = ""
-                    detalle = "-"
-                    limite_aplicable = limite_velocidad
-                    
-                    if geo_name != "Fuera de geocerca":
-                        if geo_id and str(geo_id) in geo_limits:
-                            try: limite_aplicable = int(geo_limits[str(geo_id)]['limit'])
-                            except: pass
-                        else:
-                            for gid, gdata in geo_limits.items():
-                                if gdata['name'].lower() == geo_name.lower():
-                                    try: limite_aplicable = int(gdata['limit'])
-                                    except: pass
-                                    break
-                                    
-                        if current_speed > limite_aplicable:
-                            evento = f"Exceso en {geo_name}"
-                            detalle = f"Vel: {current_speed} (Límite: {limite_aplicable})"
-                            tiempo_exceso_geo_seg += 60
-                    elif current_speed > limite_velocidad:
-                        evento = "Exceso de velocidad"
-                        detalle = f"Vel: {current_speed} (Límite: {limite_velocidad})"
-
-                    filas_brutas.append({
-                        'fecha': curr_time, 'origen': t['origen'], 'velocidad': current_speed,
-                        'evento': evento, 'detalle': detalle, 'lat': curr_lat, 'lng': curr_lng, 'geocerca': geo_name
-                    })
-                    curr_time += timedelta(minutes=1)
-            else:
-                duracion_total_mins = int(t['duracion'] // 60)
-                duracion_idle_mins = int(t['idle_sec'] // 60)
-                duracion_apagado_mins = duracion_total_mins - duracion_idle_mins
-
-                geo_id, geo_name = obtener_geocerca(t['lat_ini'], t['lng_ini'], t['origen'])
-
-                if duracion_idle_mins > 0:
-                    lbl_evento = 'Inicio de Ralentí'
-                    lbl_detalle = f"Detenido: {duracion_idle_mins} mins"
-                    
-                    filas_brutas.append({
-                        'fecha': t['dt_ini'], 'origen': t['origen'], 'velocidad': 0,
-                        'evento': lbl_evento, 'detalle': lbl_detalle, 
-                        'lat': t['lat_ini'], 'lng': t['lng_ini'], 'geocerca': geo_name
-                    })
-                    
-                    fin_ralenti_time = t['dt_ini'] + timedelta(minutes=duracion_idle_mins)
-                    
-                    if duracion_apagado_mins > 0:
-                        filas_brutas.append({
-                            'fecha': fin_ralenti_time, 'origen': t['origen'], 'velocidad': 0,
-                            'evento': 'Motor apagado', 'detalle': f"Apagado: {duracion_apagado_mins} mins", 
-                            'lat': t['lat_ini'], 'lng': t['lng_ini'], 'geocerca': geo_name
-                        })
-                        filas_brutas.append({
-                            'fecha': t['dt_fin'], 'origen': t['origen'], 'velocidad': 0,
-                            'evento': 'Motor encendido', 'detalle': "-", 
-                            'lat': t['lat_fin'], 'lng': t['lng_fin'], 'geocerca': geo_name
-                        })
+            avg_speed = (t['distancia'] / (total_seconds / 3600)) if total_seconds > 0 else 0
+            while curr_time <= end_time:
+                current_speed = round(random.uniform(avg_speed * 0.85, avg_speed * 1.15), 1)
+                current_speed = min(current_speed, t['velocidad']) if t['velocidad'] > 0 else current_speed
+                if current_speed == 0: current_speed = avg_speed
+                
+                prog = min((curr_time - t['dt_ini']).total_seconds() / total_seconds, 1.0)
+                curr_lat = t['lat_ini'] + (delta_lat * prog)
+                curr_lng = t['lng_ini'] + (delta_lng * prog)
+                
+                geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, t['origen'])
+                
+                evento = ""
+                detalle = "-"
+                limite_aplicable = limite_velocidad
+                
+                if geo_name != "Fuera de geocerca":
+                    if geo_id and str(geo_id) in geo_limits:
+                        try: limite_aplicable = int(geo_limits[str(geo_id)]['limit'])
+                        except: pass
                     else:
-                        filas_brutas.append({
-                            'fecha': t['dt_fin'], 'origen': t['origen'], 'velocidad': 0,
-                            'evento': 'Fin de Ralentí', 'detalle': "-", 
-                            'lat': t['lat_fin'], 'lng': t['lng_fin'], 'geocerca': geo_name
-                        })
-                else:
-                    if duracion_apagado_mins > 0:
-                        filas_brutas.append({
-                            'fecha': t['dt_ini'], 'origen': t['origen'], 'velocidad': 0,
-                            'evento': 'Motor apagado', 'detalle': f"Apagado: {duracion_apagado_mins} mins", 
-                            'lat': t['lat_ini'], 'lng': t['lng_ini'], 'geocerca': geo_name
-                        })
-                        filas_brutas.append({
-                            'fecha': t['dt_fin'], 'origen': t['origen'], 'velocidad': 0,
-                            'evento': 'Motor encendido', 'detalle': "-", 
-                            'lat': t['lat_fin'], 'lng': t['lng_fin'], 'geocerca': geo_name
-                        })
+                        for gid, gdata in geo_limits.items():
+                            if gdata['name'].lower() == geo_name.lower():
+                                try: limite_aplicable = int(gdata['limit'])
+                                except: pass
+                                break
+                                
+                    if current_speed > limite_aplicable:
+                        evento = f"Exceso en {geo_name}"
+                        detalle = f"Vel: {current_speed} (Límite: {limite_aplicable})"
+                        tiempo_exceso_geo_seg += 60
+                elif current_speed > limite_velocidad:
+                    evento = "Exceso de velocidad"
+                    detalle = f"Vel: {current_speed} (Límite: {limite_velocidad})"
 
+                filas_brutas.append({
+                    'fecha': curr_time, 'origen': t['origen'], 'velocidad': current_speed,
+                    'evento': evento, 'detalle': detalle, 'lat': curr_lat, 'lng': curr_lng, 'geocerca': geo_name
+                })
+                curr_time += timedelta(minutes=1)
+
+        # 2. PROCESAMOS LAS PARADAS (CRUCE EXACTO CON RALENTÍS)
+        for stop in list_stops:
+            idles_in_stop = []
+            for idle in list_idles:
+                overlap_start = max(stop['dt_ini'], idle['dt_ini'])
+                overlap_end = min(stop['dt_fin'], idle['dt_fin'])
+                if overlap_end > overlap_start:
+                    idles_in_stop.append((overlap_start, overlap_end))
+            
+            # Si Mapon de plano no mandó ningún Idle en todo el día, usamos heurística de emergencia
+            if not list_idles and stop['duracion'] <= (min_ralenti * 60) + 180:
+                idles_in_stop = [(stop['dt_ini'], stop['dt_fin'])]
+
+            curr_time = stop['dt_ini']
+            idles_in_stop.sort(key=lambda x: x[0])
+            
+            for i_start, i_end in idles_in_stop:
+                if i_start > curr_time:
+                    dur_ap = (i_start - curr_time).total_seconds()
+                    if dur_ap >= 60:
+                        filas_brutas.append({
+                            'fecha': curr_time, 'origen': stop['origen'], 'velocidad': 0,
+                            'evento': 'Motor apagado', 'detalle': f"Apagado: {int(dur_ap//60)} mins", 
+                            'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': stop['geo_name']
+                        })
+                        tiempo_apagado_seg += dur_ap
+                
+                dur_id = (i_end - i_start).total_seconds()
+                if dur_id >= 60:
+                    filas_brutas.append({
+                        'fecha': i_start, 'origen': stop['origen'], 'velocidad': 0,
+                        'evento': 'Inicio de Ralentí', 'detalle': f"Detenido: {int(dur_id//60)} mins", 
+                        'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': stop['geo_name']
+                    })
+                    tiempo_ral_seg += dur_id
+                    
+                curr_time = max(curr_time, i_end)
+                
+            if curr_time < stop['dt_fin']:
+                dur_ap = (stop['dt_fin'] - curr_time).total_seconds()
+                if dur_ap >= 60:
+                    filas_brutas.append({
+                        'fecha': curr_time, 'origen': stop['origen'], 'velocidad': 0,
+                        'evento': 'Motor apagado', 'detalle': f"Apagado: {int(dur_ap//60)} mins", 
+                        'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': stop['geo_name']
+                    })
+                    tiempo_apagado_seg += dur_ap
+            
+            # Al final de la parada, el motor se enciende para avanzar
+            filas_brutas.append({
+                'fecha': stop['dt_fin'], 'origen': stop['origen'], 'velocidad': 0,
+                'evento': 'Motor encendido', 'detalle': "-", 
+                'lat': stop['lat_fin'], 'lng': stop['lng_fin'], 'geocerca': stop['geo_name']
+            })
+
+        # ORDENAR Y LIMPIAR
         filas_brutas.sort(key=lambda x: x['fecha'])
         vistos = set()
         filas_finales = []
@@ -674,7 +663,22 @@ def generar_excel():
                 vistos.add(key)
                 filas_finales.append(f)
 
+        def calc_hrs_mins(segundos): return int(segundos // 3600), int((segundos % 3600) // 60)
+        mov_hrs, mov_mins = calc_hrs_mins(tiempo_mov_seg)
+        ral_hrs, ral_mins = calc_hrs_mins(tiempo_ral_seg)
+        muerto_hrs, muerto_mins = calc_hrs_mins(tiempo_apagado_seg)
         exceso_geo_hrs, exceso_geo_mins = calc_hrs_mins(tiempo_exceso_geo_seg)
+
+        total_segundos = tiempo_mov_seg + tiempo_ral_seg + tiempo_apagado_seg
+        porc_mov = round((tiempo_mov_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
+        porc_ral = round((tiempo_ral_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
+        porc_muerto = round((tiempo_apagado_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
+
+        rutas_unicas = {t['dt_ini'].strftime('%Y%m%d%H%M%S'): t['distancia'] for t in list_routes if t['distancia'] > 0}
+        total_dist = sum(rutas_unicas.values())
+        max_vel = max([t['velocidad'] for t in list_routes]) if list_routes else 0
+        vels_mov = [t['velocidad'] for t in list_routes if t['velocidad'] > 0]
+        prom_vel = sum(vels_mov) / len(vels_mov) if vels_mov else 0
 
         # GENERACIÓN DEL EXCEL
         wb = openpyxl.Workbook()
