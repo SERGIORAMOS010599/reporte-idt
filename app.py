@@ -78,9 +78,9 @@ HTML_INTERFACE = """
 
             <div class="form-content">
                 <div class="form-group">
-                    <label>Buscar / Seleccionar Unidad: <span class="retry-btn" onclick="cargarCatalogos()">🔄 Reintentar</span></label>
+                    <label>Buscar / Seleccionar Unidad: <span class="retry-btn" onclick="cargarCatalogos()">🔄 Reintentar carga</span></label>
                     <select id="unit_select" style="width: 100%;">
-                        <option value="">⏳ Cargando unidades...</option>
+                        <option value="">⏳ Cargando catálogo...</option>
                     </select>
                 </div>
 
@@ -263,27 +263,35 @@ def api_unidades():
 @app.route('/api_geocercas')
 def api_geocercas():
     try:
-        res = requests.get(f"{BASE_URL}/geofence/list.json", params={'key': API_KEY}, timeout=15)
+        # Se actualizó el endpoint a 'geometry/list.json'
+        res = requests.get(f"{BASE_URL}/geometry/list.json", params={'key': API_KEY}, timeout=15)
         data = res.json()
         
-        # Extracción flexible y normalización adaptada a Mapon
         geos_raw = []
-        if isinstance(data, list):
-            geos_raw = data
-        elif isinstance(data, dict):
+        if isinstance(data, dict):
             inner = data.get('data', data)
             if isinstance(inner, dict):
-                geos_raw = inner.get('geofences', inner.get('list', []))
+                # Buscamos de forma flexible cualquier llave que devuelva
+                for k in ['geometries', 'geometry', 'list', 'items']:
+                    if k in inner:
+                        geos_raw = inner[k]
+                        break
+                if not geos_raw:
+                    for v in inner.values():
+                        if isinstance(v, list):
+                            geos_raw = v
+                            break
             elif isinstance(inner, list):
                 geos_raw = inner
 
         geos_normalizadas = []
         for g in geos_raw:
-            g_id = g.get('geofence_id', g.get('id'))
+            g_id = g.get('id', g.get('geometry_id'))
             g_name = g.get('name', g.get('title', 'Geocerca sin nombre'))
             g_lat = g.get('lat', g.get('latitude', 0))
             g_lng = g.get('lng', g.get('longitude', 0))
             g_radius = g.get('radius', 500)
+            
             if g_id:
                 geos_normalizadas.append({
                     'geofence_id': g_id,
@@ -316,11 +324,19 @@ def generar_excel():
 
         geos_data = []
         try:
-            res_geo = requests.get(f"{BASE_URL}/geofence/list.json", params={'key': API_KEY}, timeout=15)
+            res_geo = requests.get(f"{BASE_URL}/geometry/list.json", params={'key': API_KEY}, timeout=15)
             data_geo = res_geo.json()
             inner_geo = data_geo.get('data', data_geo)
             if isinstance(inner_geo, dict):
-                geos_data = inner_geo.get('geofences', inner_geo.get('list', []))
+                for k in ['geometries', 'geometry', 'list', 'items']:
+                    if k in inner_geo:
+                        geos_data = inner_geo[k]
+                        break
+                if not geos_data:
+                    for v in inner_geo.values():
+                        if isinstance(v, list):
+                            geos_data = v
+                            break
             elif isinstance(inner_geo, list):
                 geos_data = inner_geo
         except:
@@ -339,25 +355,11 @@ def generar_excel():
                     pass
             return None
 
-        def normalizar_fecha(fecha_str):
-            try:
-                if "/" in fecha_str:
-                    return datetime.strptime(fecha_str, '%d/%m/%Y').strftime('%Y-%m-%d')
-                elif "-" in fecha_str and len(fecha_str) == 10:
-                    return fecha_str
-            except:
-                pass
-            return '2026-08-09'
+        def normalizar_fecha(f):
+            return f if f else '2026-08-09'
 
-        def normalizar_hora(hora_str, es_fin=False):
-            try:
-                if "AM" in hora_str.upper() or "PM" in hora_str.upper():
-                    return datetime.strptime(hora_str.strip(), '%I:%M %p').strftime('%H:%M:%00')
-                if len(hora_str) == 5: return f"{hora_str}:00"
-                if len(hora_str) == 8: return hora_str
-            except: 
-                pass
-            return "23:59:59" if es_fin else "00:00:00"
+        def normalizar_hora(h, es_fin=False):
+            return h if len(h) == 8 else ("23:59:59" if es_fin else "00:00:00")
 
         f_in_api = f"{normalizar_fecha(f_in)}T{normalizar_hora(hora_inicio)}Z"
         f_fin_api = f"{normalizar_fecha(f_fin)}T{normalizar_hora(hora_fin, True)}Z"
@@ -479,7 +481,7 @@ def generar_excel():
                     
                     geo_obj = obtener_geocerca(curr_lat, curr_lng)
                     geo_name = geo_obj.get('name', geo_obj.get('title', 'Zona')) if geo_obj else "Fuera de geocerca"
-                    geo_id_val = str(geo_obj.get('geofence_id', geo_obj.get('id', ''))) if geo_obj else ""
+                    geo_id_val = str(geo_obj.get('id', '')) if geo_obj else ""
                     
                     evento = "En movimiento"
                     limite_aplicable = limite_velocidad
