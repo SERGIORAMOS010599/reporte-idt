@@ -21,8 +21,7 @@ TIMEZONE_OFFSET = -7  # Zona horaria de Hermosillo (UTC-7)
 FILTRO_TEXTO = ""
 
 # ==========================================
-# CATÁLOGO DE GEOCERCAS VIRTUALES EXCLUVISAS
-# (Coordenadas extraídas de los reportes oficiales)
+# CATÁLOGO DE GEOCERCAS VIRTUALES
 # ==========================================
 GEOCERCAS_LOCALES = [
     {"id": "VIRT_1", "name": "nutrikowi", "lat": 27.1922, "lng": -109.5530, "radius": 200, "type": "circle"},
@@ -36,7 +35,7 @@ HTML_INTERFACE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Reporte Minuto a Minuto - IDT</title>
+    <title>Reporte Ejecutivo Minuto a Minuto - IDT</title>
     
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
@@ -76,8 +75,8 @@ HTML_INTERFACE = """
 <body>
     <div class="card">
         <div class="header">
-            <h2>📊 Reporte Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Sincronización Automática con Geocercas</p>
+            <h2>📊 Reporte Ejecutivo Minuto a Minuto</h2>
+            <p>IDT Tecnologías - Sincronizado y Resumido Automáticamente</p>
         </div>
         
         <div class="main-container">
@@ -139,7 +138,7 @@ HTML_INTERFACE = """
                 </div>
                 <div class="form-group" id="speed_limits_container"></div>
 
-                <button type="button" class="btn-submit" id="btn_submit" onclick="generarReporte()" disabled>📥 Generar y Descargar Excel</button>
+                <button type="button" class="btn-submit" id="btn_submit" onclick="generarReporte()" disabled>📥 Generar Reporte Ejecutivo</button>
                 <div id="status_msg" class="status-msg"></div>
             </div>
         </div>
@@ -199,7 +198,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⏳ Cruzando datos y procesando reporte automático...";
+            status.innerText = "⏳ Generando reporte ejecutivo (Limpiando datos)...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -347,9 +346,11 @@ def api_geocercas():
 @app.route('/generar_excel')
 def generar_excel():
     try:
+        # RECIBIR NOMBRE REAL DEL VEHÍCULO PARA LA COLUMNA
         unit_id = request.args.get('unit_id', '868807')
-        if "ID:" in unit_id:
-            unit_id = unit_id.split("ID:")[1].replace(")", "").strip()
+        unit_name = request.args.get('unit_name', unit_id)
+        if "(ID:" in unit_name:
+            unit_name = unit_name.split("(ID:")[0].strip()
 
         f_in = request.args.get('fecha_inicio', '2026-08-09')
         f_fin = request.args.get('fecha_fin', f_in)
@@ -366,9 +367,7 @@ def generar_excel():
         try: geo_limits = json.loads(geo_limits_raw)
         except: geo_limits = {}
 
-        def normalizar_fecha(f):
-            return f if f else '2026-08-09'
-
+        def normalizar_fecha(f): return f if f else '2026-08-09'
         def normalizar_hora(h, es_fin=False):
             if not h: return "23:59:59" if es_fin else "00:00:00"
             return h if len(h) == 8 else h + ":00"
@@ -424,7 +423,8 @@ def generar_excel():
         except:
             pass
 
-        def obtener_geocerca(lat, lng, address):
+        def obtener_geocerca(lat, lng, address=""):
+            address_str = str(address).lower()
             for g in geos_procesadas:
                 if g.get('type', 'circle') == 'circle' and g.get('lat') is not None and g.get('lng') is not None:
                     dist_m = math.sqrt((lat - g['lat'])**2 + (lng - g['lng'])**2) * 111000
@@ -448,7 +448,6 @@ def generar_excel():
 
             if address and "+" not in address and "," not in address and "Zona Operativa" not in address:
                 return "GEO_API", address.strip()
-
             return None, "Fuera de geocerca"
 
         def to_utc_str(date_str, time_str, is_end=False):
@@ -477,7 +476,7 @@ def generar_excel():
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
         params = {
             "key": API_KEY, 
-            "unit_id": unit_id, 
+            "unit_id": unit_id.replace("ID:", "").strip(), 
             "from": f_in_api, 
             "till": f_fin_api,
             "include": "metrics,stops,idles,routes"
@@ -557,7 +556,39 @@ def generar_excel():
                 })
         except: pass
 
+        # CALCULO DE TOTALES PARA ENCABEZADO
+        tiempo_mov_seg = 0
+        tiempo_ral_seg = 0
+        tiempo_apagado_seg = 0
+
+        for t in tramos_reales:
+            if t['tipo'] == 'route':
+                tiempo_mov_seg += t['duracion']
+            elif t['tipo'] == 'idle':
+                tiempo_ral_seg += t['duracion']
+            elif t['tipo'] == 'stop':
+                tiempo_apagado_seg += t['duracion']
+
+        def calc_hrs_mins(segundos): return int(segundos // 3600), int((segundos % 3600) // 60)
+        mov_hrs, mov_mins = calc_hrs_mins(tiempo_mov_seg)
+        ral_hrs, ral_mins = calc_hrs_mins(tiempo_ral_seg)
+        muerto_hrs, muerto_mins = calc_hrs_mins(tiempo_apagado_seg)
+
+        total_segundos = tiempo_mov_seg + tiempo_ral_seg + tiempo_apagado_seg
+        porc_mov = round((tiempo_mov_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
+        porc_ral = round((tiempo_ral_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
+        porc_muerto = round((tiempo_apagado_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
+
+        rutas_unicas = {t['dt_ini'].strftime('%Y%m%d%H%M%S'): t['distancia'] for t in tramos_reales if t['tipo'] == 'route' or t['distancia'] > 0}
+        total_dist = sum(rutas_unicas.values())
+        max_vel = max([t['velocidad'] for t in tramos_reales]) if tramos_reales else 0
+        vels_mov = [t['velocidad'] for t in tramos_reales if t['velocidad'] > 0]
+        prom_vel = sum(vels_mov) / len(vels_mov) if vels_mov else 0
+
+        # LÓGICA DE COLAPSO (REPORTE EJECUTIVO)
         filas_brutas = []
+        tiempo_exceso_geo_seg = 0
+        
         for t in tramos_reales:
             curr_time = t['dt_ini']
             end_time = t['dt_fin']
@@ -581,7 +612,8 @@ def generar_excel():
                     
                     geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, t['origen'])
                     
-                    evento = "En movimiento"
+                    evento = ""
+                    detalle = "-"
                     limite_aplicable = limite_velocidad
                     
                     if geo_name != "Fuera de geocerca":
@@ -597,95 +629,66 @@ def generar_excel():
                                     
                         if current_speed > limite_aplicable:
                             evento = f"Exceso en {geo_name}"
+                            detalle = f"Vel: {current_speed} (Límite: {limite_aplicable})"
+                            tiempo_exceso_geo_seg += 60
                     elif current_speed > limite_velocidad:
                         evento = "Exceso de velocidad"
+                        detalle = f"Vel: {current_speed} (Límite: {limite_velocidad})"
 
                     filas_brutas.append({
                         'fecha': curr_time, 'origen': t['origen'], 'velocidad': current_speed,
-                        'evento': evento, 'detalle': f"Velocidad: {current_speed} km/h (Límite: {limite_aplicable})",
-                        'lat': curr_lat, 'lng': curr_lng, 'geocerca': geo_name
+                        'evento': evento, 'detalle': detalle, 'lat': curr_lat, 'lng': curr_lng, 'geocerca': geo_name
                     })
                     curr_time += timedelta(minutes=1)
             else:
-                idle_remaining = t['idle_sec']
-                while curr_time <= end_time:
-                    curr_lat = t['lat_ini']
-                    curr_lng = t['lng_ini']
-                    geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, t['origen'])
+                # SI ESTÁ DETENIDO: SOLO IMPRIME EL INICIO Y EL FIN (AHORRA 90% DE LAS FILAS)
+                duracion_mins = int(t['duracion'] // 60)
+                geo_id, geo_name = obtener_geocerca(t['lat_ini'], t['lng_ini'], t['origen'])
 
-                    if idle_remaining > 0:
-                        interval = 1
-                        es_ralenti_excesivo = (t['idle_sec'] - idle_remaining) >= (min_ralenti * 60)
-                        evento = "Ralentí Excesivo" if es_ralenti_excesivo else "Ralentí"
-                        detalle = f"Motor encendido (> {min_ralenti} min)" if es_ralenti_excesivo else "Motor encendido (Normal)"
-                        idle_remaining -= 60
-                    else:
-                        interval = 10
-                        evento = "Motor apagado"
-                        detalle = "Detenido en reposo"
-                        
+                if t['tipo'] == 'idle':
                     filas_brutas.append({
-                        'fecha': curr_time, 'origen': t['origen'], 'velocidad': 0,
-                        'evento': evento, 'detalle': detalle, 'lat': curr_lat, 'lng': curr_lng, 'geocerca': geo_name
+                        'fecha': t['dt_ini'], 'origen': t['origen'], 'velocidad': 0,
+                        'evento': 'Inicio de Ralentí', 'detalle': f"Detenido: {duracion_mins} mins", 
+                        'lat': t['lat_ini'], 'lng': t['lng_ini'], 'geocerca': geo_name
                     })
-                    curr_time += timedelta(minutes=interval)
+                    filas_brutas.append({
+                        'fecha': t['dt_fin'], 'origen': t['origen'], 'velocidad': 0,
+                        'evento': 'Fin de Ralentí', 'detalle': "-", 
+                        'lat': t['lat_fin'], 'lng': t['lng_fin'], 'geocerca': geo_name
+                    })
+                elif t['tipo'] == 'stop':
+                    filas_brutas.append({
+                        'fecha': t['dt_ini'], 'origen': t['origen'], 'velocidad': 0,
+                        'evento': 'Motor apagado', 'detalle': f"Apagado: {duracion_mins} mins", 
+                        'lat': t['lat_ini'], 'lng': t['lng_ini'], 'geocerca': geo_name
+                    })
+                    filas_brutas.append({
+                        'fecha': t['dt_fin'], 'origen': t['origen'], 'velocidad': 0,
+                        'evento': 'Motor encendido', 'detalle': "-", 
+                        'lat': t['lat_fin'], 'lng': t['lng_fin'], 'geocerca': geo_name
+                    })
 
+        # ORDENAR FILAS CRONOLÓGICAMENTE (SIN BORRAR EVENTOS SIMULTÁNEOS)
         filas_brutas.sort(key=lambda x: x['fecha'])
-        filas_unicas = {}
+        vistos = set()
+        filas_finales = []
         for f in filas_brutas:
-            ts = f['fecha'].strftime('%Y-%m-%d %H:%M:%S')
-            score = 1
-            if "Ralentí Excesivo" in f['evento']: score = 5
-            elif "Exceso" in f['evento']: score = 4
-            elif "Ralentí" in f['evento']: score = 3
-            elif "movimiento" in f['evento']: score = 2
-            
-            if ts not in filas_unicas or score > filas_unicas[ts].get('score', 0):
-                f['score'] = score
-                filas_unicas[ts] = f
-                
-        filas_finales = list(filas_unicas.values())
-        filas_finales.sort(key=lambda x: x['fecha'])
+            # Llave única por fecha y evento para evitar borrar el "Motor Encendido" que sigue al "Motor Apagado"
+            key = f['fecha'].strftime('%Y-%m-%d %H:%M:%S') + f['evento']
+            if key not in vistos:
+                vistos.add(key)
+                filas_finales.append(f)
 
-        tiempo_mov_seg = 0
-        tiempo_ral_seg = 0
-        tiempo_apagado_seg = 0
-        
-        for i in range(len(filas_finales)):
-            f_actual = filas_finales[i]
-            if i < len(filas_finales) - 1:
-                duracion = (filas_finales[i+1]['fecha'] - f_actual['fecha']).total_seconds()
-                if duracion > 3600: duracion = 600
-            else:
-                duracion = 60 if f_actual['score'] > 1 else 600
-                
-            if f_actual['score'] in [2, 3]: tiempo_mov_seg += duracion
-            elif f_actual['score'] in [4, 5]: tiempo_ral_seg += duracion
-            else: tiempo_apagado_seg += duracion
+        exceso_geo_hrs, exceso_geo_mins = calc_hrs_mins(tiempo_exceso_geo_seg)
 
-        def calc_hrs_mins(segundos): return int(segundos // 3600), int((segundos % 3600) // 60)
-        mov_hrs, mov_mins = calc_hrs_mins(tiempo_mov_seg)
-        ral_hrs, ral_mins = calc_hrs_mins(tiempo_ral_seg)
-        muerto_hrs, muerto_mins = calc_hrs_mins(tiempo_apagado_seg)
-
-        total_segundos = tiempo_mov_seg + tiempo_ral_seg + tiempo_apagado_seg
-        porc_mov = round((tiempo_mov_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
-        porc_ral = round((tiempo_ral_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
-        porc_muerto = round((tiempo_apagado_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
-
-        rutas_unicas = {t['dt_ini'].strftime('%Y%m%d%H%M%S'): t['distancia'] for t in tramos_reales if t['tipo'] == 'route' or t['distancia'] > 0}
-        total_dist = sum(rutas_unicas.values())
-        max_vel = max([t['velocidad'] for t in tramos_reales]) if tramos_reales else 0
-        vels_mov = [t['velocidad'] for t in tramos_reales if t['velocidad'] > 0]
-        prom_vel = sum(vels_mov) / len(vels_mov) if vels_mov else 0
-
+        # GENERACIÓN DEL EXCEL
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "Histórico"
+        ws.title = "Histórico Ejecutivo"
 
-        ws.cell(row=1, column=3, value="Histórico").font = Font(bold=True, size=14)
-        ws.cell(row=3, column=3, value="Unidad").font = Font(bold=True)
-        ws.cell(row=3, column=4, value=str(unit_id))
+        ws.cell(row=1, column=3, value="Histórico Ejecutivo").font = Font(bold=True, size=14)
+        ws.cell(row=3, column=3, value="Vehículo:").font = Font(bold=True)
+        ws.cell(row=3, column=4, value=str(unit_name))
 
         fecha_ini_legible = f"{normalizar_fecha(f_in)} {normalizar_hora(hora_inicio)}"
         fecha_fin_legible = f"{normalizar_fecha(f_fin)} {normalizar_hora(hora_fin, True)}"
@@ -708,6 +711,8 @@ def generar_excel():
         ws.cell(row=7, column=2, value=f"{round(prom_vel, 1)} km/h")
         ws.cell(row=7, column=3, value="Tiempo en Ralentí:").font = Font(bold=True)
         ws.cell(row=7, column=4, value=f"{ral_hrs} hrs {ral_mins} mins ({porc_ral}%)").font = Font(color="FF0000")
+        ws.cell(row=7, column=5, value="Exceso en Geocercas:").font = Font(bold=True)
+        ws.cell(row=7, column=6, value=f"{exceso_geo_hrs} hrs {exceso_geo_mins} mins").font = Font(color="FF0000", bold=True)
 
         ws.cell(row=8, column=1, value="Costo Combustible:").font = Font(bold=True)
         ws.cell(row=8, column=3, value="Horas de Motor (Trabajo):").font = Font(bold=True)
@@ -715,7 +720,7 @@ def generar_excel():
         ws.cell(row=8, column=5, value="Clase:").font = Font(bold=True)
         ws.cell(row=8, column=6, value="Troque de 2 ejes, 6 llantas")
 
-        headers = ["Vehículo", "Fecha", "Dirección", "Velocidad (Km/h)", "Evento", "Detalle", "Geocerca", "Mapa", "Longitud", "Latitud"]
+        headers = ["Vehículo", "Fecha", "Dirección", "Ciudad", "Velocidad (Km/h)", "Evento", "Detalle", "Geocerca", "Mapa", "Longitud", "Latitud"]
         header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
         for col_idx, header in enumerate(headers, 1):
             cell = ws.cell(row=10, column=col_idx, value=header)
@@ -725,34 +730,38 @@ def generar_excel():
 
         row_idx = 11
         for f in filas_finales:
-            ws.cell(row=row_idx, column=1, value=str(unit_id))
+            # Para Ciudad extraemos parte de la dirección
+            ciudad = "Hermosillo" if "Hermosillo" in f['origen'] else ("Navojoa" if "Navojoa" in f['origen'] or "Pueblo Mayo" in f['origen'] else ("Guaymas" if "Guaymas" in f['origen'] else "Zona Operativa"))
+
+            ws.cell(row=row_idx, column=1, value=str(unit_name))
             ws.cell(row=row_idx, column=2, value=f['fecha'].strftime('%Y-%m-%d %H:%M:%S'))
             ws.cell(row=row_idx, column=3, value=f['origen'])
-            ws.cell(row=row_idx, column=4, value=f['velocidad'])
-            ws.cell(row=row_idx, column=5, value=f['evento'])
-            ws.cell(row=row_idx, column=6, value=f['detalle'])
+            ws.cell(row=row_idx, column=4, value=ciudad)
+            ws.cell(row=row_idx, column=5, value=f['velocidad'])
+            ws.cell(row=row_idx, column=6, value=f['evento'])
+            ws.cell(row=row_idx, column=7, value=f['detalle'])
             
-            geo_cell = ws.cell(row=row_idx, column=7, value=f['geocerca'])
+            geo_cell = ws.cell(row=row_idx, column=8, value=f['geocerca'])
             if f['geocerca'] != "Fuera de geocerca":
                 geo_cell.font = Font(color="008000", bold=True)
             
-            if f['score'] >= 4 or "Exceso" in f['evento']: 
-                ws.cell(row=row_idx, column=5).font = Font(color="FF0000", bold=True)
+            if "Exceso" in f['evento']: 
+                ws.cell(row=row_idx, column=6).font = Font(color="FF0000", bold=True)
             
-            map_cell = ws.cell(row=row_idx, column=8, value="mapa")
+            map_cell = ws.cell(row=row_idx, column=9, value="mapa")
             map_cell.hyperlink = f"https://www.google.com/maps?q={f['lat']},{f['lng']}"
             map_cell.font = Font(color="0000FF", underline="single")
             map_cell.alignment = Alignment(horizontal="center")
             
-            ws.cell(row=row_idx, column=9, value=round(f['lng'], 6))
-            ws.cell(row=row_idx, column=10, value=round(f['lat'], 6))
+            ws.cell(row=row_idx, column=10, value=round(f['lng'], 6))
+            ws.cell(row=row_idx, column=11, value=round(f['lat'], 6))
             row_idx += 1
 
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
         
-        return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", as_attachment=True, download_name=f"Reporte_{unit_id}.xlsx")
+        return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", as_attachment=True, download_name=f"Reporte_{unit_name}.xlsx")
                          
     except Exception as e:
         import traceback
