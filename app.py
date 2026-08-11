@@ -8,7 +8,6 @@ import random
 import os
 import json
 import math
-import time
 
 app = Flask(__name__)
 
@@ -149,7 +148,7 @@ HTML_INTERFACE = """
             const btnSync = document.getElementById('btn_sync');
             const status = document.getElementById('status_msg');
             btnSync.disabled = true;
-            status.innerText = "⏳ Descargando catálogo masivo (Mapon). Esto puede tardar unos 2 minutos. No cierre la pestaña...";
+            status.innerText = "⏳ Descargando catálogo masivo (Mapon). Esto tomará varios segundos, por favor espera...";
             
             try {
                 const res = await fetch('/api/sync_db', { method: 'POST' });
@@ -161,7 +160,7 @@ HTML_INTERFACE = """
                     status.innerText = "❌ Error al sincronizar: " + data.message;
                 }
             } catch(e) {
-                status.innerText = "❌ Error de conexión al sincronizar.";
+                status.innerText = "❌ Error de red. El servidor de Mapon tardó demasiado.";
             }
             btnSync.disabled = false;
         }
@@ -189,9 +188,9 @@ HTML_INTERFACE = """
 
                 $('#btn_submit').prop('disabled', false);
                 if (geos.length === 0) {
-                    $('#status_msg').text("⚠️ Tu base de datos local está vacía. Haz clic en el botón amarillo 'Sincronizar Geocercas' arriba.");
+                    $('#status_msg').html("⚠️ <b>Tu base de datos local está vacía.</b><br>Haz clic en el botón amarillo 'Sincronizar Geocercas' arriba.");
                 } else {
-                    $('#status_msg').text(`✅ BD Local conectada (${geos.length} geocercas listas).`);
+                    $('#status_msg').html(`✅ BD Local conectada exitosamente (<b>${geos.length} geocercas listas</b>).`);
                 }
             } catch (e) {
                 $('#status_msg').text("Error cargando catálogos locales.");
@@ -223,7 +222,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⚡ Generando reporte y cruzando con BD Local...";
+            status.innerText = "⚡ Generando reporte y cruzando datos con BD Local...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -314,23 +313,22 @@ def api_unidades():
         return jsonify([]), 500
 
 # ==========================================
-# EL NUEVO CEREBRO: BASE DE DATOS LOCAL
-# Paginación pequeña (100) para burlar el límite de Mapon
+# CEREBRO MAESTRO: EXTRACCIÓN GIGANTE SIN LÍMITES
 # ==========================================
 @app.route('/api/sync_db', methods=['POST'])
 def sync_db():
     try:
+        # Consultamos a Mapon directamente, SIN paginación, para que nos devuelva todo de golpe
         endpoints = ['/territory/list.json', '/poi/list.json']
         geos_db = []
         vistos = set()
         
         for ep in endpoints:
-            offset = 0
-            while True:
-                # El límite de 100 y timeout de 15 evita que Mapon nos bloquee la IP
-                res = requests.get(f"{BASE_URL}{ep}", params={'key': API_KEY, 'limit': 100, 'offset': offset}, timeout=15)
+            try:
+                # Timeout de 120 segundos para que Mapon tenga tiempo de empaquetar miles de geocercas
+                res = requests.get(f"{BASE_URL}{ep}", params={'key': API_KEY}, timeout=120)
                 if res.status_code != 200:
-                    break
+                    continue
                     
                 data = res.json()
                 inner = data.get('data', data)
@@ -341,8 +339,6 @@ def sync_db():
                         if k in inner: items.extend(inner[k])
                 elif isinstance(inner, list):
                     items.extend(inner)
-                    
-                if not items: break
                 
                 for g in items:
                     c_id = str(g.get('company_id', ''))
@@ -352,20 +348,23 @@ def sync_db():
                     g_name = str(g.get('name', g.get('title', 'Geocerca'))).strip()
                     g_type = str(g.get('type', 'circle')).lower()
                     
-                    if g_name in vistos or g_id == 'None': continue
+                    if not g_name or g_name in vistos or g_id == 'None': continue
                     
                     geo_obj = {'id': g_id, 'name': g_name, 'type': g_type}
                     
+                    # Extraer puntos del polígono
                     if g_type == 'polygon' or 'points' in g:
                         pts = g.get('points', [])
                         if pts:
                             geo_obj['points'] = pts
                             geos_db.append(geo_obj)
                             vistos.add(g_name)
+                    # Extraer coordenadas del círculo
                     else:
                         g_lat = g.get('lat', g.get('latitude'))
                         g_lng = g.get('lng', g.get('longitude'))
                         g_radius = float(g.get('radius', 150))
+                        
                         if g_lat is None and 'center' in g:
                             g_lat = g['center'].get('lat')
                             g_lng = g['center'].get('lng')
@@ -377,14 +376,15 @@ def sync_db():
                             geos_db.append(geo_obj)
                             vistos.add(g_name)
                             
-                if len(items) < 100: break
-                offset += 100
-                time.sleep(0.5) # Respiro para el servidor de Mapon
+            except Exception as ep_error:
+                print(f"Alerta: Error al descargar endpoint {ep}: {ep_error}")
+                pass
                 
+        # Guardar en local pase lo que pase
         with open(DB_FILE, 'w', encoding='utf-8') as f:
             json.dump(geos_db, f, ensure_ascii=False, indent=2)
             
-        return jsonify({"status": "ok", "message": f"Sincronización exitosa. {len(geos_db)} geocercas guardadas en Local."})
+        return jsonify({"status": "ok", "message": f"Sincronización exitosa. {len(geos_db)} geocercas guardadas."})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -540,6 +540,7 @@ def generar_excel():
                 speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
                 tipo = str(item.get('type', '')).lower()
                 
+                # CRUCE EXACTO DEL RALENTÍ
                 idle_sec = 0.0
                 if tipo == 'stop':
                     for i_start, i_end in parsed_idles:
@@ -550,6 +551,7 @@ def generar_excel():
                 
                 idle_sec = min(idle_sec, duracion_seg)
 
+                # CRUCE CON BASE DE DATOS LOCAL
                 geo_id, geo_name = obtener_geocerca(lat_ini, lng_ini, origen)
 
                 tramos_reales.append({
