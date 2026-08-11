@@ -16,8 +16,8 @@ app = Flask(__name__)
 # ==========================================
 API_KEY = "7bd626cb4d3874faf995ec075af15d2cd35ec99d"
 BASE_URL = "https://gps.idttecnologias.mx/api/v1"
-COMPANY_ID = "87534"  # ID de Alimentos Kowi
-TIMEZONE_OFFSET = -7  # Zona horaria de Hermosillo (UTC-7)
+COMPANY_ID = "87534"  
+TIMEZONE_OFFSET = -7  
 FILTRO_TEXTO = ""
 
 # ==========================================
@@ -76,7 +76,7 @@ HTML_INTERFACE = """
     <div class="card">
         <div class="header">
             <h2>📊 Reporte Ejecutivo Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Sincronización Automática con Mapon</p>
+            <p>IDT Tecnologías - Sincronizado y Resumido Automáticamente</p>
         </div>
         
         <div class="main-container">
@@ -198,7 +198,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⏳ Extrayendo ralentí exacto desde Mapon...";
+            status.innerText = "⏳ Empalmando métricas ocultas de Mapon...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -372,7 +372,6 @@ def generar_excel():
             return h if len(h) == 8 else h + ":00"
 
         geos_procesadas = list(GEOCERCAS_LOCALES)
-        
         try:
             endpoints = ['/territory/list.json', '/poi/list.json', '/object/list.json']
             for ep in endpoints:
@@ -472,6 +471,7 @@ def generar_excel():
         f_in_api = to_utc_str(f_in, hora_inicio)
         f_fin_api = to_utc_str(f_fin, hora_fin, True)
 
+        # SE SOLICITAN EXPRESAMENTE LOS IDLES COMO ARREGLO INDEPENDIENTE
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
         params = {
             "key": API_KEY, 
@@ -485,68 +485,45 @@ def generar_excel():
         try:
             response = requests.get(url, params=params, timeout=15)
             data = response.json()
-            rutas_encontradas = []
-            eventos_vistos = set()
             
-            def extraer_tramos(obj):
-                if isinstance(obj, dict):
-                    tipo = str(obj.get('type', '')).lower()
-                    has_start_end = ('start' in obj or 'start_time' in obj) and ('end' in obj or 'end_time' in obj)
-                    if tipo in ['route', 'stop', 'idle'] or has_start_end:
-                        sig = str(obj.get('start', {}).get('time', '')) + tipo
-                        if sig not in eventos_vistos:
-                            eventos_vistos.add(sig)
-                            rutas_encontradas.append(obj)
-                    for k, v in obj.items():
-                        if isinstance(v, (dict, list)): extraer_tramos(v)
-                elif isinstance(obj, list):
-                    for item in obj:
-                        if isinstance(item, (dict, list)): extraer_tramos(item)
+            # EXTRACCIÓN MAESTRA DE IDLES (EL SECRETO DE MAPON)
+            unit_data = data.get('data', {}).get('units', [])[0] if data.get('data', {}).get('units') else {}
+            rutas_array = unit_data.get('routes', [])
+            idles_array = unit_data.get('idles', [])
+            
+            parsed_idles = []
+            for idl in idles_array:
+                s_dt = parse_iso(idl.get('start', {}).get('time'))
+                e_dt = parse_iso(idl.get('end', {}).get('time'))
+                if s_dt and e_dt:
+                    parsed_idles.append((s_dt, e_dt))
 
-            extraer_tramos(data)
+            for item in rutas_array:
+                dt_ini = parse_iso(item.get('start', {}).get('time'))
+                dt_fin = parse_iso(item.get('end', {}).get('time'))
+                if not dt_ini or not dt_fin: continue
 
-            for item in rutas_encontradas:
-                dt_ini = parse_iso(item.get('start', {}).get('time', item.get('start_time', '')))
-                dt_fin = parse_iso(item.get('end', {}).get('time', item.get('end_time', '')))
-                dur_raw = item.get('duration', item.get('time', 0))
-                try: duracion_seg = float(dur_raw)
-                except: duracion_seg = 0.0
-                
-                if dt_ini and dt_fin:
-                    calc_dur = (dt_fin - dt_ini).total_seconds()
-                    if calc_dur > duracion_seg:
-                        duracion_seg = calc_dur
-                elif dt_ini and not dt_fin: 
-                    dt_fin = dt_ini + timedelta(seconds=duracion_seg)
-                    
-                if not dt_ini: continue
+                duracion_seg = (dt_fin - dt_ini).total_seconds()
+                if duracion_seg <= 0: continue
 
-                origen = str(item.get('start', {}).get('address', item.get('start_address', 'Zona Operativa')))
-                lat_ini = float(item.get('start', {}).get('lat', item.get('start_lat', 27.19)))
-                lng_ini = float(item.get('start', {}).get('lng', item.get('start_lng', -109.55)))
-                lat_fin = float(item.get('end', {}).get('lat', item.get('end_lat', lat_ini)))
-                lng_fin = float(item.get('end', {}).get('lng', item.get('end_lng', lng_ini)))
+                origen = str(item.get('start', {}).get('address', 'Zona Operativa'))
+                lat_ini = float(item.get('start', {}).get('lat', 27.19))
+                lng_ini = float(item.get('start', {}).get('lng', -109.55))
+                lat_fin = float(item.get('end', {}).get('lat', lat_ini))
+                lng_fin = float(item.get('end', {}).get('lng', lng_ini))
                 
                 dist_km = float(item.get('distance', 0)) / 1000.0
                 speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
                 tipo = str(item.get('type', '')).lower()
                 
-                # EXTRACCIÓN EXACTA DE RALENTÍ DESDE MAPON
+                # CRUCE MATEMÁTICO: Calcular cuántos segundos de "idle" caen dentro de este "stop"
                 idle_sec = 0.0
-                if tipo == 'idle':
-                    idle_sec = duracion_seg
-                else:
-                    if 'metrics' in item and isinstance(item['metrics'], dict):
-                        # Mapon suele mandar el ralentí dentro de stops en una métrica que se llama idle
-                        for k, v in item['metrics'].items():
-                            if 'idle' in str(k).lower():
-                                try: idle_sec = max(idle_sec, float(v))
-                                except: pass
-                    
-                    # SI MAPON NO LO MANDA, ASUMIMOS EL 100% SI LA PARADA ES MUY CORTA
-                    if idle_sec == 0 and tipo == 'stop' and duracion_seg > 0:
-                        if duracion_seg <= (min_ralenti * 60) + 180:
-                            idle_sec = duracion_seg
+                if tipo == 'stop':
+                    for i_start, i_end in parsed_idles:
+                        overlap_start = max(dt_ini, i_start)
+                        overlap_end = min(dt_fin, i_end)
+                        if overlap_end > overlap_start:
+                            idle_sec += (overlap_end - overlap_start).total_seconds()
                 
                 idle_sec = min(idle_sec, duracion_seg)
 
