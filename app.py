@@ -6,6 +6,8 @@ import io
 from datetime import datetime, timedelta
 import random
 import os
+import json
+import math
 
 app = Flask(__name__)
 
@@ -76,9 +78,9 @@ HTML_INTERFACE = """
 
             <div class="form-content">
                 <div class="form-group">
-                    <label>Buscar / Seleccionar Unidad: <span class="retry-btn" onclick="cargarUnidades()">🔄 Reintentar carga</span></label>
+                    <label>Buscar / Seleccionar Unidad: <span class="retry-btn" onclick="cargarUnidades()">🔄 Reintentar</span></label>
                     <select id="unit_select" style="width: 100%;">
-                        <option value="">⏳ Cargando catálogo de unidades...</option>
+                        <option value="">⏳ Cargando unidades...</option>
                     </select>
                 </div>
 
@@ -106,14 +108,23 @@ HTML_INTERFACE = """
 
                 <div class="form-row">
                     <div class="form-group">
-                        <label>Límite de Velocidad Permitido (km/h):</label>
+                        <label>Límite Velocidad General (km/h):</label>
                         <input type="number" id="limite_velocidad" value="80" min="1" max="150" required>
                     </div>
                     <div class="form-group">
                         <label>Alerta Ralentí (mins):</label>
-                        <input type="number" id="min_ralenti" value="5" min="1" max="60" title="Minutos para considerar ralentí excesivo" required>
+                        <input type="number" id="min_ralenti" value="5" min="1" max="60" required>
                     </div>
                 </div>
+
+                <!-- NUEVOS CAMPOS DE GEOCERCAS (Diseño Original Respetado) -->
+                <div class="form-group">
+                    <label>Geocercas para validar exceso de velocidad:</label>
+                    <select id="geofence_select" multiple="multiple" style="width: 100%;">
+                        <option value="">⏳ Cargando geocercas...</option>
+                    </select>
+                </div>
+                <div class="form-group" id="speed_limits_container"></div>
 
                 <button type="button" class="btn-submit" id="btn_submit" onclick="generarReporte()" disabled>📥 Generar y Descargar Excel</button>
                 <div id="status_msg" class="status-msg"></div>
@@ -122,23 +133,40 @@ HTML_INTERFACE = """
     </div>
 
     <script>
-        async function cargarUnidades() {
-            const select = $('#unit_select');
-            const btn = document.getElementById('btn_submit');
-            const status = document.getElementById('status_msg');
-            status.innerText = "⏳ Cargando catálogo de unidades...";
-            btn.disabled = true;
+        async function cargarCatalogos() {
             try {
-                const res = await fetch('/api_unidades');
-                const units = await res.json();
-                select.empty();
-                select.append(new Option('🔍 Escribe para buscar unidad...', ''));
-                units.forEach(u => select.append(new Option(`${u.label || ''} ${u.number || ''} (ID: ${u.unit_id})`.trim(), u.unit_id)));
-                select.select2({ placeholder: "🔍 Escribe para buscar unidad...", width: '100%' });
-                btn.disabled = false;
-                status.innerText = "";
-            } catch (e) { status.innerText = "Error de conexión."; }
+                const [resUnits, resGeos] = await Promise.all([
+                    fetch('/api_unidades'),
+                    fetch('/api_geocercas')
+                ]);
+                const units = await resUnits.json();
+                const geos = await resGeos.json();
+
+                const selectUnit = $('#unit_select');
+                selectUnit.empty().append(new Option('🔍 Escribe para buscar unidad...', ''));
+                units.forEach(u => selectUnit.append(new Option(`${u.label || ''} ${u.number || ''} (ID: ${u.unit_id})`.trim(), u.unit_id)));
+                selectUnit.select2({ placeholder: "🔍 Escribe para buscar unidad...", width: '100%' });
+
+                const selectGeo = $('#geofence_select');
+                selectGeo.empty();
+                geos.forEach(g => selectGeo.append(new Option(g.name, g.geofence_id)));
+                selectGeo.select2({ placeholder: "Seleccionar geocercas opcionales...", width: '100%' });
+
+                $('#btn_submit').prop('disabled', false);
+                $('#status_msg').text("");
+            } catch (e) {
+                $('#status_msg').text("Error cargando catálogos.");
+            }
         }
+
+        $('#geofence_select').on('change', function() {
+            const container = $('#speed_limits_container');
+            const selected = $(this).select2('data');
+            container.empty();
+            selected.forEach(s => {
+                container.append(`<div class="form-group"><label>Límite en ${s.text} (km/h):</label><input type="number" class="geo-limit" data-id="${s.id}" value="60" style="width:100%; padding:8px; border:1px solid #dcdfe6; border-radius:6px;"></div>`);
+            });
+        });
 
         async function generarReporte() {
             const btn = document.getElementById('btn_submit');
@@ -151,6 +179,11 @@ HTML_INTERFACE = """
             btn.disabled = true;
             status.innerText = "⏳ Generando reporte...";
 
+            const geoLimits = {};
+            $('.geo-limit').each(function() {
+                geoLimits[$(this).data('id')] = $(this).val();
+            });
+
             const params = new URLSearchParams({
                 unit_id: unitId,
                 unit_name: unitText,
@@ -159,7 +192,8 @@ HTML_INTERFACE = """
                 hora_inicio: document.getElementById('hora_inicio').value,
                 hora_fin: document.getElementById('hora_fin').value,
                 limite_velocidad: document.getElementById('limite_velocidad').value,
-                min_ralenti: document.getElementById('min_ralenti').value
+                min_ralenti: document.getElementById('min_ralenti').value,
+                geos: JSON.stringify(geoLimits)
             });
 
             const res = await fetch(`/generar_excel?${params.toString()}`);
@@ -184,41 +218,25 @@ HTML_INTERFACE = """
             const now = new Date();
             let start = new Date();
             let end = new Date();
-
             const formatDate = (d) => {
-                let month = '' + (d.getMonth() + 1),
-                    day = '' + d.getDate(),
-                    year = d.getFullYear();
+                let month = '' + (d.getMonth() + 1), day = '' + d.getDate(), year = d.getFullYear();
                 if (month.length < 2) month = '0' + month;
                 if (day.length < 2) day = '0' + day;
                 return [year, month, day].join('-');
             };
-
-            if (type === 'hoy') {
-                start = now; end = now;
-            } else if (type === 'ayer') {
-                start.setDate(now.getDate() - 1); end.setDate(now.getDate() - 1);
-            } else if (type === 'esta_semana') {
-                const day = now.getDay() || 7;
-                start.setDate(now.getDate() - day + 1); end = now;
-            } else if (type === 'semana_anterior') {
-                const day = now.getDay() || 7;
-                start.setDate(now.getDate() - day - 6); end.setDate(now.getDate() - day);
-            } else if (type === 'ultimos_7_dias') {
-                start.setDate(now.getDate() - 6); end = now;
-            } else if (type === 'este_mes') {
-                start = new Date(now.getFullYear(), now.getMonth(), 1); end = now;
-            } else if (type === 'mes_anterior') {
-                start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-                end = new Date(now.getFullYear(), now.getMonth(), 0);
-            }
-
+            if (type === 'hoy') { start = now; end = now; }
+            else if (type === 'ayer') { start.setDate(now.getDate() - 1); end.setDate(now.getDate() - 1); }
+            else if (type === 'esta_semana') { const day = now.getDay() || 7; start.setDate(now.getDate() - day + 1); end = now; }
+            else if (type === 'semana_anterior') { const day = now.getDay() || 7; start.setDate(now.getDate() - day - 6); end.setDate(now.getDate() - day); }
+            else if (type === 'ultimos_7_dias') { start.setDate(now.getDate() - 6); end = now; }
+            else if (type === 'este_mes') { start = new Date(now.getFullYear(), now.getMonth(), 1); end = now; }
+            else if (type === 'mes_anterior') { start = new Date(now.getFullYear(), now.getMonth() - 1, 1); end = new Date(now.getFullYear(), now.getMonth(), 0); }
             document.getElementById('fecha_inicio').value = formatDate(start);
             document.getElementById('fecha_fin').value = formatDate(end);
         }
 
         setRange('hoy');
-        cargarUnidades();
+        cargarCatalogos();
     </script>
 </body>
 </html>
@@ -236,18 +254,17 @@ def api_unidades():
     except: 
         return jsonify([]), 500
 
+@app.route('/api_geocercas')
+def api_geocercas():
+    try:
+        res = requests.get(f"{BASE_URL}/geofence/list.json", params={'key': API_KEY}, timeout=15)
+        return jsonify(res.json().get('data', {}).get('geofences', []))
+    except: 
+        return jsonify([]), 500
+
 @app.route('/generar_excel')
 def generar_excel():
     try:
-        from flask import request, send_file
-        import requests
-        import openpyxl
-        from openpyxl.styles import Font, Alignment, PatternFill
-        import io
-        import os
-        from datetime import datetime, timedelta
-        import random
-
         unit_id = request.args.get('unit_id', '868807')
         if "ID:" in unit_id:
             unit_id = unit_id.split("ID:")[1].replace(")", "").strip()
@@ -259,6 +276,30 @@ def generar_excel():
         
         limite_velocidad = int(request.args.get('limite_velocidad', 80))
         min_ralenti = int(request.args.get('min_ralenti', 5))
+        
+        geo_limits_raw = request.args.get('geos', '{}')
+        geo_limits = json.loads(geo_limits_raw) # {geofence_id: limite_velocidad}
+
+        # Obtener geocercas de Mapon para validación espacial
+        geos_data = []
+        try:
+            res_geo = requests.get(f"{BASE_URL}/geofence/list.json", params={'key': API_KEY}, timeout=15)
+            geos_data = res_geo.json().get('data', {}).get('geofences', [])
+        except:
+            pass
+
+        def obtener_geocerca(lat, lng):
+            for g in geos_data:
+                try:
+                    g_lat = float(g.get('lat', 0))
+                    g_lng = float(g.get('lng', 0))
+                    g_radius = float(g.get('radius', 500)) # Metros por defecto
+                    dist_m = math.sqrt((lat - g_lat)**2 + (lng - g_lng)**2) * 111000
+                    if dist_m <= g_radius:
+                        return g
+                except:
+                    pass
+            return None
 
         def normalizar_fecha(fecha_str):
             try:
@@ -285,7 +326,6 @@ def generar_excel():
         api_key = os.environ.get('MAPON_API_KEY', API_KEY)
 
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
-        
         params = {
             "key": api_key, 
             "unit_id": unit_id, 
@@ -305,7 +345,6 @@ def generar_excel():
         try:
             response = requests.get(url, params=params, timeout=15)
             data = response.json()
-
             rutas_encontradas = []
             eventos_vistos = set()
             
@@ -313,13 +352,11 @@ def generar_excel():
                 if isinstance(obj, dict):
                     tipo = str(obj.get('type', '')).lower()
                     has_start_end = ('start' in obj or 'start_time' in obj) and ('end' in obj or 'end_time' in obj)
-                    
                     if tipo in ['route', 'stop', 'idle'] or has_start_end:
                         sig = str(obj.get('start', {}).get('time', '')) + tipo
                         if sig not in eventos_vistos:
                             eventos_vistos.add(sig)
                             rutas_encontradas.append(obj)
-                            
                     for k, v in obj.items():
                         if isinstance(v, (dict, list)): extraer_tramos(v)
                 elif isinstance(obj, list):
@@ -331,7 +368,6 @@ def generar_excel():
             for item in rutas_encontradas:
                 dt_ini = parse_iso(item.get('start', {}).get('time', item.get('start_time', '')))
                 dt_fin = parse_iso(item.get('end', {}).get('time', item.get('end_time', '')))
-                
                 dur_raw = item.get('duration', item.get('time', 0))
                 try: duracion_seg = float(dur_raw)
                 except: duracion_seg = 0.0
@@ -385,7 +421,6 @@ def generar_excel():
         for t in tramos_reales:
             curr_time = t['dt_ini']
             end_time = t['dt_fin']
-            
             is_moving = t['velocidad'] > 0 or t['tipo'] == 'route'
             total_seconds = (end_time - curr_time).total_seconds()
             if total_seconds <= 0: continue
@@ -399,19 +434,39 @@ def generar_excel():
                     current_speed = round(random.uniform(avg_speed * 0.85, avg_speed * 1.15), 1)
                     current_speed = min(current_speed, t['velocidad']) if t['velocidad'] > 0 else current_speed
                     if current_speed == 0: current_speed = avg_speed
-                    evento = "Exceso de velocidad" if current_speed > limite_velocidad else "En movimiento"
                     
+                    # Evaluar geocerca y velocidad personalizada
                     prog = min((curr_time - t['dt_ini']).total_seconds() / total_seconds, 1.0)
+                    curr_lat = t['lat_ini'] + (delta_lat * prog)
+                    curr_lng = t['lng_ini'] + (delta_lng * prog)
+                    
+                    geo_obj = obtener_geocerca(curr_lat, curr_lng)
+                    geo_name = geo_obj['name'] if geo_obj else "Fuera de geocerca"
+                    
+                    # Verificar límite específico de geocerca si está seleccionada
+                    evento = "En movimiento"
+                    limite_aplicable = limite_velocidad
+                    if geo_obj and str(geo_obj.get('geofence_id')) in geo_limits:
+                        limite_aplicable = int(geo_limits[str(geo_obj.get('geofence_id'))])
+                        if current_speed > limite_aplicable:
+                            evento = f"Exceso en {geo_name}"
+                    elif current_speed > limite_velocidad:
+                        evento = "Exceso de velocidad"
+
                     filas_brutas.append({
                         'fecha': curr_time, 'origen': t['origen'], 'velocidad': current_speed,
-                        'evento': evento, 'detalle': "Avanzando hacia destino",
-                        'lat': t['lat_ini'] + (delta_lat * prog), 'lng': t['lng_ini'] + (delta_lng * prog)
+                        'evento': evento, 'detalle': f"Velocidad: {current_speed} km/h (Límite: {limite_aplicable})",
+                        'lat': curr_lat, 'lng': curr_lng, 'geocerca': geo_name
                     })
                     curr_time += timedelta(minutes=1)
             else:
                 idle_remaining = t['idle_sec']
-                
                 while curr_time <= end_time:
+                    curr_lat = t['lat_ini']
+                    curr_lng = t['lng_ini']
+                    geo_obj = obtener_geocerca(curr_lat, curr_lng)
+                    geo_name = geo_obj['name'] if geo_obj else "Fuera de geocerca"
+
                     if idle_remaining > 0:
                         interval = 1
                         es_ralenti_excesivo = (t['idle_sec'] - idle_remaining) >= (min_ralenti * 60)
@@ -425,7 +480,7 @@ def generar_excel():
                         
                     filas_brutas.append({
                         'fecha': curr_time, 'origen': t['origen'], 'velocidad': 0,
-                        'evento': evento, 'detalle': detalle, 'lat': t['lat_ini'], 'lng': t['lng_ini']
+                        'evento': evento, 'detalle': detalle, 'lat': curr_lat, 'lng': curr_lng, 'geocerca': geo_name
                     })
                     curr_time += timedelta(minutes=interval)
 
@@ -433,11 +488,10 @@ def generar_excel():
         filas_unicas = {}
         for f in filas_brutas:
             ts = f['fecha'].strftime('%Y-%m-%d %H:%M:%S')
-            
             score = 1
             if "Ralentí Excesivo" in f['evento']: score = 5
-            elif "Ralentí" in f['evento']: score = 4
-            elif "Exceso" in f['evento']: score = 3
+            elif "Exceso" in f['evento']: score = 4
+            elif "Ralentí" in f['evento']: score = 3
             elif "movimiento" in f['evento']: score = 2
             
             if ts not in filas_unicas or score > filas_unicas[ts].get('score', 0):
@@ -450,6 +504,7 @@ def generar_excel():
         tiempo_mov_seg = 0
         tiempo_ral_seg = 0
         tiempo_apagado_seg = 0
+        tiempo_exceso_geo_seg = 0
         
         for i in range(len(filas_finales)):
             f_actual = filas_finales[i]
@@ -462,11 +517,15 @@ def generar_excel():
             if f_actual['score'] in [2, 3]: tiempo_mov_seg += duracion
             elif f_actual['score'] in [4, 5]: tiempo_ral_seg += duracion
             else: tiempo_apagado_seg += duracion
+            
+            if "Exceso en" in f_actual['evento']:
+                tiempo_exceso_geo_seg += duracion
 
         def calc_hrs_mins(segundos): return int(segundos // 3600), int((segundos % 3600) // 60)
         mov_hrs, mov_mins = calc_hrs_mins(tiempo_mov_seg)
         ral_hrs, ral_mins = calc_hrs_mins(tiempo_ral_seg)
         muerto_hrs, muerto_mins = calc_hrs_mins(tiempo_apagado_seg)
+        exceso_geo_hrs, exceso_geo_mins = calc_hrs_mins(tiempo_exceso_geo_seg)
 
         total_segundos = tiempo_mov_seg + tiempo_ral_seg + tiempo_apagado_seg
         porc_mov = round((tiempo_mov_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
@@ -508,8 +567,8 @@ def generar_excel():
         ws.cell(row=7, column=2, value=f"{round(prom_vel, 1)} km/h")
         ws.cell(row=7, column=3, value="Tiempo en Ralentí:").font = Font(bold=True)
         ws.cell(row=7, column=4, value=f"{ral_hrs} hrs {ral_mins} mins ({porc_ral}%)").font = Font(color="FF0000")
-        ws.cell(row=7, column=5, value="Consumo Combustible:").font = Font(bold=True)
-        ws.cell(row=7, column=6, value="A calcular")
+        ws.cell(row=7, column=5, value="Exceso en Geocercas:").font = Font(bold=True)
+        ws.cell(row=7, column=6, value=f"{exceso_geo_hrs} hrs {exceso_geo_mins} mins").font = Font(color="FF0000", bold=True)
 
         ws.cell(row=8, column=1, value="Costo Combustible:").font = Font(bold=True)
         ws.cell(row=8, column=3, value="Horas de Motor (Trabajo):").font = Font(bold=True)
@@ -517,7 +576,7 @@ def generar_excel():
         ws.cell(row=8, column=5, value="Clase:").font = Font(bold=True)
         ws.cell(row=8, column=6, value="Troque de 2 ejes, 6 llantas")
 
-        headers = ["Vehículo", "Fecha", "Dirección", "Ciudad", "Velocidad (Km/h)", "Evento", "Detalle", "Mapa", "Longitud", "Latitud"]
+        headers = ["Vehículo", "Fecha", "Dirección", "Ciudad", "Velocidad (Km/h)", "Evento", "Detalle", "Geocerca", "Mapa", "Longitud", "Latitud"]
         header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
         for col_idx, header in enumerate(headers, 1):
             cell = ws.cell(row=10, column=col_idx, value=header)
@@ -536,23 +595,25 @@ def generar_excel():
             ws.cell(row=row_idx, column=5, value=f['velocidad'])
             ws.cell(row=row_idx, column=6, value=f['evento'])
             ws.cell(row=row_idx, column=7, value=f['detalle'])
+            ws.cell(row=row_idx, column=8, value=f['geocerca'])
             
-            if f['score'] >= 4: ws.cell(row=row_idx, column=6).font = Font(color="FF0000", bold=True)
+            if f['score'] >= 4 or "Exceso" in f['evento']: 
+                ws.cell(row=row_idx, column=6).font = Font(color="FF0000", bold=True)
             
-            map_cell = ws.cell(row=row_idx, column=8, value="mapa")
+            map_cell = ws.cell(row=row_idx, column=9, value="mapa")
             map_cell.hyperlink = f"https://www.google.com/maps?q={f['lat']},{f['lng']}"
             map_cell.font = Font(color="0000FF", underline="single")
             map_cell.alignment = Alignment(horizontal="center")
             
-            ws.cell(row=row_idx, column=9, value=round(f['lng'], 6))
-            ws.cell(row=row_idx, column=10, value=round(f['lat'], 6))
+            ws.cell(row=row_idx, column=10, value=round(f['lng'], 6))
+            ws.cell(row=row_idx, column=11, value=round(f['lat'], 6))
             row_idx += 1
 
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
         
-        return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", as_attachment=True, download_name="Historico_Granular_Real.xlsx")
+        return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", as_attachment=True, download_name="Historico_Geocercas.xlsx")
                          
     except Exception as e:
         import traceback
