@@ -16,7 +16,8 @@ app = Flask(__name__)
 # ==========================================
 API_KEY = "7bd626cb4d3874faf995ec075af15d2cd35ec99d"
 BASE_URL = "https://gps.idttecnologias.mx/api/v1"
-COMPANY_ID = 87534 # ID de Alimentos Kowi (Cambiar si es otro cliente)
+COMPANY_ID = "87534"  # ID de Alimentos Kowi (Filtro por ID)
+FILTRO_TEXTO = ""     # Ej: "kowi" (Si quieres forzar un filtro extra por palabra en el nombre)
 # ==========================================
 
 HTML_INTERFACE = """
@@ -265,34 +266,63 @@ def index():
 @app.route('/api_unidades')
 def api_unidades():
     try:
-        res = requests.get(f"{BASE_URL}/unit/list.json", params={'key': API_KEY, 'company_id': COMPANY_ID}, timeout=15)
-        return jsonify(res.json().get('data', {}).get('units', []))
+        res = requests.get(f"{BASE_URL}/unit/list.json", params={'key': API_KEY}, timeout=15)
+        data = res.json()
+        units_raw = data.get('data', {}).get('units', [])
+        
+        # Filtro local por empresa
+        unidades_filtradas = []
+        for u in units_raw:
+            c_id = str(u.get('company_id', ''))
+            # Si tiene un company_id asignado y no es el de Kowi, se omite
+            if c_id and c_id != COMPANY_ID:
+                continue
+            unidades_filtradas.append(u)
+            
+        return jsonify(unidades_filtradas)
     except: 
         return jsonify([]), 500
 
 @app.route('/api_geocercas')
 def api_geocercas():
     try:
-        # Aquí consultamos exclusivamente las geocercas ("objects" en la DB de Mapon) de Kowi
-        res = requests.get(f"{BASE_URL}/object/list.json", params={'key': API_KEY, 'company_id': COMPANY_ID}, timeout=15)
+        res = requests.get(f"{BASE_URL}/object/list.json", params={'key': API_KEY}, timeout=15)
         data = res.json()
-        geos_raw = data.get('data', {}).get('objects', [])
         
-        # Por si Mapon las envía en un arreglo directo dentro de data
-        if not geos_raw and isinstance(data.get('data'), list):
-            geos_raw = data.get('data')
+        geos_raw = []
+        inner = data.get('data', data)
+        if isinstance(inner, dict):
+            for k in ['objects', 'items', 'list']:
+                if k in inner:
+                    geos_raw.extend(inner[k])
+            if not geos_raw:
+                for v in inner.values():
+                    if isinstance(v, list):
+                        geos_raw.extend(v)
+        elif isinstance(inner, list):
+            geos_raw.extend(inner)
 
         geos_normalizadas = []
         for g in geos_raw:
+            # 1. Filtro estricto por ID de empresa (Solo pasaran las de Kowi)
+            c_id = str(g.get('company_id', ''))
+            if c_id and c_id != COMPANY_ID:
+                continue
+                
             g_id = str(g.get('object_id', g.get('id', '')))
             g_name = str(g.get('name', g.get('title', 'Geocerca')))
+            
+            # 2. Filtro auxiliar por nombre (se activa si pones algo en FILTRO_TEXTO arriba)
+            if FILTRO_TEXTO and FILTRO_TEXTO.lower() not in g_name.lower():
+                continue
+
             if g_id and g_id != 'None':
                 geos_normalizadas.append({
                     'geofence_id': g_id,
                     'name': g_name
                 })
-        
-        # Ordenamos las geocercas alfabéticamente para que las encuentres fácil
+                
+        # Ordenamos las geocercas alfabéticamente
         geos_normalizadas.sort(key=lambda x: x['name'])
         
         return jsonify(geos_normalizadas)
@@ -317,23 +347,44 @@ def generar_excel():
         geo_limits_raw = request.args.get('geos', '{}')
         geo_limits = json.loads(geo_limits_raw)
 
-        # Descargamos los datos de las geocercas (Objects de Kowi)
+        # Descargamos los datos de las geocercas aplicando los mismos filtros exactos
         geos_procesadas = []
         try:
-            res_geo = requests.get(f"{BASE_URL}/object/list.json", params={'key': API_KEY, 'company_id': COMPANY_ID}, timeout=15)
+            res_geo = requests.get(f"{BASE_URL}/object/list.json", params={'key': API_KEY}, timeout=15)
             data_geo = res_geo.json()
-            geos_raw = data_geo.get('data', {}).get('objects', [])
-            if not geos_raw and isinstance(data_geo.get('data'), list):
-                geos_raw = data_geo.get('data')
+            inner = data_geo.get('data', data_geo)
+            geos_raw = []
+            if isinstance(inner, dict):
+                for k in ['objects', 'items', 'list']:
+                    if k in inner:
+                        geos_raw.extend(inner[k])
+                if not geos_raw:
+                    for v in inner.values():
+                        if isinstance(v, list):
+                            geos_raw.extend(v)
+            elif isinstance(inner, list):
+                geos_raw.extend(inner)
 
             for g in geos_raw:
+                # Filtros de empresa
+                c_id = str(g.get('company_id', ''))
+                if c_id and c_id != COMPANY_ID:
+                    continue
+                    
                 g_id = str(g.get('object_id', g.get('id', '')))
-                g_name = str(g.get('name', 'Geocerca'))
+                g_name = str(g.get('name', g.get('title', 'Geocerca')))
+                
+                if FILTRO_TEXTO and FILTRO_TEXTO.lower() not in g_name.lower():
+                    continue
+                    
                 g_lat = g.get('lat', g.get('latitude'))
                 g_lng = g.get('lng', g.get('longitude'))
                 g_radius = float(g.get('radius', 500))
                 
-                if g_lat is None and 'points' in g:
+                if g_lat is None and 'center' in g:
+                    g_lat = g['center'].get('lat')
+                    g_lng = g['center'].get('lng')
+                elif g_lat is None and 'points' in g:
                     pts = g['points']
                     if isinstance(pts, list) and len(pts) > 0:
                         g_lat = sum(float(p.get('lat',0)) for p in pts) / len(pts)
@@ -352,13 +403,11 @@ def generar_excel():
             pass
 
         def obtener_geocerca(lat, lng, address):
-            # 1. Validación matemática por coordenadas y radio
             for g in geos_procesadas:
                 dist_m = math.sqrt((lat - g['lat'])**2 + (lng - g['lng'])**2) * 111000
                 if dist_m <= g['radius']:
                     return g['id'], g['name']
             
-            # 2. Validación por texto de Mapon (si la dirección dice el nombre de la geocerca)
             address_str = str(address).lower()
             for gid, gdata in geo_limits.items():
                 if gdata['name'].lower() in address_str:
