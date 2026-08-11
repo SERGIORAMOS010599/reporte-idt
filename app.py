@@ -17,8 +17,8 @@ app = Flask(__name__)
 API_KEY = "7bd626cb4d3874faf995ec075af15d2cd35ec99d"
 BASE_URL = "https://gps.idttecnologias.mx/api/v1"
 COMPANY_ID = "87534"  # ID de Alimentos Kowi
-TIMEZONE_OFFSET = -7  # Zona horaria de Hermosillo (UTC-7)
-FILTRO_TEXTO = ""
+TIMEZONE_OFFSET = -7  # Zona horaria de Hermosillo
+DB_FILE = "geocercas_db.json"  # NUESTRA BASE DE DATOS LOCAL
 
 HTML_INTERFACE = """
 <!DOCTYPE html>
@@ -59,6 +59,10 @@ HTML_INTERFACE = """
         .btn-submit { width: 100%; background: #28a745; color: white; padding: 12px; border: none; border-radius: 6px; font-weight: bold; font-size: 14px; cursor: pointer; transition: background 0.2s; margin-top: 10px; }
         .btn-submit:hover { background: #218838; }
         .btn-submit:disabled { background: #a5d6a7; cursor: not-allowed; }
+        
+        .btn-sync { width: 100%; background: #f39c12; color: white; padding: 10px; border: none; border-radius: 6px; font-weight: bold; font-size: 13px; cursor: pointer; transition: background 0.2s; margin-bottom: 15px; }
+        .btn-sync:hover { background: #e67e22; }
+        
         .status-msg { font-size: 13px; color: #e67e22; margin-top: 10px; text-align: center; font-weight: bold; }
         .retry-btn { font-size: 11px; color: #007bff; text-decoration: underline; cursor: pointer; margin-left: 8px; }
     </style>
@@ -67,7 +71,7 @@ HTML_INTERFACE = """
     <div class="card">
         <div class="header">
             <h2>📊 Reporte Ejecutivo Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Sincronizado y Optimizado para Alta Velocidad</p>
+            <p>IDT Tecnologías - Base de Datos Local Integrada</p>
         </div>
         
         <div class="main-container">
@@ -81,8 +85,11 @@ HTML_INTERFACE = """
             </div>
 
             <div class="form-content">
+                <!-- BOTÓN DE SINCRONIZACIÓN DE BASE DE DATOS -->
+                <button type="button" class="btn-sync" id="btn_sync" onclick="sincronizarBD()">🔄 1. Sincronizar Geocercas (Mapon -> Base de Datos Local)</button>
+                
                 <div class="form-group">
-                    <label>Buscar / Seleccionar Unidad: <span class="retry-btn" onclick="cargarCatalogos()">🔄 Reintentar carga</span></label>
+                    <label>Buscar / Seleccionar Unidad:</label>
                     <select id="unit_select" style="width: 100%;">
                         <option value="">⏳ Cargando catálogo...</option>
                     </select>
@@ -124,23 +131,44 @@ HTML_INTERFACE = """
                 <div class="form-group">
                     <label>Geocercas (Opcional: Selecciona para asignar límite estricto):</label>
                     <select id="geofence_select" multiple="multiple" style="width: 100%;">
-                        <option value="">⏳ Cargando geocercas...</option>
+                        <option value="">⏳ Cargando desde Base de Datos Local...</option>
                     </select>
                 </div>
                 <div class="form-group" id="speed_limits_container"></div>
 
-                <button type="button" class="btn-submit" id="btn_submit" onclick="generarReporte()" disabled>📥 Generar Reporte Rápido</button>
+                <button type="button" class="btn-submit" id="btn_submit" onclick="generarReporte()" disabled>📥 2. Generar Reporte Ejecutivo</button>
                 <div id="status_msg" class="status-msg"></div>
             </div>
         </div>
     </div>
 
     <script>
+        async function sincronizarBD() {
+            const btnSync = document.getElementById('btn_sync');
+            const status = document.getElementById('status_msg');
+            btnSync.disabled = true;
+            status.innerText = "⏳ Descargando geocercas de Mapon a la Base de Datos Local... (Puede tardar 1 min)";
+            
+            try {
+                const res = await fetch('/api/sync_db', { method: 'POST' });
+                const data = await res.json();
+                if(data.status === 'ok') {
+                    status.innerText = "✅ " + data.message;
+                    cargarCatalogos(); // Recargar el menú visual
+                } else {
+                    status.innerText = "❌ Error al sincronizar: " + data.message;
+                }
+            } catch(e) {
+                status.innerText = "❌ Error de conexión al sincronizar.";
+            }
+            btnSync.disabled = false;
+        }
+
         async function cargarCatalogos() {
             try {
                 const [resUnits, resGeos] = await Promise.all([
                     fetch('/api_unidades'),
-                    fetch('/api_geocercas')
+                    fetch('/api_geocercas_locales')
                 ]);
                 const units = await resUnits.json();
                 const geos = await resGeos.json();
@@ -158,9 +186,13 @@ HTML_INTERFACE = """
                 selectGeo.select2({ placeholder: "Buscar geocerca para límite personalizado...", width: '100%' });
 
                 $('#btn_submit').prop('disabled', false);
-                $('#status_msg').text("");
+                if (geos.length === 0) {
+                    $('#status_msg').text("⚠️ Tu base de datos local está vacía. Haz clic en el botón amarillo 'Sincronizar Geocercas' arriba.");
+                } else {
+                    $('#status_msg').text(`✅ BD Local conectada (${geos.length} geocercas listas).`);
+                }
             } catch (e) {
-                $('#status_msg').text("Error cargando catálogos.");
+                $('#status_msg').text("Error cargando catálogos locales.");
             }
         }
 
@@ -189,7 +221,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⚡ Descargando datos y procesando con filtro espacial...";
+            status.innerText = "⚡ Generando reporte (Calculando cruces con BD Local)...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -279,48 +311,86 @@ def api_unidades():
     except: 
         return jsonify([]), 500
 
-@app.route('/api_geocercas')
-def api_geocercas():
+# ==========================================
+# EL NUEVO CEREBRO: BASE DE DATOS LOCAL JSON
+# ==========================================
+@app.route('/api/sync_db', methods=['POST'])
+def sync_db():
+    # Este endpoint extrae TODO de Mapon y lo guarda en geocercas_db.json
     try:
-        endpoints = ['/territory/list.json', '/poi/list.json', '/object/list.json']
-        geos_raw = []
-        for ep in endpoints:
-            try:
-                res = requests.get(f"{BASE_URL}{ep}", params={'key': API_KEY}, timeout=10)
-                data = res.json()
-                inner = data.get('data', data)
-                if isinstance(inner, dict):
-                    for k in ['territories', 'pois', 'objects', 'items', 'list']:
-                        if k in inner:
-                            geos_raw.extend(inner[k])
-                elif isinstance(inner, list):
-                    geos_raw.extend(inner)
-            except: pass
-
-        geos_normalizadas = []
+        endpoints = ['/territory/list.json', '/poi/list.json']
+        geos_db = []
         vistos = set()
         
-        for g in geos_raw:
-            c_id = str(g.get('company_id', ''))
-            if c_id and c_id != COMPANY_ID:
-                continue
+        for ep in endpoints:
+            offset = 0
+            while True:
+                res = requests.get(f"{BASE_URL}{ep}", params={'key': API_KEY, 'limit': 500, 'offset': offset}, timeout=20)
+                data = res.json()
+                inner = data.get('data', data)
+                items = []
+                if isinstance(inner, dict):
+                    for k in ['territories', 'pois', 'list', 'items']:
+                        if k in inner: items.extend(inner[k])
+                elif isinstance(inner, list):
+                    items.extend(inner)
+                    
+                if not items: break
                 
-            g_id = str(g.get('territory_id', g.get('poi_id', g.get('object_id', g.get('id', '')))))
-            g_name = str(g.get('name', g.get('title', 'Geocerca')))
+                for g in items:
+                    c_id = str(g.get('company_id', ''))
+                    if c_id and c_id != COMPANY_ID: continue
+                        
+                    g_id = str(g.get('territory_id', g.get('poi_id', g.get('id', ''))))
+                    g_name = str(g.get('name', g.get('title', 'Geocerca'))).strip()
+                    g_type = str(g.get('type', 'circle')).lower()
+                    
+                    if g_name in vistos or g_id == 'None': continue
+                    
+                    geo_obj = {'id': g_id, 'name': g_name, 'type': g_type}
+                    
+                    if g_type == 'polygon' or 'points' in g:
+                        pts = g.get('points', [])
+                        if pts:
+                            geo_obj['points'] = pts
+                            geos_db.append(geo_obj)
+                            vistos.add(g_name)
+                    else:
+                        g_lat = g.get('lat', g.get('latitude'))
+                        g_lng = g.get('lng', g.get('longitude'))
+                        g_radius = float(g.get('radius', 150))
+                        if g_lat is None and 'center' in g:
+                            g_lat = g['center'].get('lat')
+                            g_lng = g['center'].get('lng')
+                        
+                        if g_lat is not None and g_lng is not None:
+                            geo_obj['lat'] = float(g_lat)
+                            geo_obj['lng'] = float(g_lng)
+                            geo_obj['radius'] = g_radius
+                            geos_db.append(geo_obj)
+                            vistos.add(g_name)
+                            
+                if len(items) < 500: break
+                offset += 500
+                
+        with open(DB_FILE, 'w', encoding='utf-8') as f:
+            json.dump(geos_db, f, ensure_ascii=False, indent=2)
             
-            if FILTRO_TEXTO and FILTRO_TEXTO.lower() not in g_name.lower():
-                continue
+        return jsonify({"status": "ok", "message": f"Sincronización exitosa. {len(geos_db)} geocercas guardadas en Local."})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-            if g_id and g_id != 'None' and g_name not in vistos:
-                vistos.add(g_name)
-                geos_normalizadas.append({
-                    'geofence_id': g_id,
-                    'name': g_name
-                })
-                
-        geos_normalizadas.sort(key=lambda x: x['name'])
-        return jsonify(geos_normalizadas)
-    except: 
+@app.route('/api_geocercas_locales')
+def api_geocercas_locales():
+    # Lee los nombres rápido para el menú
+    try:
+        if not os.path.exists(DB_FILE): return jsonify([])
+        with open(DB_FILE, 'r', encoding='utf-8') as f:
+            geos = json.load(f)
+        menu_items = [{'geofence_id': g['id'], 'name': g['name']} for g in geos]
+        menu_items.sort(key=lambda x: x['name'])
+        return jsonify(menu_items)
+    except:
         return jsonify([])
 
 @app.route('/generar_excel')
@@ -351,71 +421,23 @@ def generar_excel():
             if not h: return "23:59:59" if es_fin else "00:00:00"
             return h if len(h) == 8 else h + ":00"
 
-        # DESCARGA PURA DE API - SIN DATOS LOCALES
+        # CARGAR GEOCERCAS DESDE LA BASE DE DATOS LOCAL (AL INSTANTE)
         geos_procesadas = []
         try:
-            endpoints = ['/territory/list.json', '/poi/list.json', '/object/list.json']
-            for ep in endpoints:
-                res_geo = requests.get(f"{BASE_URL}{ep}", params={'key': API_KEY}, timeout=15)
-                data_geo = res_geo.json()
-                inner = data_geo.get('data', data_geo)
-                geos_raw = []
-                if isinstance(inner, dict):
-                    for k in ['territories', 'pois', 'objects', 'items', 'list']:
-                        if k in inner:
-                            geos_raw.extend(inner[k])
-                elif isinstance(inner, list):
-                    geos_raw.extend(inner)
-
-                for g in geos_raw:
-                    c_id = str(g.get('company_id', ''))
-                    if c_id and c_id != COMPANY_ID:
-                        continue
-                        
-                    g_id = str(g.get('territory_id', g.get('poi_id', g.get('object_id', g.get('id', '')))))
-                    g_name = str(g.get('name', g.get('title', 'Geocerca')))
-                    g_type = str(g.get('type', 'circle')).lower()
-                    
-                    if g_type == 'polygon' or 'points' in g:
-                        pts = g.get('points', [])
-                        if pts:
-                            geos_procesadas.append({
-                                'id': g_id, 'name': g_name, 'type': 'polygon', 'points': pts
-                            })
-                    else:
-                        g_lat = g.get('lat', g.get('latitude'))
-                        g_lng = g.get('lng', g.get('longitude'))
-                        g_radius = float(g.get('radius', 150)) 
-                        
-                        if g_lat is None and 'center' in g:
-                            g_lat = g['center'].get('lat')
-                            g_lng = g['center'].get('lng')
-
-                        lat_v = float(g_lat) if g_lat is not None else None
-                        lng_v = float(g_lng) if g_lng is not None else None
-
-                        if lat_v is not None and lng_v is not None:
-                            geos_procesadas.append({
-                                'id': g_id, 'name': g_name, 'type': 'circle', 
-                                'lat': lat_v, 'lng': lng_v, 'radius': g_radius
-                            })
-        except:
-            pass
+            if os.path.exists(DB_FILE):
+                with open(DB_FILE, 'r', encoding='utf-8') as f:
+                    geos_procesadas = json.load(f)
+        except: pass
 
         def obtener_geocerca(lat, lng, address=""):
             address_str = str(address).lower()
             
-            # FILTRO ESPACIAL DE ALTA VELOCIDAD:
-            # Primero buscamos si el nombre del lugar de Mapon ya está en la dirección
-            for g in geos_procesadas:
-                if g.get('name') and g['name'].lower() in address_str and "+" not in g['name']:
-                    return g.get('id'), g['name']
-
-            # Si no está en el texto, hacemos matemática SOLO en geocercas cercanas (+- 0.05 grados aprox 5km)
+            # FILTRO ESPACIAL RÁPIDO (Bounding Box de 0.05 grados aprox 5km)
             tolerancia_grados = 0.05
             geos_cercanas = [
                 g for g in geos_procesadas 
-                if g.get('lat') and abs(g['lat'] - lat) < tolerancia_grados and abs(g['lng'] - lng) < tolerancia_grados
+                if (g.get('lat') and abs(g['lat'] - lat) < tolerancia_grados and abs(g['lng'] - lng) < tolerancia_grados)
+                or g.get('type') == 'polygon' # Los polígonos los revisamos siempre
             ]
             
             for g in geos_cercanas:
@@ -438,6 +460,11 @@ def generar_excel():
                         except: pass
                     if inside:
                         return g.get('id'), g['name']
+
+            # Red de seguridad textual
+            for g in geos_procesadas:
+                if g.get('name') and g['name'].lower() in address_str and "+" not in g['name']:
+                    return g.get('id'), g['name']
 
             return None, "Fuera de geocerca"
 
@@ -464,18 +491,17 @@ def generar_excel():
         f_in_api = to_utc_str(f_in, hora_inicio)
         f_fin_api = to_utc_str(f_fin, hora_fin, True)
 
-        # SE INCLUYERON EXPRESAMENTE TERRITORIES Y POIS PARA EL CRUCE DE NOMBRES
+        # DESCARGAMOS ÚNICAMENTE LA RUTA DEL CAMIÓN
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
         params = {
             "key": API_KEY, 
             "unit_id": unit_id.replace("ID:", "").strip(), 
             "from": f_in_api, 
             "till": f_fin_api,
-            "include": "metrics,stops,idles,routes,territories,pois"
+            "include": "metrics,stops,idles,routes"
         }
 
         tramos_reales = []
-        territory_visits = []
         try:
             response = requests.get(url, params=params, timeout=20)
             data = response.json()
@@ -483,31 +509,6 @@ def generar_excel():
             unit_data = data.get('data', {}).get('units', [])[0] if data.get('data', {}).get('units') else {}
             rutas_array = unit_data.get('routes', [])
             idles_array = unit_data.get('idles', [])
-            
-            # EXTRACCIÓN DE RUTAS MAPON OFICIALES (A prueba de balas)
-            def extract_territories(obj):
-                if isinstance(obj, dict):
-                    t_name = None
-                    if obj.get('type') in ['territory', 'poi']:
-                        t_name = obj.get('name') or obj.get('title')
-                    elif 'territory' in obj and isinstance(obj['territory'], dict):
-                        t_name = obj['territory'].get('name')
-                    elif 'poi' in obj and isinstance(obj['poi'], dict):
-                        t_name = obj['poi'].get('name')
-                        
-                    if t_name and 'start' in obj and 'end' in obj:
-                        s_t = parse_iso(obj.get('start', {}).get('time', obj.get('start_time')))
-                        e_t = parse_iso(obj.get('end', {}).get('time', obj.get('end_time')))
-                        if s_t and e_t:
-                            territory_visits.append({'name': t_name, 'start': s_t, 'end': e_t})
-                    
-                    for k, v in obj.items():
-                        extract_territories(v)
-                elif isinstance(obj, list):
-                    for i in obj:
-                        extract_territories(i)
-
-            extract_territories(data)
             
             parsed_idles = []
             for idl in idles_array:
@@ -534,6 +535,7 @@ def generar_excel():
                 speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
                 tipo = str(item.get('type', '')).lower()
                 
+                # CRUCE EXACTO DEL RALENTÍ
                 idle_sec = 0.0
                 if tipo == 'stop':
                     for i_start, i_end in parsed_idles:
@@ -544,22 +546,14 @@ def generar_excel():
                 
                 idle_sec = min(idle_sec, duracion_seg)
 
-                # Prioridad 1: Mapon nos avisó en territories de esta visita
-                geo_name_real = None
-                for tv in territory_visits:
-                    if tv['start'] <= dt_ini <= tv['end'] or tv['start'] <= dt_fin <= tv['end']:
-                        geo_name_real = tv['name']
-                        break
-                
-                # Prioridad 2: Cálculo matemático con Bounding Box
-                if not geo_name_real:
-                    _, geo_name_real = obtener_geocerca(lat_ini, lng_ini, origen)
+                # CRUCE CON BASE DE DATOS LOCAL
+                geo_id, geo_name = obtener_geocerca(lat_ini, lng_ini, origen)
 
                 tramos_reales.append({
                     'dt_ini': dt_ini, 'dt_fin': dt_fin, 'origen': origen, 'distancia': dist_km,
                     'velocidad': speed, 'lat_ini': lat_ini, 'lng_ini': lng_ini,
                     'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg,
-                    'idle_sec': idle_sec, 'tipo': tipo, 'geo_name': geo_name_real
+                    'idle_sec': idle_sec, 'tipo': tipo, 'geo_name': geo_name
                 })
         except: pass
 
@@ -591,9 +585,7 @@ def generar_excel():
                 curr_lat = t['lat_ini'] + (delta_lat * prog)
                 curr_lng = t['lng_ini'] + (delta_lng * prog)
                 
-                geo_name = t['geo_name']
-                if geo_name == "Fuera de geocerca":
-                    _, geo_name = obtener_geocerca(curr_lat, curr_lng, t['origen'])
+                geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, t['origen'])
                 
                 evento = ""
                 detalle = "-"
