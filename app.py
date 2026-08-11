@@ -16,8 +16,8 @@ app = Flask(__name__)
 # ==========================================
 API_KEY = "7bd626cb4d3874faf995ec075af15d2cd35ec99d"
 BASE_URL = "https://gps.idttecnologias.mx/api/v1"
-COMPANY_ID = "87534"  
-TIMEZONE_OFFSET = -7  
+COMPANY_ID = "87534"  # ID de Alimentos Kowi
+TIMEZONE_OFFSET = -7  # Zona horaria de Hermosillo (UTC-7)
 FILTRO_TEXTO = ""
 # ==========================================
 
@@ -68,7 +68,7 @@ HTML_INTERFACE = """
     <div class="card">
         <div class="header">
             <h2>📊 Reporte Ejecutivo Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Sincronizado y Resumido Automáticamente</p>
+            <p>IDT Tecnologías - Sincronizado en tiempo real con API Mapon</p>
         </div>
         
         <div class="main-container">
@@ -190,7 +190,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⏳ Empalmando líneas de tiempo (Rutas vs Ralentí)...";
+            status.innerText = "⏳ Generando reporte validado desde API de Mapon...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -357,7 +357,7 @@ def generar_excel():
             if not h: return "23:59:59" if es_fin else "00:00:00"
             return h if len(h) == 8 else h + ":00"
 
-        # CERO GEOCERCAS VIRTUALES. SOLO LECTURA PURA DE LA API
+        # CATÁLOGO DE GEOCERCAS - EXCLUSIVO DE API
         geos_procesadas = []
         
         try:
