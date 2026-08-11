@@ -117,14 +117,13 @@ HTML_INTERFACE = """
                     </div>
                 </div>
 
-                <!-- ¡AQUÍ ESTÁ EL SELECTOR MÚLTIPLE DE GEOCERCAS! -->
+                <!-- SELECTOR MÚLTIPLE DE GEOCERCAS (OBJECTS) -->
                 <div class="form-group">
                     <label>Geocercas para validar exceso de velocidad:</label>
                     <select id="geofence_select" multiple="multiple" style="width: 100%;">
                         <option value="">⏳ Cargando geocercas...</option>
                     </select>
                 </div>
-                <!-- Los cuadros de límite de velocidad aparecerán dentro de este contenedor automáticamente -->
                 <div class="form-group" id="speed_limits_container"></div>
 
                 <button type="button" class="btn-submit" id="btn_submit" onclick="generarReporte()" disabled>📥 Generar y Descargar Excel</button>
@@ -162,7 +161,6 @@ HTML_INTERFACE = """
             }
         }
 
-        // Esta función "dibuja" los límites dinámicos cuando seleccionas una geocerca
         $('#geofence_select').on('change', function() {
             const container = $('#speed_limits_container');
             const selected = $(this).select2('data');
@@ -190,7 +188,6 @@ HTML_INTERFACE = """
             btn.disabled = true;
             status.innerText = "⏳ Generando reporte...";
 
-            // Recolectar límites personalizados
             const geoLimits = {};
             $('.geo-limit').each(function() {
                 geoLimits[$(this).data('id')] = {
@@ -273,32 +270,26 @@ def api_unidades():
 def api_geocercas():
     try:
         geos_raw = []
-        # Buscamos en territory/list que es el endpoint real de Mapon
-        endpoints = ['/territory/list.json', '/poi/list.json', '/geometry/list.json']
-        for ep in endpoints:
-            try:
-                res = requests.get(f"{BASE_URL}{ep}", params={'key': API_KEY}, timeout=5)
-                if res.status_code == 200:
-                    data = res.json()
-                    if 'error' not in data:
-                        inner = data.get('data', data)
-                        if isinstance(inner, dict):
-                            for k in ['territories', 'geofences', 'items', 'list']:
-                                if k in inner:
-                                    geos_raw.extend(inner[k])
-                            if not geos_raw:
-                                for v in inner.values():
-                                    if isinstance(v, list):
-                                        geos_raw.extend(v)
-                        elif isinstance(inner, list):
-                            geos_raw.extend(inner)
-                        if geos_raw: break
-            except:
-                continue
+        # El descubrimiento clave: apuntar a /object/list.json
+        res = requests.get(f"{BASE_URL}/object/list.json", params={'key': API_KEY}, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            if 'error' not in data:
+                inner = data.get('data', data)
+                if isinstance(inner, dict):
+                    for k in ['objects', 'items', 'list']:
+                        if k in inner:
+                            geos_raw.extend(inner[k])
+                    if not geos_raw:
+                        for v in inner.values():
+                            if isinstance(v, list):
+                                geos_raw.extend(v)
+                elif isinstance(inner, list):
+                    geos_raw.extend(inner)
 
         geos_normalizadas = []
         for g in geos_raw:
-            g_id = str(g.get('territory_id', g.get('id', g.get('poi_id', ''))))
+            g_id = str(g.get('object_id', g.get('id', '')))
             g_name = str(g.get('name', g.get('title', 'Geocerca')))
             if g_id and g_id != 'None':
                 geos_normalizadas.append({
@@ -327,69 +318,60 @@ def generar_excel():
         geo_limits_raw = request.args.get('geos', '{}')
         geo_limits = json.loads(geo_limits_raw)
 
-        # Descargamos los datos de las geocercas para el análisis de coordenadas
+        # Descargamos los datos de las geocercas (Objects) para el análisis de coordenadas
         geos_procesadas = []
         try:
-            geos_raw = []
-            endpoints = ['/territory/list.json', '/poi/list.json', '/geometry/list.json']
-            for ep in endpoints:
-                try:
-                    res_geo = requests.get(f"{BASE_URL}{ep}", params={'key': API_KEY}, timeout=5)
-                    if res_geo.status_code == 200:
-                        data_geo = res_geo.json()
-                        if 'error' not in data_geo:
-                            inner = data_geo.get('data', data_geo)
-                            if isinstance(inner, dict):
-                                for k in ['territories', 'geofences', 'items', 'list']:
-                                    if k in inner:
-                                        geos_raw.extend(inner[k])
-                                if not geos_raw:
-                                    for v in inner.values():
-                                        if isinstance(v, list):
-                                            geos_raw.extend(v)
-                            elif isinstance(inner, list):
-                                geos_raw.extend(inner)
-                            if geos_raw: break
-                except:
-                    pass
+            res_geo = requests.get(f"{BASE_URL}/object/list.json", params={'key': API_KEY}, timeout=10)
+            if res_geo.status_code == 200:
+                data_geo = res_geo.json()
+                if 'error' not in data_geo:
+                    inner = data_geo.get('data', data_geo)
+                    geos_raw = []
+                    if isinstance(inner, dict):
+                        for k in ['objects', 'items', 'list']:
+                            if k in inner:
+                                geos_raw.extend(inner[k])
+                        if not geos_raw:
+                            for v in inner.values():
+                                if isinstance(v, list):
+                                    geos_raw.extend(v)
+                    elif isinstance(inner, list):
+                        geos_raw.extend(inner)
 
-            for g in geos_raw:
-                g_id = str(g.get('territory_id', g.get('id', g.get('poi_id'))))
-                g_name = str(g.get('name', g.get('title', 'Geocerca')))
-                g_lat = g.get('lat', g.get('latitude'))
-                g_lng = g.get('lng', g.get('longitude'))
-                g_radius = float(g.get('radius', 500))
-                
-                # Intentar buscar coordenadas dentro de points o center si no vienen en la raíz
-                if g_lat is None and 'center' in g:
-                    g_lat = g['center'].get('lat')
-                    g_lng = g['center'].get('lng')
-                elif g_lat is None and 'points' in g:
-                    pts = g['points']
-                    if isinstance(pts, list) and len(pts) > 0:
-                        g_lat = sum(float(p.get('lat',0)) for p in pts) / len(pts)
-                        g_lng = sum(float(p.get('lng',0)) for p in pts) / len(pts)
-                        g_radius = 1000
+                    for g in geos_raw:
+                        g_id = str(g.get('object_id', g.get('id', '')))
+                        g_name = str(g.get('name', g.get('title', 'Geocerca')))
+                        g_lat = g.get('lat', g.get('latitude'))
+                        g_lng = g.get('lng', g.get('longitude'))
+                        g_radius = float(g.get('radius', 500))
+                        
+                        if g_lat is None and 'center' in g:
+                            g_lat = g['center'].get('lat')
+                            g_lng = g['center'].get('lng')
+                        elif g_lat is None and 'points' in g:
+                            pts = g['points']
+                            if isinstance(pts, list) and len(pts) > 0:
+                                g_lat = sum(float(p.get('lat',0)) for p in pts) / len(pts)
+                                g_lng = sum(float(p.get('lng',0)) for p in pts) / len(pts)
+                                g_radius = 1000
 
-                if g_lat is not None and g_lng is not None:
-                    geos_procesadas.append({
-                        'id': g_id,
-                        'name': g_name,
-                        'lat': float(g_lat),
-                        'lng': float(g_lng),
-                        'radius': g_radius
-                    })
+                        if g_lat is not None and g_lng is not None:
+                            geos_procesadas.append({
+                                'id': g_id,
+                                'name': g_name,
+                                'lat': float(g_lat),
+                                'lng': float(g_lng),
+                                'radius': g_radius
+                            })
         except:
             pass
 
         def obtener_geocerca(lat, lng, address):
-            # 1. Validación matemática por coordenadas
             for g in geos_procesadas:
                 dist_m = math.sqrt((lat - g['lat'])**2 + (lng - g['lng'])**2) * 111000
                 if dist_m <= g['radius']:
                     return g['id'], g['name']
             
-            # 2. Validación por texto (si Mapon mandó el nombre en la dirección de la ruta)
             address_str = str(address).lower()
             for gid, gdata in geo_limits.items():
                 if gdata['name'].lower() in address_str:
