@@ -300,15 +300,15 @@ def generar_excel():
                 pass
             return '2026-08-09'
 
-       def normalizar_hora(hora_str, es_fin=False):
-            try:
-                if "AM" in hora_str.upper() or "PM" in hora_str.upper():
-                    return datetime.strptime(hora_str.strip(), '%I:%M %p').strftime('%H:%M:%00')
-                if len(hora_str) == 5: return f"{hora_str}:00"
-                if len(hora_str) == 8: return hora_str
-            except: 
+        def normalizar_hora(hora_str, es_fin=False):
+            try:
+                if "AM" in hora_str.upper() or "PM" in hora_str.upper():
+                    return datetime.strptime(hora_str.strip(), '%I:%M %p').strftime('%H:%M:%00')
+                if len(hora_str) == 5: return f"{hora_str}:00"
+                if len(hora_str) == 8: return hora_str
+            except: 
                 pass
-            return "23:59:59" if es_fin else "00:00:00"
+            return "23:59:59" if es_fin else "00:00:00"
 
         f_in_api = f"{normalizar_fecha(f_in)}T{normalizar_hora(hora_inicio)}Z"
         f_fin_api = f"{normalizar_fecha(f_fin)}T{normalizar_hora(hora_fin, True)}Z"
