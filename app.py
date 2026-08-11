@@ -290,12 +290,10 @@ def generar_excel():
         limite_velocidad = int(request.args.get('limite_velocidad', 80))
         min_ralenti = int(request.args.get('min_ralenti', 5))
 
-       def normalizar_fecha(fecha_str):
-            try:
-                if "/" in fecha_str:
-                    return datetime.strptime(fecha_str, '%d/%m/%Y').strftime('%Y-%m-%d')
-                elif "-" in fecha_str and len(fecha_str) == 10:
-                    return fecha_str
+  def normalizar_fecha(fecha_str):
+            if "/" in fecha_str:
+                return datetime.strptime(fecha_str, '%d/%m/%Y').strftime('%Y-%m-%d')
+            return fecha_str
             except:
                 pass
             return '2026-08-09'
