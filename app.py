@@ -17,14 +17,8 @@ app = Flask(__name__)
 API_KEY = "7bd626cb4d3874faf995ec075af15d2cd35ec99d"
 BASE_URL = "https://gps.idttecnologias.mx/api/v1"
 COMPANY_ID = "87534"  # ID de Alimentos Kowi
-FILTRO_TEXTO = ""     # Si deseas filtrar el menú por alguna palabra, ponla aquí
-
-# CATÁLOGO VIRTUAL DE GEOCERCAS
-# Con radio ajustado a 120m para que las horas coincidan con Mapon
-GEOCERCAS_LOCALES = [
-    {"id": "VIRTUAL_1", "name": "nutrikowi", "lat": 27.1925, "lng": -109.5521, "radius": 120, "type": "circle"},
-    {"id": "VIRTUAL_2", "name": "nutrikowi guaymas", "lat": 28.0360, "lng": -110.9210, "radius": 120, "type": "circle"}
-]
+TIMEZONE_OFFSET = -7  # Zona horaria de Hermosillo, Sonora (UTC-7)
+FILTRO_TEXTO = ""
 # ==========================================
 
 HTML_INTERFACE = """
@@ -74,7 +68,7 @@ HTML_INTERFACE = """
     <div class="card">
         <div class="header">
             <h2>📊 Reporte Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Generador de Histórico GPS Avanzado</p>
+            <p>IDT Tecnologías - Sincronizado a Hermosillo (UTC-7)</p>
         </div>
         
         <div class="main-container">
@@ -85,8 +79,6 @@ HTML_INTERFACE = """
                 <button type="button" onclick="setRange('esta_semana')">Esta Semana</button>
                 <button type="button" onclick="setRange('semana_anterior')">Semana anterior</button>
                 <button type="button" onclick="setRange('ultimos_7_dias')">Últimos 7 días</button>
-                <button type="button" onclick="setRange('este_mes')">Este mes</button>
-                <button type="button" onclick="setRange('mes_anterior')">Mes anterior</button>
             </div>
 
             <div class="form-content">
@@ -131,7 +123,7 @@ HTML_INTERFACE = """
                 </div>
 
                 <div class="form-group">
-                    <label>Geocercas (Selecciona para asignar límite de velocidad estricto):</label>
+                    <label>Geocercas (Opcional: Selecciona para asignar límite estricto):</label>
                     <select id="geofence_select" multiple="multiple" style="width: 100%;">
                         <option value="">⏳ Cargando geocercas...</option>
                     </select>
@@ -164,7 +156,7 @@ HTML_INTERFACE = """
                 geos.forEach(g => {
                     selectGeo.append(new Option(g.name, g.geofence_id));
                 });
-                selectGeo.select2({ placeholder: "Opcional: Bajar límite en zona específica...", width: '100%' });
+                selectGeo.select2({ placeholder: "Buscar geocerca para límite personalizado...", width: '100%' });
 
                 $('#btn_submit').prop('disabled', false);
                 $('#status_msg').text("");
@@ -181,7 +173,7 @@ HTML_INTERFACE = """
                 if(s.id) {
                     container.append(`
                         <div class="form-group" style="margin-top: 8px;">
-                            <label>Límite estricto en ${s.text} (km/h):</label>
+                            <label>Límite en ${s.text} (km/h):</label>
                             <input type="number" class="geo-limit" data-id="${s.id}" data-name="${s.text}" value="30" style="width:100%; padding:9px; border:1px solid #dcdfe6; border-radius:6px; box-sizing:border-box; font-size:13px; color:#2c3e50;">
                         </div>
                     `);
@@ -198,7 +190,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⏳ Cruzando datos GPS con polígonos de geocercas...";
+            status.innerText = "⏳ Descargando ruta y calculando zonas horarias...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -253,8 +245,6 @@ HTML_INTERFACE = """
             else if (type === 'esta_semana') { const day = now.getDay() || 7; start.setDate(now.getDate() - day + 1); end = now; }
             else if (type === 'semana_anterior') { const day = now.getDay() || 7; start.setDate(now.getDate() - day - 6); end.setDate(now.getDate() - day); }
             else if (type === 'ultimos_7_dias') { start.setDate(now.getDate() - 6); end = now; }
-            else if (type === 'este_mes') { start = new Date(now.getFullYear(), now.getMonth(), 1); end = now; }
-            else if (type === 'mes_anterior') { start = new Date(now.getFullYear(), now.getMonth() - 1, 1); end = new Date(now.getFullYear(), now.getMonth(), 0); }
             document.getElementById('fecha_inicio').value = formatDate(start);
             document.getElementById('fecha_fin').value = formatDate(end);
         }
@@ -291,36 +281,28 @@ def api_unidades():
 @app.route('/api_geocercas')
 def api_geocercas():
     try:
-        res = requests.get(f"{BASE_URL}/object/list.json", params={'key': API_KEY}, timeout=15)
-        data = res.json()
-        
+        endpoints = ['/territory/list.json', '/poi/list.json', '/object/list.json']
         geos_raw = []
-        inner = data.get('data', data)
-        if isinstance(inner, dict):
-            for k in ['objects', 'items', 'list']:
-                if k in inner:
-                    geos_raw.extend(inner[k])
-            if not geos_raw:
-                for v in inner.values():
-                    if isinstance(v, list):
-                        geos_raw.extend(v)
-        elif isinstance(inner, list):
-            geos_raw.extend(inner)
+        for ep in endpoints:
+            try:
+                res = requests.get(f"{BASE_URL}{ep}", params={'key': API_KEY}, timeout=5)
+                data = res.json()
+                inner = data.get('data', data)
+                if isinstance(inner, dict):
+                    for k in ['territories', 'pois', 'objects', 'items', 'list']:
+                        if k in inner:
+                            geos_raw.extend(inner[k])
+                elif isinstance(inner, list):
+                    geos_raw.extend(inner)
+            except: pass
 
         geos_normalizadas = []
-        # Añadimos las virtuales al menú para que puedas asignarles velocidad
-        for virt in GEOCERCAS_LOCALES:
-            geos_normalizadas.append({
-                'geofence_id': virt['id'],
-                'name': virt['name']
-            })
-
         for g in geos_raw:
             c_id = str(g.get('company_id', ''))
             if c_id and c_id != COMPANY_ID:
                 continue
                 
-            g_id = str(g.get('object_id', g.get('id', '')))
+            g_id = str(g.get('territory_id', g.get('poi_id', g.get('object_id', g.get('id', '')))))
             g_name = str(g.get('name', g.get('title', 'Geocerca')))
             
             if FILTRO_TEXTO and FILTRO_TEXTO.lower() not in g_name.lower():
@@ -332,16 +314,16 @@ def api_geocercas():
                     'name': g_name
                 })
                 
-        # Eliminar duplicados por nombre
+        # Limpiar duplicados y ordenar
         vistos = set()
-        geos_finales = []
+        finales = []
         for g in geos_normalizadas:
             if g['name'] not in vistos:
                 vistos.add(g['name'])
-                geos_finales.append(g)
-
-        geos_finales.sort(key=lambda x: x['name'])
-        return jsonify(geos_finales)
+                finales.append(g)
+                
+        finales.sort(key=lambda x: x['name'])
+        return jsonify(finales)
     except: 
         return jsonify([]), 500
 
@@ -363,76 +345,64 @@ def generar_excel():
         geo_limits_raw = request.args.get('geos', '{}')
         geo_limits = json.loads(geo_limits_raw)
 
-        # 1. Cargamos el catálogo virtual en la memoria del radar
-        geos_procesadas = list(GEOCERCAS_LOCALES)
-        
-        # 2. Descargamos las de Mapon para sumar al radar
+        # 1. DESCARGA DE GEOCERCAS REALES
+        geos_procesadas = []
         try:
-            res_geo = requests.get(f"{BASE_URL}/object/list.json", params={'key': API_KEY}, timeout=15)
-            data_geo = res_geo.json()
-            inner = data_geo.get('data', data_geo)
-            geos_raw = []
-            if isinstance(inner, dict):
-                for k in ['objects', 'items', 'list']:
-                    if k in inner:
-                        geos_raw.extend(inner[k])
-                if not geos_raw:
-                    for v in inner.values():
-                        if isinstance(v, list):
-                            geos_raw.extend(v)
-            elif isinstance(inner, list):
-                geos_raw.extend(inner)
+            endpoints = ['/territory/list.json', '/poi/list.json', '/object/list.json']
+            for ep in endpoints:
+                res_geo = requests.get(f"{BASE_URL}{ep}", params={'key': API_KEY}, timeout=5)
+                data_geo = res_geo.json()
+                inner = data_geo.get('data', data_geo)
+                geos_raw = []
+                if isinstance(inner, dict):
+                    for k in ['territories', 'pois', 'objects', 'items', 'list']:
+                        if k in inner:
+                            geos_raw.extend(inner[k])
+                elif isinstance(inner, list):
+                    geos_raw.extend(inner)
 
-            for g in geos_raw:
-                c_id = str(g.get('company_id', ''))
-                if c_id and c_id != COMPANY_ID:
-                    continue
+                for g in geos_raw:
+                    c_id = str(g.get('company_id', ''))
+                    if c_id and c_id != COMPANY_ID:
+                        continue
+                        
+                    g_id = str(g.get('territory_id', g.get('poi_id', g.get('object_id', g.get('id', '')))))
+                    g_name = str(g.get('name', g.get('title', 'Geocerca')))
+                    g_type = g.get('type', 'circle').lower()
                     
-                g_id = str(g.get('object_id', g.get('id', '')))
-                g_name = str(g.get('name', g.get('title', 'Geocerca')))
-                
-                g_lat = g.get('lat', g.get('latitude'))
-                g_lng = g.get('lng', g.get('longitude'))
-                g_radius = float(g.get('radius', 500))
-                g_type = g.get('type', 'circle').lower()
-                
-                if g_type == 'polygon' and 'points' in g:
-                    geos_procesadas.append({
-                        'id': g_id, 'name': g_name, 'type': 'polygon', 'points': g['points'], 'radius': g_radius
-                    })
-                else:
-                    if g_lat is None and 'center' in g:
-                        g_lat = g['center'].get('lat')
-                        g_lng = g['center'].get('lng')
-                    elif g_lat is None and 'points' in g:
-                        pts = g['points']
-                        if isinstance(pts, list) and len(pts) > 0:
-                            try:
-                                g_lat = sum(float(p.get('lat',0)) for p in pts) / len(pts)
-                                g_lng = sum(float(p.get('lng',0)) for p in pts) / len(pts)
-                                g_radius = 500
-                            except: pass
-
-                    lat_v = float(g_lat) if g_lat is not None else None
-                    lng_v = float(g_lng) if g_lng is not None else None
-
-                    if lat_v is not None and lng_v is not None:
+                    if g_type == 'polygon' and 'points' in g:
                         geos_procesadas.append({
-                            'id': g_id, 'name': g_name, 'type': 'circle', 
-                            'lat': lat_v, 'lng': lng_v, 'radius': g_radius
+                            'id': g_id, 'name': g_name, 'type': 'polygon', 'points': g['points']
                         })
+                    else:
+                        g_lat = g.get('lat', g.get('latitude'))
+                        g_lng = g.get('lng', g.get('longitude'))
+                        g_radius = float(g.get('radius', 100))
+                        
+                        if g_lat is None and 'center' in g:
+                            g_lat = g['center'].get('lat')
+                            g_lng = g['center'].get('lng')
+
+                        lat_v = float(g_lat) if g_lat is not None else None
+                        lng_v = float(g_lng) if g_lng is not None else None
+
+                        if lat_v is not None and lng_v is not None:
+                            geos_procesadas.append({
+                                'id': g_id, 'name': g_name, 'type': 'circle', 
+                                'lat': lat_v, 'lng': lng_v, 'radius': g_radius
+                            })
         except:
             pass
 
         def obtener_geocerca(lat, lng, address):
             address_str = str(address).lower()
             
-            # Validación geométrica estricta (Prioridad a nuestras virtuales)
+            # Validación geométrica real
             for g in geos_procesadas:
                 if g.get('type', 'circle') == 'circle' and g.get('lat') is not None and g.get('lng') is not None:
                     dist_m = math.sqrt((lat - g['lat'])**2 + (lng - g['lng'])**2) * 111000
                     if dist_m <= g['radius']:
-                        return g.get('id', 'VIRTUAL'), g['name']
+                        return g.get('id'), g['name']
                 elif g.get('type') == 'polygon':
                     x, y = lng, lat
                     inside = False
@@ -447,22 +417,31 @@ def generar_excel():
                             if intersect: inside = not inside
                         except: pass
                     if inside:
-                        return g.get('id', 'VIRTUAL'), g['name']
-            
-            # Heurística para geocercas no mapeadas con coordenadas
-            if address and "+" not in address and "," not in address and "Zona Operativa" not in address:
-                return "GEO_API", address.strip()
+                        return g.get('id'), g['name']
 
             return None, "Fuera de geocerca"
 
-        def normalizar_fecha(f):
-            return f if f else '2026-08-09'
+        # 2. CONVERSIÓN DE ZONA HORARIA A UTC (Para pedírselo a Mapon)
+        def to_utc_str(date_str, time_str, is_end=False):
+            if len(time_str) == 5: time_str += ":00"
+            if len(time_str) != 8: time_str = "23:59:59" if is_end else "00:00:00"
+            local_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+            # Restamos el offset negativo para sumar horas y llegar a UTC
+            utc_dt = local_dt - timedelta(hours=TIMEZONE_OFFSET)
+            return utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        def normalizar_hora(h, es_fin=False):
-            return h if len(h) == 8 else ("23:59:59" if es_fin else "00:00:00")
+        # 3. CONVERSIÓN DE UTC A ZONA HORARIA LOCAL (Para mostrarlo en el Excel)
+        def parse_iso(iso_str):
+            if not iso_str: return None
+            try:
+                clean_str = str(iso_str).replace('Z', '').split('.')[0]
+                dt_utc = datetime.strptime(clean_str, '%Y-%m-%dT%H:%M:%S')
+                # Sumamos el offset para volver a la hora local
+                return dt_utc + timedelta(hours=TIMEZONE_OFFSET)
+            except: return None
 
-        f_in_api = f"{normalizar_fecha(f_in)}T{normalizar_hora(hora_inicio)}Z"
-        f_fin_api = f"{normalizar_fecha(f_fin)}T{normalizar_hora(hora_fin, True)}Z"
+        f_in_api = to_utc_str(f_in, hora_inicio)
+        f_fin_api = to_utc_str(f_fin, hora_fin, True)
 
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
         params = {
@@ -472,13 +451,6 @@ def generar_excel():
             "till": f_fin_api,
             "include": "metrics,stops,idles,routes"
         }
-
-        def parse_iso(iso_str):
-            if not iso_str: return None
-            try:
-                clean_str = str(iso_str).replace('Z', '').split('.')[0]
-                return datetime.strptime(clean_str, '%Y-%m-%dT%H:%M:%S')
-            except: return None
 
         tramos_reales = []
         try:
@@ -582,7 +554,6 @@ def generar_excel():
                     limite_aplicable = limite_velocidad
                     
                     if geo_name != "Fuera de geocerca":
-                        # Verificar si tiene límite en UI
                         if geo_id and str(geo_id) in geo_limits:
                             limite_aplicable = int(geo_limits[str(geo_id)]['limit'])
                         else:
@@ -688,22 +659,15 @@ def generar_excel():
         ws.cell(row=3, column=3, value="Unidad").font = Font(bold=True)
         ws.cell(row=3, column=4, value=str(unit_id))
 
-        fecha_ini_legible = f"{normalizar_fecha(f_in)} {normalizar_hora(hora_inicio)}"
-        fecha_fin_legible = f"{normalizar_fecha(f_fin)} {normalizar_hora(hora_fin, True)}"
-
         ws.cell(row=5, column=1, value="Recorrido Aprox:").font = Font(bold=True)
         ws.cell(row=5, column=2, value=f"{round(total_dist, 2)} km")
         ws.cell(row=5, column=3, value="Tiempo en Movimiento:").font = Font(bold=True)
         ws.cell(row=5, column=4, value=f"{mov_hrs} hrs {mov_mins} mins ({porc_mov}%)")
-        ws.cell(row=5, column=5, value="Fecha Inicial:").font = Font(bold=True)
-        ws.cell(row=5, column=6, value=fecha_ini_legible)
 
         ws.cell(row=6, column=1, value="Velocidad Máxima:").font = Font(bold=True)
         ws.cell(row=6, column=2, value=f"{round(max_vel, 1)} km/h")
         ws.cell(row=6, column=3, value="Tiempo Muerto (Apagado):").font = Font(bold=True)
         ws.cell(row=6, column=4, value=f"{muerto_hrs} hrs {muerto_mins} mins ({porc_muerto}%)")
-        ws.cell(row=6, column=5, value="Fecha Final:").font = Font(bold=True)
-        ws.cell(row=6, column=6, value=fecha_fin_legible)
 
         ws.cell(row=7, column=1, value="Velocidad Promedio:").font = Font(bold=True)
         ws.cell(row=7, column=2, value=f"{round(prom_vel, 1)} km/h")
