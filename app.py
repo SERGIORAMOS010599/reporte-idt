@@ -230,7 +230,6 @@ HTML_INTERFACE = """
                 a.remove();
                 status.innerText = "¡Reporte generado y descargado con éxito!";
             } else {
-                // AQUÍ AGREGAMOS LA ALERTA PARA QUE NOS MUESTRE EL ERROR EXACTO DE PYTHON
                 const errorDetail = await res.text();
                 console.error("Error backend:", errorDetail);
                 alert("Error de Python: " + errorDetail);
@@ -365,6 +364,14 @@ def generar_excel():
         try: geo_limits = json.loads(geo_limits_raw)
         except: geo_limits = {}
 
+        # RE-INCORPORACIÓN DE LAS FUNCIONES DE FORMATO PARA EL EXCEL
+        def normalizar_fecha(f):
+            return f if f else '2026-08-09'
+
+        def normalizar_hora(h, es_fin=False):
+            if not h: return "23:59:59" if es_fin else "00:00:00"
+            return h if len(h) == 8 else h + ":00"
+
         # 2. CARGA DE GEOCERCAS VIRTUALES Y DE MAPON
         geos_procesadas = list(GEOCERCAS_LOCALES)
         
@@ -442,7 +449,7 @@ def generar_excel():
 
             return None, "Fuera de geocerca"
 
-        # 3. CONVERSIÓN DE HORAS ULTRA SEGURA
+        # 3. CONVERSIÓN DE HORAS PARA LA API
         def to_utc_str(date_str, time_str, is_end=False):
             if not date_str: date_str = "2026-08-09"
             if not time_str: time_str = "23:59:59" if is_end else "00:00:00"
