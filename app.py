@@ -263,36 +263,37 @@ def api_unidades():
 @app.route('/api_geocercas')
 def api_geocercas():
     try:
-        # Se actualizó el endpoint a 'geometry/list.json'
-        res = requests.get(f"{BASE_URL}/geometry/list.json", params={'key': API_KEY}, timeout=15)
+        res = requests.get(f"{BASE_URL}/customlayers_geometries/list.json", params={'key': API_KEY}, timeout=15)
         data = res.json()
         
         geos_raw = []
         if isinstance(data, dict):
             inner = data.get('data', data)
             if isinstance(inner, dict):
-                # Buscamos de forma flexible cualquier llave que devuelva
-                for k in ['geometries', 'geometry', 'list', 'items']:
-                    if k in inner:
-                        geos_raw = inner[k]
-                        break
-                if not geos_raw:
-                    for v in inner.values():
-                        if isinstance(v, list):
-                            geos_raw = v
-                            break
+                for v in inner.values():
+                    if isinstance(v, list):
+                        geos_raw.extend(v)
             elif isinstance(inner, list):
                 geos_raw = inner
+        elif isinstance(data, list):
+            geos_raw = data
 
         geos_normalizadas = []
         for g in geos_raw:
-            g_id = g.get('id', g.get('geometry_id'))
-            g_name = g.get('name', g.get('title', 'Geocerca sin nombre'))
-            g_lat = g.get('lat', g.get('latitude', 0))
-            g_lng = g.get('lng', g.get('longitude', 0))
+            g_id = g.get('id', g.get('geometry_id', g.get('geofence_id')))
+            g_name = g.get('name', g.get('title', g.get('label', 'Geocerca sin nombre')))
+            
+            center = g.get('center', {})
+            if isinstance(center, dict) and center:
+                g_lat = center.get('lat', center.get('latitude', 0))
+                g_lng = center.get('lng', center.get('longitude', 0))
+            else:
+                g_lat = g.get('lat', g.get('latitude', 0))
+                g_lng = g.get('lng', g.get('longitude', 0))
+                
             g_radius = g.get('radius', 500)
             
-            if g_id:
+            if g_id is not None:
                 geos_normalizadas.append({
                     'geofence_id': g_id,
                     'name': g_name,
@@ -324,29 +325,31 @@ def generar_excel():
 
         geos_data = []
         try:
-            res_geo = requests.get(f"{BASE_URL}/geometry/list.json", params={'key': API_KEY}, timeout=15)
+            res_geo = requests.get(f"{BASE_URL}/customlayers_geometries/list.json", params={'key': API_KEY}, timeout=15)
             data_geo = res_geo.json()
             inner_geo = data_geo.get('data', data_geo)
             if isinstance(inner_geo, dict):
-                for k in ['geometries', 'geometry', 'list', 'items']:
-                    if k in inner_geo:
-                        geos_data = inner_geo[k]
-                        break
-                if not geos_data:
-                    for v in inner_geo.values():
-                        if isinstance(v, list):
-                            geos_data = v
-                            break
+                for v in inner_geo.values():
+                    if isinstance(v, list):
+                        geos_data.extend(v)
             elif isinstance(inner_geo, list):
                 geos_data = inner_geo
+            elif isinstance(data_geo, list):
+                geos_data = data_geo
         except:
             pass
 
         def obtener_geocerca(lat, lng):
             for g in geos_data:
                 try:
-                    g_lat = float(g.get('lat', g.get('latitude', 0)))
-                    g_lng = float(g.get('lng', g.get('longitude', 0)))
+                    center = g.get('center', g)
+                    if isinstance(center, dict) and center:
+                        g_lat = float(center.get('lat', center.get('latitude', g.get('lat', 0))))
+                        g_lng = float(center.get('lng', center.get('longitude', g.get('lng', 0))))
+                    else:
+                        g_lat = float(g.get('lat', g.get('latitude', 0)))
+                        g_lng = float(g.get('lng', g.get('longitude', 0)))
+                    
                     g_radius = float(g.get('radius', 500))
                     dist_m = math.sqrt((lat - g_lat)**2 + (lng - g_lng)**2) * 111000
                     if dist_m <= g_radius:
@@ -481,7 +484,7 @@ def generar_excel():
                     
                     geo_obj = obtener_geocerca(curr_lat, curr_lng)
                     geo_name = geo_obj.get('name', geo_obj.get('title', 'Zona')) if geo_obj else "Fuera de geocerca"
-                    geo_id_val = str(geo_obj.get('id', '')) if geo_obj else ""
+                    geo_id_val = str(geo_obj.get('id', geo_obj.get('geometry_id', ''))) if geo_obj else ""
                     
                     evento = "En movimiento"
                     limite_aplicable = limite_velocidad
