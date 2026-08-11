@@ -230,8 +230,11 @@ HTML_INTERFACE = """
                 a.remove();
                 status.innerText = "¡Reporte generado y descargado con éxito!";
             } else {
-                alert("Error al generar el reporte.");
-                status.innerText = "Error en la generación.";
+                // AQUÍ AGREGAMOS LA ALERTA PARA QUE NOS MUESTRE EL ERROR EXACTO DE PYTHON
+                const errorDetail = await res.text();
+                console.error("Error backend:", errorDetail);
+                alert("Error de Python: " + errorDetail);
+                status.innerText = "Error en la generación. Revisa la alerta.";
             }
             btn.disabled = false;
         }
@@ -304,7 +307,6 @@ def api_geocercas():
 
         geos_normalizadas = []
         
-        # Agregamos las virtuales primero
         for virt in GEOCERCAS_LOCALES:
             geos_normalizadas.append({
                 'geofence_id': virt['id'],
@@ -328,7 +330,6 @@ def api_geocercas():
                     'name': g_name
                 })
                 
-        # Limpiar duplicados y ordenar
         vistos = set()
         finales = []
         for g in geos_normalizadas:
@@ -344,6 +345,7 @@ def api_geocercas():
 @app.route('/generar_excel')
 def generar_excel():
     try:
+        # 1. RECEPCIÓN SEGURA DE PARÁMETROS
         unit_id = request.args.get('unit_id', '868807')
         if "ID:" in unit_id:
             unit_id = unit_id.split("ID:")[1].replace(")", "").strip()
@@ -353,16 +355,19 @@ def generar_excel():
         hora_inicio = request.args.get('hora_inicio', '00:00:00')
         hora_fin = request.args.get('hora_fin', '23:59:59')
         
-        limite_velocidad = int(request.args.get('limite_velocidad', 80))
-        min_ralenti = int(request.args.get('min_ralenti', 5))
+        try: limite_velocidad = int(request.args.get('limite_velocidad', 80))
+        except: limite_velocidad = 80
+            
+        try: min_ralenti = int(request.args.get('min_ralenti', 5))
+        except: min_ralenti = 5
         
         geo_limits_raw = request.args.get('geos', '{}')
-        geo_limits = json.loads(geo_limits_raw)
+        try: geo_limits = json.loads(geo_limits_raw)
+        except: geo_limits = {}
 
-        # 1. CARGAMOS LAS GEOCERCAS VIRTUALES (Con coordenadas precisas)
+        # 2. CARGA DE GEOCERCAS VIRTUALES Y DE MAPON
         geos_procesadas = list(GEOCERCAS_LOCALES)
         
-        # 2. Descargamos las de Mapon por si acaso
         try:
             endpoints = ['/territory/list.json', '/poi/list.json', '/object/list.json']
             for ep in endpoints:
@@ -413,11 +418,11 @@ def generar_excel():
         def obtener_geocerca(lat, lng, address):
             address_str = str(address).lower()
             
-            # Validación matemática 
+            # Validación matemática robusta
             for g in geos_procesadas:
                 if g.get('type', 'circle') == 'circle' and g.get('lat') is not None and g.get('lng') is not None:
                     dist_m = math.sqrt((lat - g['lat'])**2 + (lng - g['lng'])**2) * 111000
-                    if dist_m <= g['radius']:
+                    if dist_m <= g.get('radius', 100):
                         return g.get('id'), g['name']
                 elif g.get('type') == 'polygon':
                     x, y = lng, lat
@@ -437,15 +442,19 @@ def generar_excel():
 
             return None, "Fuera de geocerca"
 
-        # 3. CONVERSIÓN DE HORAS (Hermosillo UTC-7 -> UTC para la API)
+        # 3. CONVERSIÓN DE HORAS ULTRA SEGURA
         def to_utc_str(date_str, time_str, is_end=False):
+            if not date_str: date_str = "2026-08-09"
+            if not time_str: time_str = "23:59:59" if is_end else "00:00:00"
             if len(time_str) == 5: time_str += ":00"
             if len(time_str) != 8: time_str = "23:59:59" if is_end else "00:00:00"
-            local_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
-            utc_dt = local_dt - timedelta(hours=TIMEZONE_OFFSET)
-            return utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            try:
+                local_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+                utc_dt = local_dt - timedelta(hours=TIMEZONE_OFFSET)
+                return utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            except:
+                return "2026-08-09T00:00:00Z"
 
-        # 4. CONVERSIÓN DE HORAS (UTC de la API -> Hermosillo UTC-7 para el Excel)
         def parse_iso(iso_str):
             if not iso_str: return None
             try:
@@ -569,11 +578,13 @@ def generar_excel():
                     
                     if geo_name != "Fuera de geocerca":
                         if geo_id and str(geo_id) in geo_limits:
-                            limite_aplicable = int(geo_limits[str(geo_id)]['limit'])
+                            try: limite_aplicable = int(geo_limits[str(geo_id)]['limit'])
+                            except: pass
                         else:
                             for gid, gdata in geo_limits.items():
                                 if gdata['name'].lower() == geo_name.lower():
-                                    limite_aplicable = int(gdata['limit'])
+                                    try: limite_aplicable = int(gdata['limit'])
+                                    except: pass
                                     break
                                     
                         if current_speed > limite_aplicable:
