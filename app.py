@@ -16,13 +16,13 @@ app = Flask(__name__)
 # ==========================================
 API_KEY = "7bd626cb4d3874faf995ec075af15d2cd35ec99d"
 BASE_URL = "https://gps.idttecnologias.mx/api/v1"
-COMPANY_ID = "87534"  # ID de Alimentos Kowi (Filtro para que solo salgan sus unidades)
+COMPANY_ID = "87534"  # ID de Alimentos Kowi (Filtro para unidades y geocercas)
+FILTRO_TEXTO = ""     # Si deseas filtrar el menú por alguna palabra, ponla aquí
 
-# CATÁLOGO VIRTUAL DE GEOCERCAS (Coordenadas exactas que extrajimos)
+# CATÁLOGO VIRTUAL DE RESPALDO (Por si la API oculta las coordenadas de estas zonas)
 GEOCERCAS_LOCALES = [
     {"name": "nutrikowi", "lat": 27.192, "lng": -109.552, "radius": 300},
     {"name": "nutrikowi guaymas", "lat": 28.036, "lng": -110.921, "radius": 300},
-    # Agrega más copiando esta línea si lo necesitas después
 ]
 # ==========================================
 
@@ -89,9 +89,8 @@ HTML_INTERFACE = """
             </div>
 
             <div class="form-content">
-                <!-- ¡EL MENÚ DE UNIDADES HA VUELTO! -->
                 <div class="form-group">
-                    <label>Buscar / Seleccionar Unidad: <span class="retry-btn" onclick="cargarUnidades()">🔄 Reintentar carga</span></label>
+                    <label>Buscar / Seleccionar Unidad: <span class="retry-btn" onclick="cargarCatalogos()">🔄 Reintentar carga</span></label>
                     <select id="unit_select" style="width: 100%;">
                         <option value="">⏳ Cargando catálogo...</option>
                     </select>
@@ -121,7 +120,7 @@ HTML_INTERFACE = """
 
                 <div class="form-row">
                     <div class="form-group">
-                        <label>Límite Velocidad Gral (km/h):</label>
+                        <label>Límite Velocidad General (km/h):</label>
                         <input type="number" id="limite_velocidad" value="80" min="1" max="150" required>
                     </div>
                     <div class="form-group">
@@ -130,11 +129,14 @@ HTML_INTERFACE = """
                     </div>
                 </div>
 
-                <!-- LIMITE GENERAL DE GEOCERCAS -->
+                <!-- SELECTOR MÚLTIPLE DE GEOCERCAS RESTAURADO -->
                 <div class="form-group">
-                    <label>Límite Velocidad en Geocercas (km/h):</label>
-                    <input type="number" id="limite_geocerca" value="20" min="1" max="150" title="Si el vehículo entra a una geocerca, aplicará este límite" required>
+                    <label>Geocercas (Selecciona para asignar límite de velocidad estricto):</label>
+                    <select id="geofence_select" multiple="multiple" style="width: 100%;">
+                        <option value="">⏳ Cargando geocercas...</option>
+                    </select>
                 </div>
+                <div class="form-group" id="speed_limits_container"></div>
 
                 <button type="button" class="btn-submit" id="btn_submit" onclick="generarReporte()" disabled>📥 Generar y Descargar Excel</button>
                 <div id="status_msg" class="status-msg"></div>
@@ -143,27 +145,49 @@ HTML_INTERFACE = """
     </div>
 
     <script>
-        async function cargarUnidades() {
+        async function cargarCatalogos() {
             try {
-                const resUnits = await fetch('/api_unidades');
+                const [resUnits, resGeos] = await Promise.all([
+                    fetch('/api_unidades'),
+                    fetch('/api_geocercas')
+                ]);
                 const units = await resUnits.json();
+                const geos = await resGeos.json();
 
                 const selectUnit = $('#unit_select');
                 selectUnit.empty().append(new Option('🔍 Escribe para buscar unidad...', ''));
-                
-                units.forEach(u => {
-                    const labelStr = `${u.label || ''} ${u.number || ''}`.trim();
-                    selectUnit.append(new Option(`${labelStr} (ID: ${u.unit_id})`, u.unit_id));
-                });
-                
+                units.forEach(u => selectUnit.append(new Option(`${u.label || ''} ${u.number || ''} (ID: ${u.unit_id})`.trim(), u.unit_id)));
                 selectUnit.select2({ placeholder: "🔍 Escribe para buscar unidad...", width: '100%' });
+
+                const selectGeo = $('#geofence_select');
+                selectGeo.empty();
+                geos.forEach(g => {
+                    selectGeo.append(new Option(g.name, g.geofence_id));
+                });
+                selectGeo.select2({ placeholder: "Opcional: Filtrar límites por zona...", width: '100%' });
 
                 $('#btn_submit').prop('disabled', false);
                 $('#status_msg').text("");
             } catch (e) {
-                $('#status_msg').text("Error cargando el catálogo de unidades.");
+                $('#status_msg').text("Error cargando catálogos.");
             }
         }
+
+        $('#geofence_select').on('change', function() {
+            const container = $('#speed_limits_container');
+            const selected = $(this).select2('data');
+            container.empty();
+            selected.forEach(s => {
+                if(s.id) {
+                    container.append(`
+                        <div class="form-group" style="margin-top: 8px;">
+                            <label>Límite en ${s.text} (km/h):</label>
+                            <input type="number" class="geo-limit" data-id="${s.id}" data-name="${s.text}" value="30" style="width:100%; padding:9px; border:1px solid #dcdfe6; border-radius:6px; box-sizing:border-box; font-size:13px; color:#2c3e50;">
+                        </div>
+                    `);
+                }
+            });
+        });
 
         async function generarReporte() {
             const btn = document.getElementById('btn_submit');
@@ -174,7 +198,15 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⏳ Generando reporte con cruce de geocercas...";
+            status.innerText = "⏳ Cruzando datos GPS con polígonos de geocercas...";
+
+            const geoLimits = {};
+            $('.geo-limit').each(function() {
+                geoLimits[$(this).data('id')] = {
+                    limit: $(this).val(),
+                    name: $(this).data('name')
+                };
+            });
 
             const params = new URLSearchParams({
                 unit_id: unitId,
@@ -184,8 +216,8 @@ HTML_INTERFACE = """
                 hora_inicio: document.getElementById('hora_inicio').value,
                 hora_fin: document.getElementById('hora_fin').value,
                 limite_velocidad: document.getElementById('limite_velocidad').value,
-                limite_geocerca: document.getElementById('limite_geocerca').value,
-                min_ralenti: document.getElementById('min_ralenti').value
+                min_ralenti: document.getElementById('min_ralenti').value,
+                geos: JSON.stringify(geoLimits)
             });
 
             const res = await fetch(`/generar_excel?${params.toString()}`);
@@ -228,7 +260,7 @@ HTML_INTERFACE = """
         }
 
         setRange('hoy');
-        cargarUnidades();
+        cargarCatalogos();
     </script>
 </body>
 </html>
@@ -245,7 +277,6 @@ def api_unidades():
         data = res.json()
         units_raw = data.get('data', {}).get('units', [])
         
-        # Filtro estricto para que solo veas unidades de Alimentos Kowi
         unidades_filtradas = []
         for u in units_raw:
             c_id = str(u.get('company_id', ''))
@@ -254,6 +285,48 @@ def api_unidades():
             unidades_filtradas.append(u)
             
         return jsonify(unidades_filtradas)
+    except: 
+        return jsonify([]), 500
+
+@app.route('/api_geocercas')
+def api_geocercas():
+    try:
+        res = requests.get(f"{BASE_URL}/object/list.json", params={'key': API_KEY}, timeout=15)
+        data = res.json()
+        
+        geos_raw = []
+        inner = data.get('data', data)
+        if isinstance(inner, dict):
+            for k in ['objects', 'items', 'list']:
+                if k in inner:
+                    geos_raw.extend(inner[k])
+            if not geos_raw:
+                for v in inner.values():
+                    if isinstance(v, list):
+                        geos_raw.extend(v)
+        elif isinstance(inner, list):
+            geos_raw.extend(inner)
+
+        geos_normalizadas = []
+        for g in geos_raw:
+            c_id = str(g.get('company_id', ''))
+            if c_id and c_id != COMPANY_ID:
+                continue
+                
+            g_id = str(g.get('object_id', g.get('id', '')))
+            g_name = str(g.get('name', g.get('title', 'Geocerca')))
+            
+            if FILTRO_TEXTO and FILTRO_TEXTO.lower() not in g_name.lower():
+                continue
+
+            if g_id and g_id != 'None':
+                geos_normalizadas.append({
+                    'geofence_id': g_id,
+                    'name': g_name
+                })
+                
+        geos_normalizadas.sort(key=lambda x: x['name'])
+        return jsonify(geos_normalizadas)
     except: 
         return jsonify([]), 500
 
@@ -270,19 +343,108 @@ def generar_excel():
         hora_fin = request.args.get('hora_fin', '23:59:59')
         
         limite_velocidad = int(request.args.get('limite_velocidad', 80))
-        limite_geocerca = int(request.args.get('limite_geocerca', 20))
         min_ralenti = int(request.args.get('min_ralenti', 5))
+        
+        geo_limits_raw = request.args.get('geos', '{}')
+        geo_limits = json.loads(geo_limits_raw)
 
-        def obtener_geocerca(lat, lng):
-            # Validador de radar. Compara las coordenadas actuales contra el catálogo virtual.
-            for g in GEOCERCAS_LOCALES:
-                dist_m = math.sqrt((lat - g['lat'])**2 + (lng - g['lng'])**2) * 111000
-                if dist_m <= g['radius']:
-                    return g['name']
-            return "Fuera de geocerca"
+        # 1. Agregamos el Catálogo Virtual de Respaldo
+        geos_procesadas = list(GEOCERCAS_LOCALES)
+        
+        # 2. Descargamos y filtramos las de Mapon para sumar al radar
+        try:
+            res_geo = requests.get(f"{BASE_URL}/object/list.json", params={'key': API_KEY}, timeout=15)
+            data_geo = res_geo.json()
+            inner = data_geo.get('data', data_geo)
+            geos_raw = []
+            if isinstance(inner, dict):
+                for k in ['objects', 'items', 'list']:
+                    if k in inner:
+                        geos_raw.extend(inner[k])
+                if not geos_raw:
+                    for v in inner.values():
+                        if isinstance(v, list):
+                            geos_raw.extend(v)
+            elif isinstance(inner, list):
+                geos_raw.extend(inner)
 
-        def normalizar_fecha(f): return f if f else '2026-08-09'
-        def normalizar_hora(h, es_fin=False): return h if len(h) == 8 else ("23:59:59" if es_fin else "00:00:00")
+            for g in geos_raw:
+                c_id = str(g.get('company_id', ''))
+                if c_id and c_id != COMPANY_ID:
+                    continue
+                    
+                g_id = str(g.get('object_id', g.get('id', '')))
+                g_name = str(g.get('name', g.get('title', 'Geocerca')))
+                
+                g_lat = g.get('lat', g.get('latitude'))
+                g_lng = g.get('lng', g.get('longitude'))
+                g_radius = float(g.get('radius', 500))
+                g_type = g.get('type', 'circle').lower()
+                
+                if g_type == 'polygon' and 'points' in g:
+                    geos_procesadas.append({
+                        'id': g_id, 'name': g_name, 'type': 'polygon', 'points': g['points'], 'radius': g_radius
+                    })
+                else:
+                    if g_lat is None and 'center' in g:
+                        g_lat = g['center'].get('lat')
+                        g_lng = g['center'].get('lng')
+                    elif g_lat is None and 'points' in g:
+                        pts = g['points']
+                        if isinstance(pts, list) and len(pts) > 0:
+                            try:
+                                g_lat = sum(float(p.get('lat',0)) for p in pts) / len(pts)
+                                g_lng = sum(float(p.get('lng',0)) for p in pts) / len(pts)
+                                g_radius = 1000
+                            except: pass
+
+                    lat_v = float(g_lat) if g_lat is not None else None
+                    lng_v = float(g_lng) if g_lng is not None else None
+
+                    if lat_v is not None and lng_v is not None:
+                        geos_procesadas.append({
+                            'id': g_id, 'name': g_name, 'type': 'circle', 
+                            'lat': lat_v, 'lng': lng_v, 'radius': g_radius
+                        })
+        except:
+            pass
+
+        def obtener_geocerca(lat, lng, address):
+            address_str = str(address).lower()
+            
+            # Validación geométrica estricta
+            for g in geos_procesadas:
+                if g.get('type', 'circle') == 'circle' and g.get('lat') is not None and g.get('lng') is not None:
+                    dist_m = math.sqrt((lat - g['lat'])**2 + (lng - g['lng'])**2) * 111000
+                    if dist_m <= g['radius']:
+                        return g.get('id', 'VIRTUAL'), g['name']
+                elif g.get('type') == 'polygon':
+                    x, y = lng, lat
+                    inside = False
+                    pts = g.get('points', [])
+                    n = len(pts)
+                    for i in range(n):
+                        j = (i + 1) % n
+                        try:
+                            xi, yi = float(pts[i].get('lng', 0)), float(pts[i].get('lat', 0))
+                            xj, yj = float(pts[j].get('lng', 0)), float(pts[j].get('lat', 0))
+                            intersect = ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi + 1e-9) + xi)
+                            if intersect: inside = not inside
+                        except: pass
+                    if inside:
+                        return g.get('id', 'VIRTUAL'), g['name']
+            
+            # Heurística para geocercas no mapeadas con coordenadas, pero reportadas en el texto de Mapon
+            if address and "+" not in address and "," not in address and "Zona Operativa" not in address:
+                return "GEO_API", address.strip()
+
+            return None, "Fuera de geocerca"
+
+        def normalizar_fecha(f):
+            return f if f else '2026-08-09'
+
+        def normalizar_hora(h, es_fin=False):
+            return h if len(h) == 8 else ("23:59:59" if es_fin else "00:00:00")
 
         f_in_api = f"{normalizar_fecha(f_in)}T{normalizar_hora(hora_inicio)}Z"
         f_fin_api = f"{normalizar_fecha(f_fin)}T{normalizar_hora(hora_fin, True)}Z"
@@ -399,14 +561,22 @@ def generar_excel():
                     curr_lat = t['lat_ini'] + (delta_lat * prog)
                     curr_lng = t['lng_ini'] + (delta_lng * prog)
                     
-                    geo_name = obtener_geocerca(curr_lat, curr_lng)
+                    geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, t['origen'])
                     
-                    limite_aplicable = limite_velocidad
                     evento = "En movimiento"
+                    limite_aplicable = limite_velocidad
                     
                     if geo_name != "Fuera de geocerca":
-                        limite_aplicable = limite_geocerca
-                        if current_speed > limite_geocerca:
+                        # Verificar si tiene límite de velocidad seleccionado en UI
+                        if geo_id and str(geo_id) in geo_limits:
+                            limite_aplicable = int(geo_limits[str(geo_id)]['limit'])
+                        else:
+                            for gid, gdata in geo_limits.items():
+                                if gdata['name'].lower() == geo_name.lower():
+                                    limite_aplicable = int(gdata['limit'])
+                                    break
+                                    
+                        if current_speed > limite_aplicable:
                             evento = f"Exceso en {geo_name}"
                     elif current_speed > limite_velocidad:
                         evento = "Exceso de velocidad"
@@ -422,7 +592,7 @@ def generar_excel():
                 while curr_time <= end_time:
                     curr_lat = t['lat_ini']
                     curr_lng = t['lng_ini']
-                    geo_name = obtener_geocerca(curr_lat, curr_lng)
+                    geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, t['origen'])
 
                     if idle_remaining > 0:
                         interval = 1
