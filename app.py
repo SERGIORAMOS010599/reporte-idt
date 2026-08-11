@@ -16,8 +16,8 @@ app = Flask(__name__)
 # ==========================================
 API_KEY = "7bd626cb4d3874faf995ec075af15d2cd35ec99d"
 BASE_URL = "https://gps.idttecnologias.mx/api/v1"
-COMPANY_ID = "87534"  
-TIMEZONE_OFFSET = -7  
+COMPANY_ID = "87534"  # ID de Alimentos Kowi
+TIMEZONE_OFFSET = -7  # Zona horaria de Hermosillo (UTC-7)
 FILTRO_TEXTO = ""
 
 # ==========================================
@@ -76,7 +76,7 @@ HTML_INTERFACE = """
     <div class="card">
         <div class="header">
             <h2>📊 Reporte Ejecutivo Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Sincronizado y Resumido Automáticamente</p>
+            <p>IDT Tecnologías - Sincronización Automática con Mapon</p>
         </div>
         
         <div class="main-container">
@@ -198,7 +198,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⏳ Procesando cruces y ralentí inteligente...";
+            status.innerText = "⏳ Extrayendo ralentí exacto desde Mapon...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -531,22 +531,22 @@ def generar_excel():
                 speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
                 tipo = str(item.get('type', '')).lower()
                 
+                # EXTRACCIÓN EXACTA DE RALENTÍ DESDE MAPON
                 idle_sec = 0.0
                 if tipo == 'idle':
                     idle_sec = duracion_seg
                 else:
-                    for key, val in item.get('metrics', {}).items():
-                        if 'idle' in str(key).lower() or 'engine' in str(key).lower() or 'ign' in str(key).lower():
-                            try: idle_sec = max(idle_sec, float(val))
-                            except: pass
-                
-                # LA HEURÍSTICA CLAVE QUE IMITA A MAPON
-                if idle_sec == 0 and speed == 0 and duracion_seg > 0:
-                    if duracion_seg <= 900:  
-                        idle_sec = duracion_seg
-                    else:
-                        umbral_segundos = min_ralenti * 60
-                        idle_sec = umbral_segundos + min(420, int(duracion_seg * 0.02))
+                    if 'metrics' in item and isinstance(item['metrics'], dict):
+                        # Mapon suele mandar el ralentí dentro de stops en una métrica que se llama idle
+                        for k, v in item['metrics'].items():
+                            if 'idle' in str(k).lower():
+                                try: idle_sec = max(idle_sec, float(v))
+                                except: pass
+                    
+                    # SI MAPON NO LO MANDA, ASUMIMOS EL 100% SI LA PARADA ES MUY CORTA
+                    if idle_sec == 0 and tipo == 'stop' and duracion_seg > 0:
+                        if duracion_seg <= (min_ralenti * 60) + 180:
+                            idle_sec = duracion_seg
                 
                 idle_sec = min(idle_sec, duracion_seg)
 
