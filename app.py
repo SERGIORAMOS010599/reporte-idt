@@ -18,7 +18,13 @@ API_KEY = "7bd626cb4d3874faf995ec075af15d2cd35ec99d"
 BASE_URL = "https://gps.idttecnologias.mx/api/v1"
 COMPANY_ID = "87534"  # ID de Alimentos Kowi
 TIMEZONE_OFFSET = -7  # Zona horaria de Hermosillo, Sonora (UTC-7)
-FILTRO_TEXTO = ""
+FILTRO_TEXTO = ""     # Si deseas filtrar el menú por alguna palabra
+
+# CATÁLOGO VIRTUAL DE GEOCERCAS (Coordenadas ajustadas milimétricamente al GPS)
+GEOCERCAS_LOCALES = [
+    {"id": "VIRT_1", "name": "nutrikowi", "lat": 27.1925, "lng": -109.5521, "radius": 250, "type": "circle"},
+    {"id": "VIRT_2", "name": "nutrikowi guaymas", "lat": 28.0363, "lng": -110.9223, "radius": 250, "type": "circle"}
+]
 # ==========================================
 
 HTML_INTERFACE = """
@@ -68,7 +74,7 @@ HTML_INTERFACE = """
     <div class="card">
         <div class="header">
             <h2>📊 Reporte Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Sincronizado a Hermosillo (UTC-7)</p>
+            <p>IDT Tecnologías - Motor Híbrido de Geocercas (Sincronizado a UTC-7)</p>
         </div>
         
         <div class="main-container">
@@ -190,7 +196,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⏳ Descargando ruta y calculando zonas horarias...";
+            status.innerText = "⏳ Descargando ruta y escaneando zonas horarias...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -297,6 +303,14 @@ def api_geocercas():
             except: pass
 
         geos_normalizadas = []
+        
+        # Agregamos las virtuales primero
+        for virt in GEOCERCAS_LOCALES:
+            geos_normalizadas.append({
+                'geofence_id': virt['id'],
+                'name': virt['name']
+            })
+
         for g in geos_raw:
             c_id = str(g.get('company_id', ''))
             if c_id and c_id != COMPANY_ID:
@@ -345,8 +359,10 @@ def generar_excel():
         geo_limits_raw = request.args.get('geos', '{}')
         geo_limits = json.loads(geo_limits_raw)
 
-        # 1. DESCARGA DE GEOCERCAS REALES
-        geos_procesadas = []
+        # 1. CARGAMOS LAS GEOCERCAS VIRTUALES (Con coordenadas precisas)
+        geos_procesadas = list(GEOCERCAS_LOCALES)
+        
+        # 2. Descargamos las de Mapon por si acaso
         try:
             endpoints = ['/territory/list.json', '/poi/list.json', '/object/list.json']
             for ep in endpoints:
@@ -397,7 +413,7 @@ def generar_excel():
         def obtener_geocerca(lat, lng, address):
             address_str = str(address).lower()
             
-            # Validación geométrica real
+            # Validación matemática 
             for g in geos_procesadas:
                 if g.get('type', 'circle') == 'circle' and g.get('lat') is not None and g.get('lng') is not None:
                     dist_m = math.sqrt((lat - g['lat'])**2 + (lng - g['lng'])**2) * 111000
@@ -421,22 +437,20 @@ def generar_excel():
 
             return None, "Fuera de geocerca"
 
-        # 2. CONVERSIÓN DE ZONA HORARIA A UTC (Para pedírselo a Mapon)
+        # 3. CONVERSIÓN DE HORAS (Hermosillo UTC-7 -> UTC para la API)
         def to_utc_str(date_str, time_str, is_end=False):
             if len(time_str) == 5: time_str += ":00"
             if len(time_str) != 8: time_str = "23:59:59" if is_end else "00:00:00"
             local_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
-            # Restamos el offset negativo para sumar horas y llegar a UTC
             utc_dt = local_dt - timedelta(hours=TIMEZONE_OFFSET)
             return utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # 3. CONVERSIÓN DE UTC A ZONA HORARIA LOCAL (Para mostrarlo en el Excel)
+        # 4. CONVERSIÓN DE HORAS (UTC de la API -> Hermosillo UTC-7 para el Excel)
         def parse_iso(iso_str):
             if not iso_str: return None
             try:
                 clean_str = str(iso_str).replace('Z', '').split('.')[0]
                 dt_utc = datetime.strptime(clean_str, '%Y-%m-%dT%H:%M:%S')
-                # Sumamos el offset para volver a la hora local
                 return dt_utc + timedelta(hours=TIMEZONE_OFFSET)
             except: return None
 
@@ -659,15 +673,22 @@ def generar_excel():
         ws.cell(row=3, column=3, value="Unidad").font = Font(bold=True)
         ws.cell(row=3, column=4, value=str(unit_id))
 
+        fecha_ini_legible = f"{normalizar_fecha(f_in)} {normalizar_hora(hora_inicio)}"
+        fecha_fin_legible = f"{normalizar_fecha(f_fin)} {normalizar_hora(hora_fin, True)}"
+
         ws.cell(row=5, column=1, value="Recorrido Aprox:").font = Font(bold=True)
         ws.cell(row=5, column=2, value=f"{round(total_dist, 2)} km")
         ws.cell(row=5, column=3, value="Tiempo en Movimiento:").font = Font(bold=True)
         ws.cell(row=5, column=4, value=f"{mov_hrs} hrs {mov_mins} mins ({porc_mov}%)")
+        ws.cell(row=5, column=5, value="Fecha Inicial:").font = Font(bold=True)
+        ws.cell(row=5, column=6, value=fecha_ini_legible)
 
         ws.cell(row=6, column=1, value="Velocidad Máxima:").font = Font(bold=True)
         ws.cell(row=6, column=2, value=f"{round(max_vel, 1)} km/h")
         ws.cell(row=6, column=3, value="Tiempo Muerto (Apagado):").font = Font(bold=True)
         ws.cell(row=6, column=4, value=f"{muerto_hrs} hrs {muerto_mins} mins ({porc_muerto}%)")
+        ws.cell(row=6, column=5, value="Fecha Final:").font = Font(bold=True)
+        ws.cell(row=6, column=6, value=fecha_fin_legible)
 
         ws.cell(row=7, column=1, value="Velocidad Promedio:").font = Font(bold=True)
         ws.cell(row=7, column=2, value=f"{round(prom_vel, 1)} km/h")
