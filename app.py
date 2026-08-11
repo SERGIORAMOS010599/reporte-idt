@@ -19,14 +19,6 @@ BASE_URL = "https://gps.idttecnologias.mx/api/v1"
 COMPANY_ID = "87534"  
 TIMEZONE_OFFSET = -7  
 FILTRO_TEXTO = ""
-
-# ==========================================
-# CATÁLOGO DE GEOCERCAS VIRTUALES
-# ==========================================
-GEOCERCAS_LOCALES = [
-    {"id": "VIRT_1", "name": "nutrikowi", "lat": 27.1922, "lng": -109.5530, "radius": 200, "type": "circle"},
-    {"id": "VIRT_2", "name": "hermosillo grnjas dentro del v aliente", "lat": 28.9928, "lng": -111.2181, "radius": 200, "type": "circle"}
-]
 # ==========================================
 
 HTML_INTERFACE = """
@@ -76,7 +68,7 @@ HTML_INTERFACE = """
     <div class="card">
         <div class="header">
             <h2>📊 Reporte Ejecutivo Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Algoritmo de Cruce Exacto con Mapon</p>
+            <p>IDT Tecnologías - Sincronizado y Resumido Automáticamente</p>
         </div>
         
         <div class="main-container">
@@ -307,12 +299,6 @@ def api_geocercas():
             except: pass
 
         geos_normalizadas = []
-        
-        for virt in GEOCERCAS_LOCALES:
-            geos_normalizadas.append({
-                'geofence_id': virt['id'],
-                'name': virt['name']
-            })
 
         for g in geos_raw:
             c_id = str(g.get('company_id', ''))
@@ -371,7 +357,8 @@ def generar_excel():
             if not h: return "23:59:59" if es_fin else "00:00:00"
             return h if len(h) == 8 else h + ":00"
 
-        geos_procesadas = list(GEOCERCAS_LOCALES)
+        # CERO GEOCERCAS VIRTUALES. SOLO LECTURA PURA DE LA API
+        geos_procesadas = []
         
         try:
             endpoints = ['/territory/list.json', '/poi/list.json', '/object/list.json']
@@ -485,60 +472,54 @@ def generar_excel():
         try:
             response = requests.get(url, params=params, timeout=15)
             data = response.json()
-            rutas_encontradas = []
-            eventos_vistos = set()
             
-            def extraer_tramos(obj):
-                if isinstance(obj, dict):
-                    tipo = str(obj.get('type', '')).lower()
-                    has_start_end = ('start' in obj or 'start_time' in obj) and ('end' in obj or 'end_time' in obj)
-                    if tipo in ['route', 'stop', 'idle'] or has_start_end:
-                        sig = str(obj.get('start', {}).get('time', '')) + tipo
-                        if sig not in eventos_vistos:
-                            eventos_vistos.add(sig)
-                            rutas_encontradas.append(obj)
-                    for k, v in obj.items():
-                        if isinstance(v, (dict, list)): extraer_tramos(v)
-                elif isinstance(obj, list):
-                    for item in obj:
-                        if isinstance(item, (dict, list)): extraer_tramos(item)
+            unit_data = data.get('data', {}).get('units', [])[0] if data.get('data', {}).get('units') else {}
+            rutas_array = unit_data.get('routes', [])
+            idles_array = unit_data.get('idles', [])
+            
+            parsed_idles = []
+            for idl in idles_array:
+                s_dt = parse_iso(idl.get('start', {}).get('time'))
+                e_dt = parse_iso(idl.get('end', {}).get('time'))
+                if s_dt and e_dt:
+                    parsed_idles.append((s_dt, e_dt))
 
-            extraer_tramos(data)
-
-            # Extraemos la lista pura de Idles y Stops para empalmarlos
-            list_routes = []
-            list_stops = []
-            list_idles = []
-
-            for item in rutas_encontradas:
-                dt_ini = parse_iso(item.get('start', {}).get('time', item.get('start_time', '')))
-                dt_fin = parse_iso(item.get('end', {}).get('time', item.get('end_time', '')))
+            for item in rutas_array:
+                dt_ini = parse_iso(item.get('start', {}).get('time'))
+                dt_fin = parse_iso(item.get('end', {}).get('time'))
                 if not dt_ini or not dt_fin: continue
 
-                origen = str(item.get('start', {}).get('address', item.get('start_address', 'Zona Operativa')))
-                lat_ini = float(item.get('start', {}).get('lat', item.get('start_lat', 27.19)))
-                lng_ini = float(item.get('start', {}).get('lng', item.get('start_lng', -109.55)))
-                lat_fin = float(item.get('end', {}).get('lat', item.get('end_lat', lat_ini)))
-                lng_fin = float(item.get('end', {}).get('lng', item.get('end_lng', lng_ini)))
+                duracion_seg = (dt_fin - dt_ini).total_seconds()
+                if duracion_seg <= 0: continue
+
+                origen = str(item.get('start', {}).get('address', 'Zona Operativa'))
+                lat_ini = float(item.get('start', {}).get('lat', 27.19))
+                lng_ini = float(item.get('start', {}).get('lng', -109.55))
+                lat_fin = float(item.get('end', {}).get('lat', lat_ini))
+                lng_fin = float(item.get('end', {}).get('lng', lng_ini))
                 
                 dist_km = float(item.get('distance', 0)) / 1000.0
                 speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
                 tipo = str(item.get('type', '')).lower()
-                duracion_seg = (dt_fin - dt_ini).total_seconds()
+                
+                idle_sec = 0.0
+                if tipo == 'stop':
+                    for i_start, i_end in parsed_idles:
+                        overlap_start = max(dt_ini, i_start)
+                        overlap_end = min(dt_fin, i_end)
+                        if overlap_end > overlap_start:
+                            idle_sec += (overlap_end - overlap_start).total_seconds()
+                
+                idle_sec = min(idle_sec, duracion_seg)
 
                 geo_id, geo_name = obtener_geocerca(lat_ini, lng_ini, origen)
 
-                obj_tramo = {
+                tramos_reales.append({
                     'dt_ini': dt_ini, 'dt_fin': dt_fin, 'origen': origen, 'distancia': dist_km,
                     'velocidad': speed, 'lat_ini': lat_ini, 'lng_ini': lng_ini,
                     'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg,
-                    'tipo': tipo, 'geo_name': geo_name
-                }
-
-                if tipo == 'route': list_routes.append(obj_tramo)
-                elif tipo == 'stop': list_stops.append(obj_tramo)
-                elif tipo == 'idle': list_idles.append(obj_tramo)
-
+                    'idle_sec': idle_sec, 'tipo': tipo, 'geo_name': geo_name
+                })
         except: pass
 
         filas_brutas = []
@@ -547,7 +528,9 @@ def generar_excel():
         tiempo_ral_seg = 0
         tiempo_apagado_seg = 0
         
-        # 1. PROCESAMOS LAS RUTAS (MOVIMIENTO)
+        list_routes = [t for t in tramos_reales if t['tipo'] == 'route']
+        list_stops = [t for t in tramos_reales if t['tipo'] == 'stop']
+
         for t in list_routes:
             tiempo_mov_seg += t['duracion']
             curr_time = t['dt_ini']
@@ -598,19 +581,14 @@ def generar_excel():
                 })
                 curr_time += timedelta(minutes=1)
 
-        # 2. PROCESAMOS LAS PARADAS (CRUCE EXACTO CON RALENTÍS)
         for stop in list_stops:
             idles_in_stop = []
-            for idle in list_idles:
-                overlap_start = max(stop['dt_ini'], idle['dt_ini'])
-                overlap_end = min(stop['dt_fin'], idle['dt_fin'])
+            for i_start, i_end in parsed_idles:
+                overlap_start = max(stop['dt_ini'], i_start)
+                overlap_end = min(stop['dt_fin'], i_end)
                 if overlap_end > overlap_start:
                     idles_in_stop.append((overlap_start, overlap_end))
             
-            # Si Mapon de plano no mandó ningún Idle en todo el día, usamos heurística de emergencia
-            if not list_idles and stop['duracion'] <= (min_ralenti * 60) + 180:
-                idles_in_stop = [(stop['dt_ini'], stop['dt_fin'])]
-
             curr_time = stop['dt_ini']
             idles_in_stop.sort(key=lambda x: x[0])
             
@@ -646,14 +624,12 @@ def generar_excel():
                     })
                     tiempo_apagado_seg += dur_ap
             
-            # Al final de la parada, el motor se enciende para avanzar
             filas_brutas.append({
                 'fecha': stop['dt_fin'], 'origen': stop['origen'], 'velocidad': 0,
                 'evento': 'Motor encendido', 'detalle': "-", 
                 'lat': stop['lat_fin'], 'lng': stop['lng_fin'], 'geocerca': stop['geo_name']
             })
 
-        # ORDENAR Y LIMPIAR
         filas_brutas.sort(key=lambda x: x['fecha'])
         vistos = set()
         filas_finales = []
@@ -680,7 +656,6 @@ def generar_excel():
         vels_mov = [t['velocidad'] for t in list_routes if t['velocidad'] > 0]
         prom_vel = sum(vels_mov) / len(vels_mov) if vels_mov else 0
 
-        # GENERACIÓN DEL EXCEL
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Histórico Ejecutivo"
