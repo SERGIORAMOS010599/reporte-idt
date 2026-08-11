@@ -17,7 +17,7 @@ app = Flask(__name__)
 API_KEY = "7bd626cb4d3874faf995ec075af15d2cd35ec99d"
 BASE_URL = "https://gps.idttecnologias.mx/api/v1"
 COMPANY_ID = "87534"  # ID de Alimentos Kowi (Filtro por ID)
-FILTRO_TEXTO = ""     # Ej: "kowi" (Si quieres forzar un filtro extra por palabra en el nombre)
+FILTRO_TEXTO = ""     # Ej: "kowi" (Si quieres forzar un filtro extra en el menú de la web)
 # ==========================================
 
 HTML_INTERFACE = """
@@ -124,7 +124,7 @@ HTML_INTERFACE = """
                 </div>
 
                 <div class="form-group">
-                    <label>Geocercas para validar exceso de velocidad:</label>
+                    <label>Límites personalizados (Selecciona geocercas):</label>
                     <select id="geofence_select" multiple="multiple" style="width: 100%;">
                         <option value="">⏳ Cargando geocercas...</option>
                     </select>
@@ -157,7 +157,7 @@ HTML_INTERFACE = """
                 geos.forEach(g => {
                     selectGeo.append(new Option(g.name, g.geofence_id));
                 });
-                selectGeo.select2({ placeholder: "Seleccionar geocercas opcionales...", width: '100%' });
+                selectGeo.select2({ placeholder: "Opcional: Filtrar límites por zona...", width: '100%' });
 
                 $('#btn_submit').prop('disabled', false);
                 $('#status_msg').text("");
@@ -174,7 +174,7 @@ HTML_INTERFACE = """
                 if(s.id) {
                     container.append(`
                         <div class="form-group" style="margin-top: 8px;">
-                            <label>Límite en ${s.text} (km/h):</label>
+                            <label>Límite exclusivo en ${s.text} (km/h):</label>
                             <input type="number" class="geo-limit" data-id="${s.id}" data-name="${s.text}" value="60" style="width:100%; padding:9px; border:1px solid #dcdfe6; border-radius:6px; box-sizing:border-box; font-size:13px; color:#2c3e50;">
                         </div>
                     `);
@@ -270,11 +270,9 @@ def api_unidades():
         data = res.json()
         units_raw = data.get('data', {}).get('units', [])
         
-        # Filtro local por empresa
         unidades_filtradas = []
         for u in units_raw:
             c_id = str(u.get('company_id', ''))
-            # Si tiene un company_id asignado y no es el de Kowi, se omite
             if c_id and c_id != COMPANY_ID:
                 continue
             unidades_filtradas.append(u)
@@ -304,7 +302,6 @@ def api_geocercas():
 
         geos_normalizadas = []
         for g in geos_raw:
-            # 1. Filtro estricto por ID de empresa (Solo pasaran las de Kowi)
             c_id = str(g.get('company_id', ''))
             if c_id and c_id != COMPANY_ID:
                 continue
@@ -312,7 +309,6 @@ def api_geocercas():
             g_id = str(g.get('object_id', g.get('id', '')))
             g_name = str(g.get('name', g.get('title', 'Geocerca')))
             
-            # 2. Filtro auxiliar por nombre (se activa si pones algo en FILTRO_TEXTO arriba)
             if FILTRO_TEXTO and FILTRO_TEXTO.lower() not in g_name.lower():
                 continue
 
@@ -322,9 +318,7 @@ def api_geocercas():
                     'name': g_name
                 })
                 
-        # Ordenamos las geocercas alfabéticamente
         geos_normalizadas.sort(key=lambda x: x['name'])
-        
         return jsonify(geos_normalizadas)
     except: 
         return jsonify([]), 500
@@ -347,7 +341,7 @@ def generar_excel():
         geo_limits_raw = request.args.get('geos', '{}')
         geo_limits = json.loads(geo_limits_raw)
 
-        # Descargamos los datos de las geocercas aplicando los mismos filtros exactos
+        # Descargamos TODAS las geocercas del cliente de forma oculta
         geos_procesadas = []
         try:
             res_geo = requests.get(f"{BASE_URL}/object/list.json", params={'key': API_KEY}, timeout=15)
@@ -366,7 +360,6 @@ def generar_excel():
                 geos_raw.extend(inner)
 
             for g in geos_raw:
-                # Filtros de empresa
                 c_id = str(g.get('company_id', ''))
                 if c_id and c_id != COMPANY_ID:
                     continue
@@ -374,9 +367,6 @@ def generar_excel():
                 g_id = str(g.get('object_id', g.get('id', '')))
                 g_name = str(g.get('name', g.get('title', 'Geocerca')))
                 
-                if FILTRO_TEXTO and FILTRO_TEXTO.lower() not in g_name.lower():
-                    continue
-                    
                 g_lat = g.get('lat', g.get('latitude'))
                 g_lng = g.get('lng', g.get('longitude'))
                 g_radius = float(g.get('radius', 500))
@@ -387,32 +377,49 @@ def generar_excel():
                 elif g_lat is None and 'points' in g:
                     pts = g['points']
                     if isinstance(pts, list) and len(pts) > 0:
-                        g_lat = sum(float(p.get('lat',0)) for p in pts) / len(pts)
-                        g_lng = sum(float(p.get('lng',0)) for p in pts) / len(pts)
-                        g_radius = 1000
+                        try:
+                            g_lat = sum(float(p.get('lat',0)) for p in pts) / len(pts)
+                            g_lng = sum(float(p.get('lng',0)) for p in pts) / len(pts)
+                            g_radius = 1000
+                        except: pass
 
-                if g_lat is not None and g_lng is not None:
-                    geos_procesadas.append({
-                        'id': g_id,
-                        'name': g_name,
-                        'lat': float(g_lat),
-                        'lng': float(g_lng),
-                        'radius': g_radius
-                    })
+                lat_v = float(g_lat) if g_lat is not None else None
+                lng_v = float(g_lng) if g_lng is not None else None
+
+                geos_procesadas.append({
+                    'id': g_id,
+                    'name': g_name,
+                    'lat': lat_v,
+                    'lng': lng_v,
+                    'radius': g_radius
+                })
         except:
             pass
 
         def obtener_geocerca(lat, lng, address):
+            address_str = str(address).lower()
+            
+            # 1. Validación matemática: si tiene coordenadas, revisa si está dentro del radio
             for g in geos_procesadas:
-                dist_m = math.sqrt((lat - g['lat'])**2 + (lng - g['lng'])**2) * 111000
-                if dist_m <= g['radius']:
+                if g['lat'] is not None and g['lng'] is not None:
+                    dist_m = math.sqrt((lat - g['lat'])**2 + (lng - g['lng'])**2) * 111000
+                    if dist_m <= g['radius']:
+                        return g['id'], g['name']
+            
+            # 2. Validación por texto exacto (por si es un polígono sin coordenadas centrales en la API)
+            for g in geos_procesadas:
+                if g['name'].lower() == address_str:
                     return g['id'], g['name']
             
-            address_str = str(address).lower()
-            for gid, gdata in geo_limits.items():
-                if gdata['name'].lower() in address_str:
-                    return gid, gdata['name']
+            # 3. Validación por subcadena
+            for g in geos_procesadas:
+                if g['name'].lower() in address_str and len(g['name']) > 3:
+                    return g['id'], g['name']
             
+            # 4. Heurística Mapon: Si no tiene formato de calle (+ o ,) asumimos que es una geocerca
+            if address and "+" not in address and "," not in address and "Zona Operativa" not in address:
+                return "CUSTOM_GEO", address.strip()
+
             return None, "Fuera de geocerca"
 
         def normalizar_fecha(f):
@@ -543,8 +550,16 @@ def generar_excel():
                     evento = "En movimiento"
                     limite_aplicable = limite_velocidad
                     
-                    if geo_id and geo_id in geo_limits:
-                        limite_aplicable = int(geo_limits[geo_id]['limit'])
+                    if geo_name != "Fuera de geocerca":
+                        # Verificar si tiene límite de velocidad seleccionado en UI
+                        if geo_id and str(geo_id) in geo_limits:
+                            limite_aplicable = int(geo_limits[str(geo_id)]['limit'])
+                        elif geo_name != "CUSTOM_GEO":
+                            for gid, gdata in geo_limits.items():
+                                if gdata['name'].lower() == geo_name.lower():
+                                    limite_aplicable = int(gdata['limit'])
+                                    break
+                                    
                         if current_speed > limite_aplicable:
                             evento = f"Exceso en {geo_name}"
                     elif current_speed > limite_velocidad:
