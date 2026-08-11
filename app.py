@@ -78,7 +78,7 @@ HTML_INTERFACE = """
 
             <div class="form-content">
                 <div class="form-group">
-                    <label>Buscar / Seleccionar Unidad: <span class="retry-btn" onclick="cargarUnidades()">🔄 Reintentar</span></label>
+                    <label>Buscar / Seleccionar Unidad: <span class="retry-btn" onclick="cargarCatalogos()">🔄 Reintentar</span></label>
                     <select id="unit_select" style="width: 100%;">
                         <option value="">⏳ Cargando unidades...</option>
                     </select>
@@ -117,7 +117,6 @@ HTML_INTERFACE = """
                     </div>
                 </div>
 
-                <!-- NUEVOS CAMPOS DE GEOCERCAS (Diseño Original Respetado) -->
                 <div class="form-group">
                     <label>Geocercas para validar exceso de velocidad:</label>
                     <select id="geofence_select" multiple="multiple" style="width: 100%;">
@@ -149,7 +148,9 @@ HTML_INTERFACE = """
 
                 const selectGeo = $('#geofence_select');
                 selectGeo.empty();
-                geos.forEach(g => selectGeo.append(new Option(g.name, g.geofence_id)));
+                geos.forEach(g => {
+                    selectGeo.append(new Option(g.name, g.geofence_id));
+                });
                 selectGeo.select2({ placeholder: "Seleccionar geocercas opcionales...", width: '100%' });
 
                 $('#btn_submit').prop('disabled', false);
@@ -164,7 +165,12 @@ HTML_INTERFACE = """
             const selected = $(this).select2('data');
             container.empty();
             selected.forEach(s => {
-                container.append(`<div class="form-group"><label>Límite en ${s.text} (km/h):</label><input type="number" class="geo-limit" data-id="${s.id}" value="60" style="width:100%; padding:8px; border:1px solid #dcdfe6; border-radius:6px;"></div>`);
+                container.append(`
+                    <div class="form-group" style="margin-top: 8px;">
+                        <label>Límite en ${s.text} (km/h):</label>
+                        <input type="number" class="geo-limit" data-id="${s.id}" value="60" style="width:100%; padding:9px; border:1px solid #dcdfe6; border-radius:6px; box-sizing:border-box; font-size:13px; color:#2c3e50;">
+                    </div>
+                `);
             });
         });
 
@@ -258,7 +264,35 @@ def api_unidades():
 def api_geocercas():
     try:
         res = requests.get(f"{BASE_URL}/geofence/list.json", params={'key': API_KEY}, timeout=15)
-        return jsonify(res.json().get('data', {}).get('geofences', []))
+        data = res.json()
+        
+        # Extracción flexible y normalización adaptada a Mapon
+        geos_raw = []
+        if isinstance(data, list):
+            geos_raw = data
+        elif isinstance(data, dict):
+            inner = data.get('data', data)
+            if isinstance(inner, dict):
+                geos_raw = inner.get('geofences', inner.get('list', []))
+            elif isinstance(inner, list):
+                geos_raw = inner
+
+        geos_normalizadas = []
+        for g in geos_raw:
+            g_id = g.get('geofence_id', g.get('id'))
+            g_name = g.get('name', g.get('title', 'Geocerca sin nombre'))
+            g_lat = g.get('lat', g.get('latitude', 0))
+            g_lng = g.get('lng', g.get('longitude', 0))
+            g_radius = g.get('radius', 500)
+            if g_id:
+                geos_normalizadas.append({
+                    'geofence_id': g_id,
+                    'name': g_name,
+                    'lat': g_lat,
+                    'lng': g_lng,
+                    'radius': g_radius
+                })
+        return jsonify(geos_normalizadas)
     except: 
         return jsonify([]), 500
 
@@ -278,22 +312,26 @@ def generar_excel():
         min_ralenti = int(request.args.get('min_ralenti', 5))
         
         geo_limits_raw = request.args.get('geos', '{}')
-        geo_limits = json.loads(geo_limits_raw) # {geofence_id: limite_velocidad}
+        geo_limits = json.loads(geo_limits_raw)
 
-        # Obtener geocercas de Mapon para validación espacial
         geos_data = []
         try:
             res_geo = requests.get(f"{BASE_URL}/geofence/list.json", params={'key': API_KEY}, timeout=15)
-            geos_data = res_geo.json().get('data', {}).get('geofences', [])
+            data_geo = res_geo.json()
+            inner_geo = data_geo.get('data', data_geo)
+            if isinstance(inner_geo, dict):
+                geos_data = inner_geo.get('geofences', inner_geo.get('list', []))
+            elif isinstance(inner_geo, list):
+                geos_data = inner_geo
         except:
             pass
 
         def obtener_geocerca(lat, lng):
             for g in geos_data:
                 try:
-                    g_lat = float(g.get('lat', 0))
-                    g_lng = float(g.get('lng', 0))
-                    g_radius = float(g.get('radius', 500)) # Metros por defecto
+                    g_lat = float(g.get('lat', g.get('latitude', 0)))
+                    g_lng = float(g.get('lng', g.get('longitude', 0)))
+                    g_radius = float(g.get('radius', 500))
                     dist_m = math.sqrt((lat - g_lat)**2 + (lng - g_lng)**2) * 111000
                     if dist_m <= g_radius:
                         return g
@@ -435,19 +473,18 @@ def generar_excel():
                     current_speed = min(current_speed, t['velocidad']) if t['velocidad'] > 0 else current_speed
                     if current_speed == 0: current_speed = avg_speed
                     
-                    # Evaluar geocerca y velocidad personalizada
                     prog = min((curr_time - t['dt_ini']).total_seconds() / total_seconds, 1.0)
                     curr_lat = t['lat_ini'] + (delta_lat * prog)
                     curr_lng = t['lng_ini'] + (delta_lng * prog)
                     
                     geo_obj = obtener_geocerca(curr_lat, curr_lng)
-                    geo_name = geo_obj['name'] if geo_obj else "Fuera de geocerca"
+                    geo_name = geo_obj.get('name', geo_obj.get('title', 'Zona')) if geo_obj else "Fuera de geocerca"
+                    geo_id_val = str(geo_obj.get('geofence_id', geo_obj.get('id', ''))) if geo_obj else ""
                     
-                    # Verificar límite específico de geocerca si está seleccionada
                     evento = "En movimiento"
                     limite_aplicable = limite_velocidad
-                    if geo_obj and str(geo_obj.get('geofence_id')) in geo_limits:
-                        limite_aplicable = int(geo_limits[str(geo_obj.get('geofence_id'))])
+                    if geo_obj and geo_id_val in geo_limits:
+                        limite_aplicable = int(geo_limits[geo_id_val])
                         if current_speed > limite_aplicable:
                             evento = f"Exceso en {geo_name}"
                     elif current_speed > limite_velocidad:
@@ -465,7 +502,7 @@ def generar_excel():
                     curr_lat = t['lat_ini']
                     curr_lng = t['lng_ini']
                     geo_obj = obtener_geocerca(curr_lat, curr_lng)
-                    geo_name = geo_obj['name'] if geo_obj else "Fuera de geocerca"
+                    geo_name = geo_obj.get('name', geo_obj.get('title', 'Zona')) if geo_obj else "Fuera de geocerca"
 
                     if idle_remaining > 0:
                         interval = 1
