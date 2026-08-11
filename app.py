@@ -67,7 +67,7 @@ HTML_INTERFACE = """
     <div class="card">
         <div class="header">
             <h2>📊 Reporte Ejecutivo Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Sincronizado en tiempo real con API Mapon</p>
+            <p>IDT Tecnologías - Sincronizado y Optimizado para Alta Velocidad</p>
         </div>
         
         <div class="main-container">
@@ -129,7 +129,7 @@ HTML_INTERFACE = """
                 </div>
                 <div class="form-group" id="speed_limits_container"></div>
 
-                <button type="button" class="btn-submit" id="btn_submit" onclick="generarReporte()" disabled>📥 Generar Reporte Ejecutivo</button>
+                <button type="button" class="btn-submit" id="btn_submit" onclick="generarReporte()" disabled>📥 Generar Reporte Rápido</button>
                 <div id="status_msg" class="status-msg"></div>
             </div>
         </div>
@@ -189,7 +189,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⏳ Cruzando polígonos reales y ralentís de Mapon...";
+            status.innerText = "⚡ Descargando datos y procesando con filtro espacial...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -199,7 +199,7 @@ HTML_INTERFACE = """
                 };
             });
 
-            const params = newSearchParams({
+            const params = new URLSearchParams({
                 unit_id: unitId,
                 unit_name: unitText,
                 fecha_inicio: document.getElementById('fecha_inicio').value,
@@ -281,13 +281,12 @@ def api_unidades():
 
 @app.route('/api_geocercas')
 def api_geocercas():
-    # VERSIÓN ESTABLE: Lee los endpoints de forma normal sin bloqueos de paginación
     try:
         endpoints = ['/territory/list.json', '/poi/list.json', '/object/list.json']
         geos_raw = []
         for ep in endpoints:
             try:
-                res = requests.get(f"{BASE_URL}{ep}", params={'key': API_KEY}, timeout=15)
+                res = requests.get(f"{BASE_URL}{ep}", params={'key': API_KEY}, timeout=10)
                 data = res.json()
                 inner = data.get('data', data)
                 if isinstance(inner, dict):
@@ -386,7 +385,7 @@ def generar_excel():
                     else:
                         g_lat = g.get('lat', g.get('latitude'))
                         g_lng = g.get('lng', g.get('longitude'))
-                        g_radius = float(g.get('radius', 150)) # Radio base de 150m si el POI no especifica
+                        g_radius = float(g.get('radius', 150)) 
                         
                         if g_lat is None and 'center' in g:
                             g_lat = g['center'].get('lat')
@@ -406,9 +405,21 @@ def generar_excel():
         def obtener_geocerca(lat, lng, address=""):
             address_str = str(address).lower()
             
-            # Cálculo Matemático Puro (Distancia y Ray-Casting) para Polígonos y Círculos oficiales
+            # FILTRO ESPACIAL DE ALTA VELOCIDAD:
+            # Primero buscamos si el nombre del lugar de Mapon ya está en la dirección
             for g in geos_procesadas:
-                if g.get('type', 'circle') == 'circle' and g.get('lat') is not None and g.get('lng') is not None:
+                if g.get('name') and g['name'].lower() in address_str and "+" not in g['name']:
+                    return g.get('id'), g['name']
+
+            # Si no está en el texto, hacemos matemática SOLO en geocercas cercanas (+- 0.05 grados aprox 5km)
+            tolerancia_grados = 0.05
+            geos_cercanas = [
+                g for g in geos_procesadas 
+                if g.get('lat') and abs(g['lat'] - lat) < tolerancia_grados and abs(g['lng'] - lng) < tolerancia_grados
+            ]
+            
+            for g in geos_cercanas:
+                if g.get('type', 'circle') == 'circle':
                     dist_m = math.sqrt((lat - g['lat'])**2 + (lng - g['lng'])**2) * 111000
                     if dist_m <= g.get('radius', 150):
                         return g.get('id'), g['name']
@@ -427,11 +438,6 @@ def generar_excel():
                         except: pass
                     if inside:
                         return g.get('id'), g['name']
-
-            # Red de seguridad: A veces Mapon inserta el nombre de la granja en la dirección
-            for g in geos_procesadas:
-                if g.get('name') and g['name'].lower() in address_str:
-                    return g.get('id'), g['name']
 
             return None, "Fuera de geocerca"
 
@@ -458,16 +464,18 @@ def generar_excel():
         f_in_api = to_utc_str(f_in, hora_inicio)
         f_fin_api = to_utc_str(f_fin, hora_fin, True)
 
+        # SE INCLUYERON EXPRESAMENTE TERRITORIES Y POIS PARA EL CRUCE DE NOMBRES
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
         params = {
             "key": API_KEY, 
             "unit_id": unit_id.replace("ID:", "").strip(), 
             "from": f_in_api, 
             "till": f_fin_api,
-            "include": "metrics,stops,idles,routes"
+            "include": "metrics,stops,idles,routes,territories,pois"
         }
 
         tramos_reales = []
+        territory_visits = []
         try:
             response = requests.get(url, params=params, timeout=20)
             data = response.json()
@@ -476,7 +484,31 @@ def generar_excel():
             rutas_array = unit_data.get('routes', [])
             idles_array = unit_data.get('idles', [])
             
-            # EL CORAZÓN DEL CÁLCULO PERFECTO DE RALENTÍ
+            # EXTRACCIÓN DE RUTAS MAPON OFICIALES (A prueba de balas)
+            def extract_territories(obj):
+                if isinstance(obj, dict):
+                    t_name = None
+                    if obj.get('type') in ['territory', 'poi']:
+                        t_name = obj.get('name') or obj.get('title')
+                    elif 'territory' in obj and isinstance(obj['territory'], dict):
+                        t_name = obj['territory'].get('name')
+                    elif 'poi' in obj and isinstance(obj['poi'], dict):
+                        t_name = obj['poi'].get('name')
+                        
+                    if t_name and 'start' in obj and 'end' in obj:
+                        s_t = parse_iso(obj.get('start', {}).get('time', obj.get('start_time')))
+                        e_t = parse_iso(obj.get('end', {}).get('time', obj.get('end_time')))
+                        if s_t and e_t:
+                            territory_visits.append({'name': t_name, 'start': s_t, 'end': e_t})
+                    
+                    for k, v in obj.items():
+                        extract_territories(v)
+                elif isinstance(obj, list):
+                    for i in obj:
+                        extract_territories(i)
+
+            extract_territories(data)
+            
             parsed_idles = []
             for idl in idles_array:
                 s_dt = parse_iso(idl.get('start', {}).get('time'))
@@ -512,13 +544,22 @@ def generar_excel():
                 
                 idle_sec = min(idle_sec, duracion_seg)
 
-                geo_id, geo_name = obtener_geocerca(lat_ini, lng_ini, origen)
+                # Prioridad 1: Mapon nos avisó en territories de esta visita
+                geo_name_real = None
+                for tv in territory_visits:
+                    if tv['start'] <= dt_ini <= tv['end'] or tv['start'] <= dt_fin <= tv['end']:
+                        geo_name_real = tv['name']
+                        break
+                
+                # Prioridad 2: Cálculo matemático con Bounding Box
+                if not geo_name_real:
+                    _, geo_name_real = obtener_geocerca(lat_ini, lng_ini, origen)
 
                 tramos_reales.append({
                     'dt_ini': dt_ini, 'dt_fin': dt_fin, 'origen': origen, 'distancia': dist_km,
                     'velocidad': speed, 'lat_ini': lat_ini, 'lng_ini': lng_ini,
                     'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg,
-                    'idle_sec': idle_sec, 'tipo': tipo, 'geo_name': geo_name
+                    'idle_sec': idle_sec, 'tipo': tipo, 'geo_name': geo_name_real
                 })
         except: pass
 
@@ -550,22 +591,22 @@ def generar_excel():
                 curr_lat = t['lat_ini'] + (delta_lat * prog)
                 curr_lng = t['lng_ini'] + (delta_lng * prog)
                 
-                geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, t['origen'])
+                geo_name = t['geo_name']
+                if geo_name == "Fuera de geocerca":
+                    _, geo_name = obtener_geocerca(curr_lat, curr_lng, t['origen'])
                 
                 evento = ""
                 detalle = "-"
                 limite_aplicable = limite_velocidad
                 
                 if geo_name != "Fuera de geocerca":
-                    if geo_id and str(geo_id) in geo_limits:
-                        try: limite_aplicable = int(geo_limits[str(geo_id)]['limit'])
-                        except: pass
-                    else:
-                        for gid, gdata in geo_limits.items():
-                            if gdata['name'].lower() == geo_name.lower():
-                                try: limite_aplicable = int(gdata['limit'])
-                                except: pass
-                                break
+                    matched_limit = False
+                    for gid, gdata in geo_limits.items():
+                        if gdata['name'].lower() == geo_name.lower():
+                            try: limite_aplicable = int(gdata['limit'])
+                            except: pass
+                            matched_limit = True
+                            break
                                 
                     if current_speed > limite_aplicable:
                         evento = f"Exceso en {geo_name}"
@@ -591,7 +632,7 @@ def generar_excel():
             
             curr_time = stop['dt_ini']
             idles_in_stop.sort(key=lambda x: x[0])
-            geo_id, geo_name = obtener_geocerca(stop['lat_ini'], stop['lng_ini'], stop['origen'])
+            geo_name = stop['geo_name']
             
             for i_start, i_end in idles_in_stop:
                 if i_start > curr_time:
