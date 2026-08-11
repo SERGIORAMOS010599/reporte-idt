@@ -8,6 +8,7 @@ import random
 import os
 import json
 import math
+import time
 
 app = Flask(__name__)
 
@@ -18,7 +19,7 @@ API_KEY = "7bd626cb4d3874faf995ec075af15d2cd35ec99d"
 BASE_URL = "https://gps.idttecnologias.mx/api/v1"
 COMPANY_ID = "87534"  # ID de Alimentos Kowi
 TIMEZONE_OFFSET = -7  # Zona horaria de Hermosillo
-DB_FILE = "geocercas_db.json"  # NUESTRA BASE DE DATOS LOCAL
+DB_FILE = "geocercas_db.json"  # BASE DE DATOS LOCAL
 
 HTML_INTERFACE = """
 <!DOCTYPE html>
@@ -62,6 +63,7 @@ HTML_INTERFACE = """
         
         .btn-sync { width: 100%; background: #f39c12; color: white; padding: 10px; border: none; border-radius: 6px; font-weight: bold; font-size: 13px; cursor: pointer; transition: background 0.2s; margin-bottom: 15px; }
         .btn-sync:hover { background: #e67e22; }
+        .btn-sync:disabled { background: #f8c271; cursor: not-allowed; }
         
         .status-msg { font-size: 13px; color: #e67e22; margin-top: 10px; text-align: center; font-weight: bold; }
         .retry-btn { font-size: 11px; color: #007bff; text-decoration: underline; cursor: pointer; margin-left: 8px; }
@@ -89,7 +91,7 @@ HTML_INTERFACE = """
                 <button type="button" class="btn-sync" id="btn_sync" onclick="sincronizarBD()">🔄 1. Sincronizar Geocercas (Mapon -> Base de Datos Local)</button>
                 
                 <div class="form-group">
-                    <label>Buscar / Seleccionar Unidad:</label>
+                    <label>Buscar / Seleccionar Unidad: <span class="retry-btn" onclick="cargarCatalogos()">🔄 Reintentar carga</span></label>
                     <select id="unit_select" style="width: 100%;">
                         <option value="">⏳ Cargando catálogo...</option>
                     </select>
@@ -147,14 +149,14 @@ HTML_INTERFACE = """
             const btnSync = document.getElementById('btn_sync');
             const status = document.getElementById('status_msg');
             btnSync.disabled = true;
-            status.innerText = "⏳ Descargando geocercas de Mapon a la Base de Datos Local... (Puede tardar 1 min)";
+            status.innerText = "⏳ Descargando catálogo masivo (Mapon). Esto puede tardar unos 2 minutos. No cierre la pestaña...";
             
             try {
                 const res = await fetch('/api/sync_db', { method: 'POST' });
                 const data = await res.json();
                 if(data.status === 'ok') {
                     status.innerText = "✅ " + data.message;
-                    cargarCatalogos(); // Recargar el menú visual
+                    cargarCatalogos(); 
                 } else {
                     status.innerText = "❌ Error al sincronizar: " + data.message;
                 }
@@ -221,7 +223,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⚡ Generando reporte (Calculando cruces con BD Local)...";
+            status.innerText = "⚡ Generando reporte y cruzando con BD Local...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -296,7 +298,7 @@ def index():
 @app.route('/api_unidades')
 def api_unidades():
     try:
-        res = requests.get(f"{BASE_URL}/unit/list.json", params={'key': API_KEY}, timeout=15)
+        res = requests.get(f"{BASE_URL}/unit/list.json", params={'key': API_KEY}, timeout=20)
         data = res.json()
         units_raw = data.get('data', {}).get('units', [])
         
@@ -312,11 +314,11 @@ def api_unidades():
         return jsonify([]), 500
 
 # ==========================================
-# EL NUEVO CEREBRO: BASE DE DATOS LOCAL JSON
+# EL NUEVO CEREBRO: BASE DE DATOS LOCAL
+# Paginación pequeña (100) para burlar el límite de Mapon
 # ==========================================
 @app.route('/api/sync_db', methods=['POST'])
 def sync_db():
-    # Este endpoint extrae TODO de Mapon y lo guarda en geocercas_db.json
     try:
         endpoints = ['/territory/list.json', '/poi/list.json']
         geos_db = []
@@ -325,10 +327,15 @@ def sync_db():
         for ep in endpoints:
             offset = 0
             while True:
-                res = requests.get(f"{BASE_URL}{ep}", params={'key': API_KEY, 'limit': 500, 'offset': offset}, timeout=20)
+                # El límite de 100 y timeout de 15 evita que Mapon nos bloquee la IP
+                res = requests.get(f"{BASE_URL}{ep}", params={'key': API_KEY, 'limit': 100, 'offset': offset}, timeout=15)
+                if res.status_code != 200:
+                    break
+                    
                 data = res.json()
                 inner = data.get('data', data)
                 items = []
+                
                 if isinstance(inner, dict):
                     for k in ['territories', 'pois', 'list', 'items']:
                         if k in inner: items.extend(inner[k])
@@ -370,8 +377,9 @@ def sync_db():
                             geos_db.append(geo_obj)
                             vistos.add(g_name)
                             
-                if len(items) < 500: break
-                offset += 500
+                if len(items) < 100: break
+                offset += 100
+                time.sleep(0.5) # Respiro para el servidor de Mapon
                 
         with open(DB_FILE, 'w', encoding='utf-8') as f:
             json.dump(geos_db, f, ensure_ascii=False, indent=2)
@@ -382,7 +390,6 @@ def sync_db():
 
 @app.route('/api_geocercas_locales')
 def api_geocercas_locales():
-    # Lee los nombres rápido para el menú
     try:
         if not os.path.exists(DB_FILE): return jsonify([])
         with open(DB_FILE, 'r', encoding='utf-8') as f:
@@ -421,7 +428,7 @@ def generar_excel():
             if not h: return "23:59:59" if es_fin else "00:00:00"
             return h if len(h) == 8 else h + ":00"
 
-        # CARGAR GEOCERCAS DESDE LA BASE DE DATOS LOCAL (AL INSTANTE)
+        # LECTURA A LA VELOCIDAD DE LA LUZ DESDE BD LOCAL
         geos_procesadas = []
         try:
             if os.path.exists(DB_FILE):
@@ -432,12 +439,12 @@ def generar_excel():
         def obtener_geocerca(lat, lng, address=""):
             address_str = str(address).lower()
             
-            # FILTRO ESPACIAL RÁPIDO (Bounding Box de 0.05 grados aprox 5km)
+            # FILTRO ESPACIAL RÁPIDO (Bounding Box)
             tolerancia_grados = 0.05
             geos_cercanas = [
                 g for g in geos_procesadas 
                 if (g.get('lat') and abs(g['lat'] - lat) < tolerancia_grados and abs(g['lng'] - lng) < tolerancia_grados)
-                or g.get('type') == 'polygon' # Los polígonos los revisamos siempre
+                or g.get('type') == 'polygon'
             ]
             
             for g in geos_cercanas:
@@ -461,7 +468,6 @@ def generar_excel():
                     if inside:
                         return g.get('id'), g['name']
 
-            # Red de seguridad textual
             for g in geos_procesadas:
                 if g.get('name') and g['name'].lower() in address_str and "+" not in g['name']:
                     return g.get('id'), g['name']
@@ -491,7 +497,6 @@ def generar_excel():
         f_in_api = to_utc_str(f_in, hora_inicio)
         f_fin_api = to_utc_str(f_fin, hora_fin, True)
 
-        # DESCARGAMOS ÚNICAMENTE LA RUTA DEL CAMIÓN
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
         params = {
             "key": API_KEY, 
@@ -503,7 +508,7 @@ def generar_excel():
 
         tramos_reales = []
         try:
-            response = requests.get(url, params=params, timeout=20)
+            response = requests.get(url, params=params, timeout=25)
             data = response.json()
             
             unit_data = data.get('data', {}).get('units', [])[0] if data.get('data', {}).get('units') else {}
@@ -535,7 +540,6 @@ def generar_excel():
                 speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
                 tipo = str(item.get('type', '')).lower()
                 
-                # CRUCE EXACTO DEL RALENTÍ
                 idle_sec = 0.0
                 if tipo == 'stop':
                     for i_start, i_end in parsed_idles:
@@ -546,7 +550,6 @@ def generar_excel():
                 
                 idle_sec = min(idle_sec, duracion_seg)
 
-                # CRUCE CON BASE DE DATOS LOCAL
                 geo_id, geo_name = obtener_geocerca(lat_ini, lng_ini, origen)
 
                 tramos_reales.append({
