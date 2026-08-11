@@ -17,13 +17,16 @@ app = Flask(__name__)
 API_KEY = "7bd626cb4d3874faf995ec075af15d2cd35ec99d"
 BASE_URL = "https://gps.idttecnologias.mx/api/v1"
 COMPANY_ID = "87534"  # ID de Alimentos Kowi
-TIMEZONE_OFFSET = -7  # Zona horaria de Hermosillo, Sonora (UTC-7)
-FILTRO_TEXTO = ""     # Si deseas filtrar el menú por alguna palabra
+TIMEZONE_OFFSET = -7  # Zona horaria de Hermosillo (UTC-7)
+FILTRO_TEXTO = ""
 
-# CATÁLOGO VIRTUAL DE GEOCERCAS (Coordenadas ajustadas milimétricamente al GPS)
+# ==========================================
+# CATÁLOGO DE GEOCERCAS VIRTUALES EXCLUVISAS
+# (Coordenadas extraídas de los reportes oficiales)
+# ==========================================
 GEOCERCAS_LOCALES = [
-    {"id": "VIRT_1", "name": "nutrikowi", "lat": 27.1925, "lng": -109.5521, "radius": 250, "type": "circle"},
-    {"id": "VIRT_2", "name": "nutrikowi guaymas", "lat": 28.0363, "lng": -110.9223, "radius": 250, "type": "circle"}
+    {"id": "VIRT_1", "name": "nutrikowi", "lat": 27.1922, "lng": -109.5530, "radius": 200, "type": "circle"},
+    {"id": "VIRT_2", "name": "hermosillo grnjas dentro del v aliente", "lat": 28.9928, "lng": -111.2181, "radius": 200, "type": "circle"}
 ]
 # ==========================================
 
@@ -74,7 +77,7 @@ HTML_INTERFACE = """
     <div class="card">
         <div class="header">
             <h2>📊 Reporte Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Motor Híbrido de Geocercas (Sincronizado a UTC-7)</p>
+            <p>IDT Tecnologías - Sincronización Automática con Geocercas</p>
         </div>
         
         <div class="main-container">
@@ -196,7 +199,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⏳ Descargando ruta y escaneando zonas horarias...";
+            status.innerText = "⏳ Cruzando datos y procesando reporte automático...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -233,7 +236,7 @@ HTML_INTERFACE = """
                 const errorDetail = await res.text();
                 console.error("Error backend:", errorDetail);
                 alert("Error de Python: " + errorDetail);
-                status.innerText = "Error en la generación. Revisa la alerta.";
+                status.innerText = "Error en la generación.";
             }
             btn.disabled = false;
         }
@@ -344,7 +347,6 @@ def api_geocercas():
 @app.route('/generar_excel')
 def generar_excel():
     try:
-        # 1. RECEPCIÓN SEGURA DE PARÁMETROS
         unit_id = request.args.get('unit_id', '868807')
         if "ID:" in unit_id:
             unit_id = unit_id.split("ID:")[1].replace(")", "").strip()
@@ -364,7 +366,6 @@ def generar_excel():
         try: geo_limits = json.loads(geo_limits_raw)
         except: geo_limits = {}
 
-        # RE-INCORPORACIÓN DE LAS FUNCIONES DE FORMATO PARA EL EXCEL
         def normalizar_fecha(f):
             return f if f else '2026-08-09'
 
@@ -372,7 +373,6 @@ def generar_excel():
             if not h: return "23:59:59" if es_fin else "00:00:00"
             return h if len(h) == 8 else h + ":00"
 
-        # 2. CARGA DE GEOCERCAS VIRTUALES Y DE MAPON
         geos_procesadas = list(GEOCERCAS_LOCALES)
         
         try:
@@ -396,12 +396,14 @@ def generar_excel():
                         
                     g_id = str(g.get('territory_id', g.get('poi_id', g.get('object_id', g.get('id', '')))))
                     g_name = str(g.get('name', g.get('title', 'Geocerca')))
-                    g_type = g.get('type', 'circle').lower()
+                    g_type = str(g.get('type', 'circle')).lower()
                     
-                    if g_type == 'polygon' and 'points' in g:
-                        geos_procesadas.append({
-                            'id': g_id, 'name': g_name, 'type': 'polygon', 'points': g['points']
-                        })
+                    if g_type == 'polygon' or 'points' in g:
+                        pts = g.get('points', [])
+                        if pts:
+                            geos_procesadas.append({
+                                'id': g_id, 'name': g_name, 'type': 'polygon', 'points': pts
+                            })
                     else:
                         g_lat = g.get('lat', g.get('latitude'))
                         g_lng = g.get('lng', g.get('longitude'))
@@ -423,9 +425,6 @@ def generar_excel():
             pass
 
         def obtener_geocerca(lat, lng, address):
-            address_str = str(address).lower()
-            
-            # Validación matemática robusta
             for g in geos_procesadas:
                 if g.get('type', 'circle') == 'circle' and g.get('lat') is not None and g.get('lng') is not None:
                     dist_m = math.sqrt((lat - g['lat'])**2 + (lng - g['lng'])**2) * 111000
@@ -447,9 +446,11 @@ def generar_excel():
                     if inside:
                         return g.get('id'), g['name']
 
+            if address and "+" not in address and "," not in address and "Zona Operativa" not in address:
+                return "GEO_API", address.strip()
+
             return None, "Fuera de geocerca"
 
-        # 3. CONVERSIÓN DE HORAS PARA LA API
         def to_utc_str(date_str, time_str, is_end=False):
             if not date_str: date_str = "2026-08-09"
             if not time_str: time_str = "23:59:59" if is_end else "00:00:00"
@@ -649,7 +650,6 @@ def generar_excel():
         tiempo_mov_seg = 0
         tiempo_ral_seg = 0
         tiempo_apagado_seg = 0
-        tiempo_exceso_geo_seg = 0
         
         for i in range(len(filas_finales)):
             f_actual = filas_finales[i]
@@ -662,15 +662,11 @@ def generar_excel():
             if f_actual['score'] in [2, 3]: tiempo_mov_seg += duracion
             elif f_actual['score'] in [4, 5]: tiempo_ral_seg += duracion
             else: tiempo_apagado_seg += duracion
-            
-            if "Exceso en" in f_actual['evento']:
-                tiempo_exceso_geo_seg += duracion
 
         def calc_hrs_mins(segundos): return int(segundos // 3600), int((segundos % 3600) // 60)
         mov_hrs, mov_mins = calc_hrs_mins(tiempo_mov_seg)
         ral_hrs, ral_mins = calc_hrs_mins(tiempo_ral_seg)
         muerto_hrs, muerto_mins = calc_hrs_mins(tiempo_apagado_seg)
-        exceso_geo_hrs, exceso_geo_mins = calc_hrs_mins(tiempo_exceso_geo_seg)
 
         total_segundos = tiempo_mov_seg + tiempo_ral_seg + tiempo_apagado_seg
         porc_mov = round((tiempo_mov_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
@@ -712,8 +708,6 @@ def generar_excel():
         ws.cell(row=7, column=2, value=f"{round(prom_vel, 1)} km/h")
         ws.cell(row=7, column=3, value="Tiempo en Ralentí:").font = Font(bold=True)
         ws.cell(row=7, column=4, value=f"{ral_hrs} hrs {ral_mins} mins ({porc_ral}%)").font = Font(color="FF0000")
-        ws.cell(row=7, column=5, value="Exceso en Geocercas:").font = Font(bold=True)
-        ws.cell(row=7, column=6, value=f"{exceso_geo_hrs} hrs {exceso_geo_mins} mins").font = Font(color="FF0000", bold=True)
 
         ws.cell(row=8, column=1, value="Costo Combustible:").font = Font(bold=True)
         ws.cell(row=8, column=3, value="Horas de Motor (Trabajo):").font = Font(bold=True)
