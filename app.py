@@ -16,14 +16,7 @@ app = Flask(__name__)
 # ==========================================
 API_KEY = "7bd626cb4d3874faf995ec075af15d2cd35ec99d"
 BASE_URL = "https://gps.idttecnologias.mx/api/v1"
-COMPANY_ID = "87534"  # ID de Alimentos Kowi (Filtro para unidades y geocercas)
-FILTRO_TEXTO = ""     # Si deseas filtrar el menú por alguna palabra, ponla aquí
-
-# CATÁLOGO VIRTUAL DE RESPALDO (Por si la API oculta las coordenadas de estas zonas)
-GEOCERCAS_LOCALES = [
-    {"name": "nutrikowi", "lat": 27.192, "lng": -109.552, "radius": 300},
-    {"name": "nutrikowi guaymas", "lat": 28.036, "lng": -110.921, "radius": 300},
-]
+COMPANY_ID = "87534"  # ID de Alimentos Kowi
 # ==========================================
 
 HTML_INTERFACE = """
@@ -129,11 +122,10 @@ HTML_INTERFACE = """
                     </div>
                 </div>
 
-                <!-- SELECTOR MÚLTIPLE DE GEOCERCAS RESTAURADO -->
                 <div class="form-group">
                     <label>Geocercas (Selecciona para asignar límite de velocidad estricto):</label>
                     <select id="geofence_select" multiple="multiple" style="width: 100%;">
-                        <option value="">⏳ Cargando geocercas...</option>
+                        <option value="">⏳ Cargando geocercas reales...</option>
                     </select>
                 </div>
                 <div class="form-group" id="speed_limits_container"></div>
@@ -156,7 +148,7 @@ HTML_INTERFACE = """
 
                 const selectUnit = $('#unit_select');
                 selectUnit.empty().append(new Option('🔍 Escribe para buscar unidad...', ''));
-                units.forEach(u => selectUnit.append(new Option(`${u.label || ''} ${u.number || ''} (ID: ${u.unit_id})`.trim(), u.unit_id)));
+                units.forEach(u => selectUnit.append(new Option(`${u.label || ''} ${u.number || ''}`.trim(), u.unit_id)));
                 selectUnit.select2({ placeholder: "🔍 Escribe para buscar unidad...", width: '100%' });
 
                 const selectGeo = $('#geofence_select');
@@ -164,7 +156,7 @@ HTML_INTERFACE = """
                 geos.forEach(g => {
                     selectGeo.append(new Option(g.name, g.geofence_id));
                 });
-                selectGeo.select2({ placeholder: "Opcional: Filtrar límites por zona...", width: '100%' });
+                selectGeo.select2({ placeholder: "Buscar geocerca para límite personalizado...", width: '100%' });
 
                 $('#btn_submit').prop('disabled', false);
                 $('#status_msg').text("");
@@ -198,7 +190,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⏳ Cruzando datos GPS con polígonos de geocercas...";
+            status.innerText = "⏳ Cruzando recorrido con polígonos reales de geocercas...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -291,6 +283,7 @@ def api_unidades():
 @app.route('/api_geocercas')
 def api_geocercas():
     try:
+        # CONSULTA CORREGIDA A OBJECTS COMO TÚ DESCUBRISTE
         res = requests.get(f"{BASE_URL}/object/list.json", params={'key': API_KEY}, timeout=15)
         data = res.json()
         
@@ -315,9 +308,6 @@ def api_geocercas():
                 
             g_id = str(g.get('object_id', g.get('id', '')))
             g_name = str(g.get('name', g.get('title', 'Geocerca')))
-            
-            if FILTRO_TEXTO and FILTRO_TEXTO.lower() not in g_name.lower():
-                continue
 
             if g_id and g_id != 'None':
                 geos_normalizadas.append({
@@ -348,10 +338,8 @@ def generar_excel():
         geo_limits_raw = request.args.get('geos', '{}')
         geo_limits = json.loads(geo_limits_raw)
 
-        # 1. Agregamos el Catálogo Virtual de Respaldo
-        geos_procesadas = list(GEOCERCAS_LOCALES)
-        
-        # 2. Descargamos y filtramos las de Mapon para sumar al radar
+        # 1. DESCARGAMOS EL CATÁLOGO REAL DE OBJETOS/GEOCERCAS DE KOWI
+        geos_procesadas = []
         try:
             res_geo = requests.get(f"{BASE_URL}/object/list.json", params={'key': API_KEY}, timeout=15)
             data_geo = res_geo.json()
@@ -378,7 +366,7 @@ def generar_excel():
                 
                 g_lat = g.get('lat', g.get('latitude'))
                 g_lng = g.get('lng', g.get('longitude'))
-                g_radius = float(g.get('radius', 500))
+                g_radius = float(g.get('radius', 100))
                 g_type = g.get('type', 'circle').lower()
                 
                 if g_type == 'polygon' and 'points' in g:
@@ -395,7 +383,7 @@ def generar_excel():
                             try:
                                 g_lat = sum(float(p.get('lat',0)) for p in pts) / len(pts)
                                 g_lng = sum(float(p.get('lng',0)) for p in pts) / len(pts)
-                                g_radius = 1000
+                                g_radius = 500
                             except: pass
 
                     lat_v = float(g_lat) if g_lat is not None else None
@@ -409,10 +397,12 @@ def generar_excel():
         except:
             pass
 
-        def obtener_geocerca(lat, lng, address):
-            address_str = str(address).lower()
-            
-            # Validación geométrica estricta
+        def obtener_geocerca(lat, lng, route_segment_geo_name=None):
+            # A) Si la API ya nos devolvió el nombre de la geocerca dentro del tramo, ¡lo usamos directo!
+            if route_segment_geo_name and route_segment_geo_name != "None":
+                return "GEO_API", route_segment_geo_name
+
+            # B) Si no nos lo dio, usamos la matemática de polígonos/radios
             for g in geos_procesadas:
                 if g.get('type', 'circle') == 'circle' and g.get('lat') is not None and g.get('lng') is not None:
                     dist_m = math.sqrt((lat - g['lat'])**2 + (lng - g['lng'])**2) * 111000
@@ -434,10 +424,6 @@ def generar_excel():
                     if inside:
                         return g.get('id', 'VIRTUAL'), g['name']
             
-            # Heurística para geocercas no mapeadas con coordenadas, pero reportadas en el texto de Mapon
-            if address and "+" not in address and "," not in address and "Zona Operativa" not in address:
-                return "GEO_API", address.strip()
-
             return None, "Fuera de geocerca"
 
         def normalizar_fecha(f):
@@ -449,13 +435,14 @@ def generar_excel():
         f_in_api = f"{normalizar_fecha(f_in)}T{normalizar_hora(hora_inicio)}Z"
         f_fin_api = f"{normalizar_fecha(f_fin)}T{normalizar_hora(hora_fin, True)}Z"
 
+        # LA LLAMADA MAESTRA: Se incluye objects y geozones para que la API suelte los nombres reales
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
         params = {
             "key": API_KEY, 
             "unit_id": unit_id, 
             "from": f_in_api, 
             "till": f_fin_api,
-            "include": "metrics,stops,idles,routes"
+            "include": "metrics,stops,idles,routes,objects,geozones,territories"
         }
 
         def parse_iso(iso_str):
@@ -505,9 +492,18 @@ def generar_excel():
                     
                 if not dt_ini: continue
 
-                origen = str(item.get('start', {}).get('address', item.get('start_address', 'Zona Operativa')))
-                lat_ini = float(item.get('start', {}).get('lat', item.get('start_lat', 27.19)))
-                lng_ini = float(item.get('start', {}).get('lng', item.get('start_lng', -109.55)))
+                # Extraemos el nombre de la geocerca si la API lo manda directo
+                start_obj = item.get('start', {})
+                geo_from_api = start_obj.get('object_name', start_obj.get('object', start_obj.get('geozone', start_obj.get('territory'))))
+                
+                origen = str(start_obj.get('address', item.get('start_address', 'Zona Operativa')))
+                
+                # Heurística final: si Mapon manda "nutrikowi" como origen en vez de la calle
+                if not geo_from_api and origen and "+" not in origen and "," not in origen and "Zona" not in origen:
+                    geo_from_api = origen
+
+                lat_ini = float(start_obj.get('lat', item.get('start_lat', 27.19)))
+                lng_ini = float(start_obj.get('lng', item.get('start_lng', -109.55)))
                 lat_fin = float(item.get('end', {}).get('lat', item.get('end_lat', lat_ini)))
                 lng_fin = float(item.get('end', {}).get('lng', item.get('end_lng', lng_ini)))
                 
@@ -535,7 +531,7 @@ def generar_excel():
                     'dt_ini': dt_ini, 'dt_fin': dt_fin, 'origen': origen, 'distancia': dist_km,
                     'velocidad': speed, 'lat_ini': lat_ini, 'lng_ini': lng_ini,
                     'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg,
-                    'idle_sec': idle_sec, 'tipo': tipo
+                    'idle_sec': idle_sec, 'tipo': tipo, 'geo_api': geo_from_api
                 })
         except: pass
 
@@ -561,13 +557,12 @@ def generar_excel():
                     curr_lat = t['lat_ini'] + (delta_lat * prog)
                     curr_lng = t['lng_ini'] + (delta_lng * prog)
                     
-                    geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, t['origen'])
+                    geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, t['geo_api'])
                     
                     evento = "En movimiento"
                     limite_aplicable = limite_velocidad
                     
                     if geo_name != "Fuera de geocerca":
-                        # Verificar si tiene límite de velocidad seleccionado en UI
                         if geo_id and str(geo_id) in geo_limits:
                             limite_aplicable = int(geo_limits[str(geo_id)]['limit'])
                         else:
@@ -592,7 +587,7 @@ def generar_excel():
                 while curr_time <= end_time:
                     curr_lat = t['lat_ini']
                     curr_lng = t['lng_ini']
-                    geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, t['origen'])
+                    geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, t['geo_api'])
 
                     if idle_remaining > 0:
                         interval = 1
