@@ -16,8 +16,8 @@ app = Flask(__name__)
 # ==========================================
 API_KEY = "7bd626cb4d3874faf995ec075af15d2cd35ec99d"
 BASE_URL = "https://gps.idttecnologias.mx/api/v1"
-COMPANY_ID = "87534"  # ID de Alimentos Kowi
-TIMEZONE_OFFSET = -7  # Zona horaria de Hermosillo (UTC-7)
+COMPANY_ID = "87534"  
+TIMEZONE_OFFSET = -7  
 FILTRO_TEXTO = ""
 
 HTML_INTERFACE = """
@@ -189,7 +189,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⏳ Generando reporte validado desde API de Mapon...";
+            status.innerText = "⏳ Extrayendo lista paginada y cruzando coordenadas...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -282,11 +282,12 @@ def api_unidades():
 @app.route('/api_geocercas')
 def api_geocercas():
     try:
-        endpoints = ['/territory/list.json', '/poi/list.json', '/object/list.json']
         geos_raw = []
+        # Para evitar el limite de paginacion, iteramos con limit grande si fuera posible, pero usamos las llamadas multiples estándar
+        endpoints = ['/territory/list.json?limit=999', '/poi/list.json?limit=999', '/object/list.json?limit=999']
         for ep in endpoints:
             try:
-                res = requests.get(f"{BASE_URL}{ep}", params={'key': API_KEY}, timeout=5)
+                res = requests.get(f"{BASE_URL}{ep}", params={'key': API_KEY}, timeout=10)
                 data = res.json()
                 inner = data.get('data', data)
                 if isinstance(inner, dict):
@@ -298,11 +299,8 @@ def api_geocercas():
             except: pass
 
         geos_normalizadas = []
+        vistos = set()
         
-        # AGREGAMOS 2 GEOCERCAS CLAVE COMO "SALVAVIDAS DE SEGURIDAD" PORQUE LA API DE MAPON FALLA AL DESCARGAR POLÍGONOS PESADOS
-        geos_normalizadas.append({'geofence_id': 'VIRT_1', 'name': 'nutrikowi'})
-        geos_normalizadas.append({'geofence_id': 'VIRT_2', 'name': 'hermosillo grnjas dentro del v aliente'})
-
         for g in geos_raw:
             c_id = str(g.get('company_id', ''))
             if c_id and c_id != COMPANY_ID:
@@ -314,21 +312,15 @@ def api_geocercas():
             if FILTRO_TEXTO and FILTRO_TEXTO.lower() not in g_name.lower():
                 continue
 
-            if g_id and g_id != 'None':
+            if g_id and g_id != 'None' and g_name not in vistos:
+                vistos.add(g_name)
                 geos_normalizadas.append({
                     'geofence_id': g_id,
                     'name': g_name
                 })
                 
-        vistos = set()
-        finales = []
-        for g in geos_normalizadas:
-            if g['name'] not in vistos:
-                vistos.add(g['name'])
-                finales.append(g)
-                
-        finales.sort(key=lambda x: x['name'])
-        return jsonify(finales)
+        geos_normalizadas.sort(key=lambda x: x['name'])
+        return jsonify(geos_normalizadas)
     except: 
         return jsonify([]), 500
 
@@ -360,16 +352,12 @@ def generar_excel():
             if not h: return "23:59:59" if es_fin else "00:00:00"
             return h if len(h) == 8 else h + ":00"
 
-        # LECTURA SEGURA DE GEOCERCAS (API MAPON + SALVAVIDAS LOCAL)
-        geos_procesadas = [
-            {"id": "VIRT_1", "name": "nutrikowi", "lat": 27.1922, "lng": -109.5530, "radius": 200, "type": "circle"},
-            {"id": "VIRT_2", "name": "hermosillo grnjas dentro del v aliente", "lat": 28.9928, "lng": -111.2181, "radius": 200, "type": "circle"}
-        ]
-        
+        # LECTURA COMPLETA DE GEOCERCAS SUPERANDO LA PAGINACIÓN
+        geos_procesadas = []
         try:
-            endpoints = ['/territory/list.json', '/poi/list.json', '/object/list.json']
+            endpoints = ['/territory/list.json?limit=999', '/poi/list.json?limit=999', '/object/list.json?limit=999']
             for ep in endpoints:
-                res_geo = requests.get(f"{BASE_URL}{ep}", params={'key': API_KEY}, timeout=5)
+                res_geo = requests.get(f"{BASE_URL}{ep}", params={'key': API_KEY}, timeout=10)
                 data_geo = res_geo.json()
                 inner = data_geo.get('data', data_geo)
                 geos_raw = []
@@ -398,7 +386,7 @@ def generar_excel():
                     else:
                         g_lat = g.get('lat', g.get('latitude'))
                         g_lng = g.get('lng', g.get('longitude'))
-                        g_radius = float(g.get('radius', 100))
+                        g_radius = float(g.get('radius', 150)) # Ajustado a 150m para tolerancia de GPS
                         
                         if g_lat is None and 'center' in g:
                             g_lat = g['center'].get('lat')
@@ -416,11 +404,12 @@ def generar_excel():
             pass
 
         def obtener_geocerca(lat, lng, address=""):
-            address_str = str(address).lower()
+            # BUSCADOR INVERSO POTENCIADO:
+            # 1. Comprueba la matemática pura de las coordenadas.
             for g in geos_procesadas:
                 if g.get('type', 'circle') == 'circle' and g.get('lat') is not None and g.get('lng') is not None:
                     dist_m = math.sqrt((lat - g['lat'])**2 + (lng - g['lng'])**2) * 111000
-                    if dist_m <= g.get('radius', 100):
+                    if dist_m <= g.get('radius', 150):
                         return g.get('id'), g['name']
                 elif g.get('type') == 'polygon':
                     x, y = lng, lat
@@ -438,8 +427,12 @@ def generar_excel():
                     if inside:
                         return g.get('id'), g['name']
 
-            if address and "+" not in address and "," not in address and "Zona Operativa" not in address:
-                return "GEO_API", address.strip()
+            # 2. Si las coordenadas fallan, revisa si Mapon incrustó el nombre en la dirección
+            # Mapon a veces devuelve la dirección así: "entrada a gk 4 (1), Sonora, Mexico"
+            for g in geos_procesadas:
+                if g.get('name') and g['name'].lower() in str(address).lower():
+                    return g.get('id'), g['name']
+
             return None, "Fuera de geocerca"
 
         def to_utc_str(date_str, time_str, is_end=False):
@@ -476,13 +469,20 @@ def generar_excel():
 
         tramos_reales = []
         try:
-            response = requests.get(url, params=params, timeout=15)
+            response = requests.get(url, params=params, timeout=20)
             data = response.json()
             
             unit_data = data.get('data', {}).get('units', [])[0] if data.get('data', {}).get('units') else {}
             rutas_array = unit_data.get('routes', [])
+            idles_array = unit_data.get('idles', [])
             
-            # EXTRACCIÓN REAL DE RALENTÍ DESDE METRICS (COMO LO HACE MAPON)
+            parsed_idles = []
+            for idl in idles_array:
+                s_dt = parse_iso(idl.get('start', {}).get('time'))
+                e_dt = parse_iso(idl.get('end', {}).get('time'))
+                if s_dt and e_dt:
+                    parsed_idles.append((s_dt, e_dt))
+
             for item in rutas_array:
                 dt_ini = parse_iso(item.get('start', {}).get('time'))
                 dt_fin = parse_iso(item.get('end', {}).get('time'))
@@ -501,24 +501,16 @@ def generar_excel():
                 speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
                 tipo = str(item.get('type', '')).lower()
                 
-                # LECTURA 100% FIEL A LA API DE MAPON
                 idle_sec = 0.0
-                if tipo == 'idle':
-                    idle_sec = duracion_seg
-                else:
-                    metrics = item.get('metrics', {})
-                    if isinstance(metrics, dict):
-                        for k, v in metrics.items():
-                            if 'idle' in str(k).lower():
-                                try: idle_sec = max(idle_sec, float(v))
-                                except: pass
-                    
-                    # Heurística final solo si el reporte está vacío de idles
-                    if idle_sec == 0 and tipo == 'stop' and duracion_seg > 0:
-                        if duracion_seg <= (min_ralenti * 60) + 180:
-                            idle_sec = duracion_seg
-
+                if tipo == 'stop':
+                    for i_start, i_end in parsed_idles:
+                        overlap_start = max(dt_ini, i_start)
+                        overlap_end = min(dt_fin, i_end)
+                        if overlap_end > overlap_start:
+                            idle_sec += (overlap_end - overlap_start).total_seconds()
+                
                 idle_sec = min(idle_sec, duracion_seg)
+
                 geo_id, geo_name = obtener_geocerca(lat_ini, lng_ini, origen)
 
                 tramos_reales.append({
@@ -536,7 +528,7 @@ def generar_excel():
         tiempo_apagado_seg = 0
         
         list_routes = [t for t in tramos_reales if t['tipo'] == 'route']
-        list_stops = [t for t in tramos_reales if t['tipo'] in ['stop', 'idle']]
+        list_stops = [t for t in tramos_reales if t['tipo'] == 'stop']
 
         for t in list_routes:
             tiempo_mov_seg += t['duracion']
@@ -588,53 +580,54 @@ def generar_excel():
                 })
                 curr_time += timedelta(minutes=1)
 
-        # LECTURA DIRECTA DE PARADAS
         for stop in list_stops:
-            duracion_total_mins = int(stop['duracion'] // 60)
-            duracion_idle_mins = int(stop['idle_sec'] // 60)
-            duracion_apagado_mins = duracion_total_mins - duracion_idle_mins
-
-            tiempo_ral_seg += stop['idle_sec']
-            tiempo_apagado_seg += (stop['duracion'] - stop['idle_sec'])
-
-            if duracion_idle_mins > 0:
-                filas_brutas.append({
-                    'fecha': stop['dt_ini'], 'origen': stop['origen'], 'velocidad': 0,
-                    'evento': 'Inicio de Ralentí', 'detalle': f"Detenido: {duracion_idle_mins} mins", 
-                    'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': stop['geo_name']
-                })
+            idles_in_stop = []
+            for i_start, i_end in parsed_idles:
+                overlap_start = max(stop['dt_ini'], i_start)
+                overlap_end = min(stop['dt_fin'], i_end)
+                if overlap_end > overlap_start:
+                    idles_in_stop.append((overlap_start, overlap_end))
+            
+            curr_time = stop['dt_ini']
+            idles_in_stop.sort(key=lambda x: x[0])
+            
+            for i_start, i_end in idles_in_stop:
+                if i_start > curr_time:
+                    dur_ap = (i_start - curr_time).total_seconds()
+                    if dur_ap >= 60:
+                        filas_brutas.append({
+                            'fecha': curr_time, 'origen': stop['origen'], 'velocidad': 0,
+                            'evento': 'Motor apagado', 'detalle': f"Apagado: {int(dur_ap//60)} mins", 
+                            'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': stop['geo_name']
+                        })
+                        tiempo_apagado_seg += dur_ap
                 
-                fin_ralenti_time = stop['dt_ini'] + timedelta(minutes=duracion_idle_mins)
-                
-                if duracion_apagado_mins > 0:
+                dur_id = (i_end - i_start).total_seconds()
+                if dur_id >= 60:
                     filas_brutas.append({
-                        'fecha': fin_ralenti_time, 'origen': stop['origen'], 'velocidad': 0,
-                        'evento': 'Motor apagado', 'detalle': f"Apagado: {duracion_apagado_mins} mins", 
+                        'fecha': i_start, 'origen': stop['origen'], 'velocidad': 0,
+                        'evento': 'Inicio de Ralentí', 'detalle': f"Detenido: {int(dur_id//60)} mins", 
                         'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': stop['geo_name']
                     })
+                    tiempo_ral_seg += dur_id
+                    
+                curr_time = max(curr_time, i_end)
+                
+            if curr_time < stop['dt_fin']:
+                dur_ap = (stop['dt_fin'] - curr_time).total_seconds()
+                if dur_ap >= 60:
                     filas_brutas.append({
-                        'fecha': stop['dt_fin'], 'origen': stop['origen'], 'velocidad': 0,
-                        'evento': 'Motor encendido', 'detalle': "-", 
-                        'lat': stop['lat_fin'], 'lng': stop['lng_fin'], 'geocerca': stop['geo_name']
-                    })
-                else:
-                    filas_brutas.append({
-                        'fecha': stop['dt_fin'], 'origen': stop['origen'], 'velocidad': 0,
-                        'evento': 'Fin de Ralentí', 'detalle': "-", 
-                        'lat': stop['lat_fin'], 'lng': stop['lng_fin'], 'geocerca': stop['geo_name']
-                    })
-            else:
-                if duracion_apagado_mins > 0:
-                    filas_brutas.append({
-                        'fecha': stop['dt_ini'], 'origen': stop['origen'], 'velocidad': 0,
-                        'evento': 'Motor apagado', 'detalle': f"Apagado: {duracion_apagado_mins} mins", 
+                        'fecha': curr_time, 'origen': stop['origen'], 'velocidad': 0,
+                        'evento': 'Motor apagado', 'detalle': f"Apagado: {int(dur_ap//60)} mins", 
                         'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': stop['geo_name']
                     })
-                    filas_brutas.append({
-                        'fecha': stop['dt_fin'], 'origen': stop['origen'], 'velocidad': 0,
-                        'evento': 'Motor encendido', 'detalle': "-", 
-                        'lat': stop['lat_fin'], 'lng': stop['lng_fin'], 'geocerca': stop['geo_name']
-                    })
+                    tiempo_apagado_seg += dur_ap
+            
+            filas_brutas.append({
+                'fecha': stop['dt_fin'], 'origen': stop['origen'], 'velocidad': 0,
+                'evento': 'Motor encendido', 'detalle': "-", 
+                'lat': stop['lat_fin'], 'lng': stop['lng_fin'], 'geocerca': stop['geo_name']
+            })
 
         filas_brutas.sort(key=lambda x: x['fecha'])
         vistos = set()
