@@ -108,7 +108,7 @@ HTML_INTERFACE = """
 
                 <div class="form-row">
                     <div class="form-group">
-                        <label>Límite Velocidad Gral (km/h):</label>
+                        <label>Límite Velocidad General (km/h):</label>
                         <input type="number" id="limite_velocidad" value="80" min="1" max="150" required>
                     </div>
                     <div class="form-group">
@@ -117,13 +117,14 @@ HTML_INTERFACE = """
                     </div>
                 </div>
 
-                <!-- SELECTOR DE GEOCERCAS RESTAURADO Y BLINDADO -->
+                <!-- ¡AQUÍ ESTÁ EL SELECTOR MÚLTIPLE DE GEOCERCAS! -->
                 <div class="form-group">
                     <label>Geocercas para validar exceso de velocidad:</label>
                     <select id="geofence_select" multiple="multiple" style="width: 100%;">
                         <option value="">⏳ Cargando geocercas...</option>
                     </select>
                 </div>
+                <!-- Los cuadros de límite de velocidad aparecerán dentro de este contenedor automáticamente -->
                 <div class="form-group" id="speed_limits_container"></div>
 
                 <button type="button" class="btn-submit" id="btn_submit" onclick="generarReporte()" disabled>📥 Generar y Descargar Excel</button>
@@ -161,6 +162,7 @@ HTML_INTERFACE = """
             }
         }
 
+        // Esta función "dibuja" los límites dinámicos cuando seleccionas una geocerca
         $('#geofence_select').on('change', function() {
             const container = $('#speed_limits_container');
             const selected = $(this).select2('data');
@@ -188,6 +190,7 @@ HTML_INTERFACE = """
             btn.disabled = true;
             status.innerText = "⏳ Generando reporte...";
 
+            // Recolectar límites personalizados
             const geoLimits = {};
             $('.geo-limit').each(function() {
                 geoLimits[$(this).data('id')] = {
@@ -270,6 +273,7 @@ def api_unidades():
 def api_geocercas():
     try:
         geos_raw = []
+        # Buscamos en territory/list que es el endpoint real de Mapon
         endpoints = ['/territory/list.json', '/poi/list.json', '/geometry/list.json']
         for ep in endpoints:
             try:
@@ -279,9 +283,13 @@ def api_geocercas():
                     if 'error' not in data:
                         inner = data.get('data', data)
                         if isinstance(inner, dict):
-                            for v in inner.values():
-                                if isinstance(v, list):
-                                    geos_raw.extend(v)
+                            for k in ['territories', 'geofences', 'items', 'list']:
+                                if k in inner:
+                                    geos_raw.extend(inner[k])
+                            if not geos_raw:
+                                for v in inner.values():
+                                    if isinstance(v, list):
+                                        geos_raw.extend(v)
                         elif isinstance(inner, list):
                             geos_raw.extend(inner)
                         if geos_raw: break
@@ -290,7 +298,7 @@ def api_geocercas():
 
         geos_normalizadas = []
         for g in geos_raw:
-            g_id = str(g.get('territory_id', g.get('id', g.get('poi_id'))))
+            g_id = str(g.get('territory_id', g.get('id', g.get('poi_id', ''))))
             g_name = str(g.get('name', g.get('title', 'Geocerca')))
             if g_id and g_id != 'None':
                 geos_normalizadas.append({
@@ -319,6 +327,7 @@ def generar_excel():
         geo_limits_raw = request.args.get('geos', '{}')
         geo_limits = json.loads(geo_limits_raw)
 
+        # Descargamos los datos de las geocercas para el análisis de coordenadas
         geos_procesadas = []
         try:
             geos_raw = []
@@ -331,9 +340,13 @@ def generar_excel():
                         if 'error' not in data_geo:
                             inner = data_geo.get('data', data_geo)
                             if isinstance(inner, dict):
-                                for v in inner.values():
-                                    if isinstance(v, list):
-                                        geos_raw.extend(v)
+                                for k in ['territories', 'geofences', 'items', 'list']:
+                                    if k in inner:
+                                        geos_raw.extend(inner[k])
+                                if not geos_raw:
+                                    for v in inner.values():
+                                        if isinstance(v, list):
+                                            geos_raw.extend(v)
                             elif isinstance(inner, list):
                                 geos_raw.extend(inner)
                             if geos_raw: break
@@ -347,6 +360,7 @@ def generar_excel():
                 g_lng = g.get('lng', g.get('longitude'))
                 g_radius = float(g.get('radius', 500))
                 
+                # Intentar buscar coordenadas dentro de points o center si no vienen en la raíz
                 if g_lat is None and 'center' in g:
                     g_lat = g['center'].get('lat')
                     g_lng = g['center'].get('lng')
@@ -369,11 +383,13 @@ def generar_excel():
             pass
 
         def obtener_geocerca(lat, lng, address):
+            # 1. Validación matemática por coordenadas
             for g in geos_procesadas:
                 dist_m = math.sqrt((lat - g['lat'])**2 + (lng - g['lng'])**2) * 111000
                 if dist_m <= g['radius']:
                     return g['id'], g['name']
             
+            # 2. Validación por texto (si Mapon mandó el nombre en la dirección de la ruta)
             address_str = str(address).lower()
             for gid, gdata in geo_limits.items():
                 if gdata['name'].lower() in address_str:
