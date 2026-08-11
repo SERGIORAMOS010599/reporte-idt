@@ -14,6 +14,15 @@ app = Flask(__name__)
 API_KEY = "7bd626cb4d3874faf995ec075af15d2cd35ec99d"
 BASE_URL = "https://gps.idttecnologias.mx/api/v1"
 
+# ==========================================
+# CONFIGURACIÓN DE FILTROS DE CLIENTE
+# ==========================================
+# ID de Alimentos Kowi en Mapon (extraído de tu reporte)
+COMPANY_ID_CLIENTE = 87534 
+# Opcional: Pon "kowi" o "planta" si quieres restringir la lista por texto
+PALABRA_CLAVE = "" 
+# ==========================================
+
 HTML_INTERFACE = """
 <!DOCTYPE html>
 <html lang="es">
@@ -117,7 +126,6 @@ HTML_INTERFACE = """
                     </div>
                 </div>
 
-                <!-- SELECTOR MÚLTIPLE DE GEOCERCAS (OBJECTS) -->
                 <div class="form-group">
                     <label>Geocercas para validar exceso de velocidad:</label>
                     <select id="geofence_select" multiple="multiple" style="width: 100%;">
@@ -144,7 +152,7 @@ HTML_INTERFACE = """
 
                 const selectUnit = $('#unit_select');
                 selectUnit.empty().append(new Option('🔍 Escribe para buscar unidad...', ''));
-                units.forEach(u => selectUnit.append(new Option(`${u.label || ''} ${u.number || ''} (ID: ${u.unit_id})`.trim(), u.unit_id)));
+                units.forEach(u => selectUnit.append(new Option(`${u.label || ''} ${u.number || ''} (ID: ${u.unit_id || u.object_id})`.trim(), u.unit_id || u.object_id)));
                 selectUnit.select2({ placeholder: "🔍 Escribe para buscar unidad...", width: '100%' });
 
                 const selectGeo = $('#geofence_select');
@@ -262,7 +270,18 @@ def index():
 def api_unidades():
     try:
         res = requests.get(f"{BASE_URL}/unit/list.json", params={'key': API_KEY}, timeout=15)
-        return jsonify(res.json().get('data', {}).get('units', []))
+        data = res.json()
+        units_raw = data.get('data', {}).get('units', [])
+        
+        # Filtro exclusivo para la empresa Kowi
+        unidades_filtradas = []
+        for u in units_raw:
+            company = u.get('company_id')
+            if company and int(company) != COMPANY_ID_CLIENTE:
+                continue
+            unidades_filtradas.append(u)
+            
+        return jsonify(unidades_filtradas)
     except: 
         return jsonify([]), 500
 
@@ -270,7 +289,6 @@ def api_unidades():
 def api_geocercas():
     try:
         geos_raw = []
-        # El descubrimiento clave: apuntar a /object/list.json
         res = requests.get(f"{BASE_URL}/object/list.json", params={'key': API_KEY}, timeout=10)
         if res.status_code == 200:
             data = res.json()
@@ -289,8 +307,18 @@ def api_geocercas():
 
         geos_normalizadas = []
         for g in geos_raw:
+            # Filtro exclusivo de Kowi
+            company = g.get('company_id')
+            if company and int(company) != COMPANY_ID_CLIENTE:
+                continue
+                
             g_id = str(g.get('object_id', g.get('id', '')))
             g_name = str(g.get('name', g.get('title', 'Geocerca')))
+            
+            # Filtro adicional por palabra clave
+            if PALABRA_CLAVE and PALABRA_CLAVE.lower() not in g_name.lower():
+                continue
+
             if g_id and g_id != 'None':
                 geos_normalizadas.append({
                     'geofence_id': g_id,
@@ -318,7 +346,7 @@ def generar_excel():
         geo_limits_raw = request.args.get('geos', '{}')
         geo_limits = json.loads(geo_limits_raw)
 
-        # Descargamos los datos de las geocercas (Objects) para el análisis de coordenadas
+        # Descargamos las geocercas (Objects filtrados) para la matemática espacial
         geos_procesadas = []
         try:
             res_geo = requests.get(f"{BASE_URL}/object/list.json", params={'key': API_KEY}, timeout=10)
@@ -339,6 +367,10 @@ def generar_excel():
                         geos_raw.extend(inner)
 
                     for g in geos_raw:
+                        company = g.get('company_id')
+                        if company and int(company) != COMPANY_ID_CLIENTE:
+                            continue
+                            
                         g_id = str(g.get('object_id', g.get('id', '')))
                         g_name = str(g.get('name', g.get('title', 'Geocerca')))
                         g_lat = g.get('lat', g.get('latitude'))
