@@ -21,7 +21,7 @@ TIMEZONE_OFFSET = -7  # Zona horaria de Hermosillo (UTC-7)
 FILTRO_TEXTO = ""
 
 # ==========================================
-# CATÁLOGO DE GEOCERCAS VIRTUALES
+# CATÁLOGO DE GEOCERCAS VIRTUALES EXCLUSIVAS
 # ==========================================
 GEOCERCAS_LOCALES = [
     {"id": "VIRT_1", "name": "nutrikowi", "lat": 27.1922, "lng": -109.5530, "radius": 200, "type": "circle"},
@@ -346,7 +346,6 @@ def api_geocercas():
 @app.route('/generar_excel')
 def generar_excel():
     try:
-        # RECIBIR NOMBRE REAL DEL VEHÍCULO PARA LA COLUMNA
         unit_id = request.args.get('unit_id', '868807')
         unit_name = request.args.get('unit_name', unit_id)
         if "(ID:" in unit_name:
@@ -556,18 +555,17 @@ def generar_excel():
                 })
         except: pass
 
-        # CALCULO DE TOTALES PARA ENCABEZADO
+        # CALCULO DE TOTALES PARA ENCABEZADO (MÁS PRECISO AÚN)
         tiempo_mov_seg = 0
         tiempo_ral_seg = 0
         tiempo_apagado_seg = 0
 
         for t in tramos_reales:
-            if t['tipo'] == 'route':
+            if t['tipo'] == 'route' or t['velocidad'] > 0:
                 tiempo_mov_seg += t['duracion']
-            elif t['tipo'] == 'idle':
-                tiempo_ral_seg += t['duracion']
-            elif t['tipo'] == 'stop':
-                tiempo_apagado_seg += t['duracion']
+            else:
+                tiempo_ral_seg += t['idle_sec']
+                tiempo_apagado_seg += (t['duracion'] - t['idle_sec'])
 
         def calc_hrs_mins(segundos): return int(segundos // 3600), int((segundos % 3600) // 60)
         mov_hrs, mov_mins = calc_hrs_mins(tiempo_mov_seg)
@@ -585,7 +583,7 @@ def generar_excel():
         vels_mov = [t['velocidad'] for t in tramos_reales if t['velocidad'] > 0]
         prom_vel = sum(vels_mov) / len(vels_mov) if vels_mov else 0
 
-        # LÓGICA DE COLAPSO (REPORTE EJECUTIVO)
+        # LÓGICA DE COLAPSO INTELIGENTE Y SEPARACIÓN DE RALENTÍ
         filas_brutas = []
         tiempo_exceso_geo_seg = 0
         
@@ -641,39 +639,62 @@ def generar_excel():
                     })
                     curr_time += timedelta(minutes=1)
             else:
-                # SI ESTÁ DETENIDO: SOLO IMPRIME EL INICIO Y EL FIN (AHORRA 90% DE LAS FILAS)
-                duracion_mins = int(t['duracion'] // 60)
+                # SEPARACIÓN EXACTA DE RALENTÍ Y APAGADO
+                duracion_total_mins = int(t['duracion'] // 60)
+                duracion_idle_mins = int(t['idle_sec'] // 60)
+                duracion_apagado_mins = duracion_total_mins - duracion_idle_mins
+
                 geo_id, geo_name = obtener_geocerca(t['lat_ini'], t['lng_ini'], t['origen'])
 
-                if t['tipo'] == 'idle':
+                if duracion_idle_mins > 0:
+                    # Imprimir evento de ralentí
+                    lbl_evento = 'Inicio de Ralentí'
+                    lbl_detalle = f"Detenido: {duracion_idle_mins} mins"
+                    
                     filas_brutas.append({
                         'fecha': t['dt_ini'], 'origen': t['origen'], 'velocidad': 0,
-                        'evento': 'Inicio de Ralentí', 'detalle': f"Detenido: {duracion_mins} mins", 
+                        'evento': lbl_evento, 'detalle': lbl_detalle, 
                         'lat': t['lat_ini'], 'lng': t['lng_ini'], 'geocerca': geo_name
                     })
-                    filas_brutas.append({
-                        'fecha': t['dt_fin'], 'origen': t['origen'], 'velocidad': 0,
-                        'evento': 'Fin de Ralentí', 'detalle': "-", 
-                        'lat': t['lat_fin'], 'lng': t['lng_fin'], 'geocerca': geo_name
-                    })
-                elif t['tipo'] == 'stop':
-                    filas_brutas.append({
-                        'fecha': t['dt_ini'], 'origen': t['origen'], 'velocidad': 0,
-                        'evento': 'Motor apagado', 'detalle': f"Apagado: {duracion_mins} mins", 
-                        'lat': t['lat_ini'], 'lng': t['lng_ini'], 'geocerca': geo_name
-                    })
-                    filas_brutas.append({
-                        'fecha': t['dt_fin'], 'origen': t['origen'], 'velocidad': 0,
-                        'evento': 'Motor encendido', 'detalle': "-", 
-                        'lat': t['lat_fin'], 'lng': t['lng_fin'], 'geocerca': geo_name
-                    })
+                    
+                    fin_ralenti_time = t['dt_ini'] + timedelta(minutes=duracion_idle_mins)
+                    
+                    # Si el motor se apagó después del ralentí
+                    if duracion_apagado_mins > 0:
+                        filas_brutas.append({
+                            'fecha': fin_ralenti_time, 'origen': t['origen'], 'velocidad': 0,
+                            'evento': 'Motor apagado', 'detalle': f"Apagado: {duracion_apagado_mins} mins", 
+                            'lat': t['lat_ini'], 'lng': t['lng_ini'], 'geocerca': geo_name
+                        })
+                        filas_brutas.append({
+                            'fecha': t['dt_fin'], 'origen': t['origen'], 'velocidad': 0,
+                            'evento': 'Motor encendido', 'detalle': "-", 
+                            'lat': t['lat_fin'], 'lng': t['lng_fin'], 'geocerca': geo_name
+                        })
+                    else:
+                        filas_brutas.append({
+                            'fecha': t['dt_fin'], 'origen': t['origen'], 'velocidad': 0,
+                            'evento': 'Fin de Ralentí', 'detalle': "-", 
+                            'lat': t['lat_fin'], 'lng': t['lng_fin'], 'geocerca': geo_name
+                        })
+                else:
+                    # Si se apagó directo sin ralentí
+                    if duracion_apagado_mins > 0:
+                        filas_brutas.append({
+                            'fecha': t['dt_ini'], 'origen': t['origen'], 'velocidad': 0,
+                            'evento': 'Motor apagado', 'detalle': f"Apagado: {duracion_apagado_mins} mins", 
+                            'lat': t['lat_ini'], 'lng': t['lng_ini'], 'geocerca': geo_name
+                        })
+                        filas_brutas.append({
+                            'fecha': t['dt_fin'], 'origen': t['origen'], 'velocidad': 0,
+                            'evento': 'Motor encendido', 'detalle': "-", 
+                            'lat': t['lat_fin'], 'lng': t['lng_fin'], 'geocerca': geo_name
+                        })
 
-        # ORDENAR FILAS CRONOLÓGICAMENTE (SIN BORRAR EVENTOS SIMULTÁNEOS)
         filas_brutas.sort(key=lambda x: x['fecha'])
         vistos = set()
         filas_finales = []
         for f in filas_brutas:
-            # Llave única por fecha y evento para evitar borrar el "Motor Encendido" que sigue al "Motor Apagado"
             key = f['fecha'].strftime('%Y-%m-%d %H:%M:%S') + f['evento']
             if key not in vistos:
                 vistos.add(key)
@@ -730,7 +751,6 @@ def generar_excel():
 
         row_idx = 11
         for f in filas_finales:
-            # Para Ciudad extraemos parte de la dirección
             ciudad = "Hermosillo" if "Hermosillo" in f['origen'] else ("Navojoa" if "Navojoa" in f['origen'] or "Pueblo Mayo" in f['origen'] else ("Guaymas" if "Guaymas" in f['origen'] else "Zona Operativa"))
 
             ws.cell(row=row_idx, column=1, value=str(unit_name))
@@ -745,7 +765,7 @@ def generar_excel():
             if f['geocerca'] != "Fuera de geocerca":
                 geo_cell.font = Font(color="008000", bold=True)
             
-            if "Exceso" in f['evento']: 
+            if "Exceso" in f['evento'] or "Ralentí" in f['evento']: 
                 ws.cell(row=row_idx, column=6).font = Font(color="FF0000", bold=True)
             
             map_cell = ws.cell(row=row_idx, column=9, value="mapa")
