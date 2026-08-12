@@ -154,7 +154,7 @@ HTML_INTERFACE = """
     <div class="card">
         <div class="header">
             <h2>📊 Reporte Ejecutivo Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Motor Anti Falsos Positivos</p>
+            <p>IDT Tecnologías - Sincronización Estricta (Opción B)</p>
         </div>
         
         <div class="main-container">
@@ -203,8 +203,9 @@ HTML_INTERFACE = """
                         <input type="number" id="limite_velocidad" value="80" min="1" max="150" required>
                     </div>
                     <div class="form-group">
-                        <label>Alerta Ralentí (mins):</label>
-                        <input type="number" id="min_ralenti" value="5" min="1" max="60" required>
+                        <label>Ignorar Ralentís menores a (mins):</label>
+                        <!-- Puesto en 1 por defecto por la regla estricta de Kowi -->
+                        <input type="number" id="min_ralenti" value="1" min="1" max="60" required>
                     </div>
                 </div>
 
@@ -405,8 +406,8 @@ def generar_excel():
         try: limite_velocidad = int(request.args.get('limite_velocidad', 80))
         except: limite_velocidad = 80
             
-        try: min_ralenti = int(request.args.get('min_ralenti', 5))
-        except: min_ralenti = 5
+        try: min_ralenti = int(request.args.get('min_ralenti', 1))
+        except: min_ralenti = 1
         
         geo_limits_raw = request.args.get('geos', '{}')
         try: geo_limits = json.loads(geo_limits_raw)
@@ -421,7 +422,6 @@ def generar_excel():
         
         # BÚSQUEDA PRECISA (SOLO APLICA SI VELOCIDAD < 50 km/h)
         def obtener_geocerca(lat, lng, velocidad_actual, address=""):
-            # Si va hecho la raya en carretera, ignoramos las geocercas
             if velocidad_actual > 50:
                 return None, "Fuera de geocerca"
                 
@@ -527,6 +527,7 @@ def generar_excel():
                 speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
                 tipo = str(item.get('type', '')).lower()
                 
+                # CÁLCULO DE RALENTÍ 100% ESPEJO MAPON
                 idle_sec = 0.0
                 if tipo == 'idle':
                     idle_sec = duracion_seg
@@ -537,11 +538,6 @@ def generar_excel():
                             overlap_end = min(dt_fin, i_end)
                             if overlap_end > overlap_start:
                                 idle_sec += (overlap_end - overlap_start).total_seconds()
-                    
-                    if idle_sec == 0 and speed == 0 and duracion_seg > 0:
-                        umbral_segundos = min_ralenti * 60
-                        if duracion_seg <= (umbral_segundos + 180): idle_sec = duracion_seg
-                        else: idle_sec = umbral_segundos + 120 
                 
                 idle_sec = min(idle_sec, duracion_seg)
 
@@ -581,7 +577,6 @@ def generar_excel():
                 curr_lat = t['lat_ini'] + (delta_lat * prog)
                 curr_lng = t['lng_ini'] + (delta_lng * prog)
                 
-                # APLICAMOS EL FILTRO DE VELOCIDAD
                 geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, current_speed, t['origen'])
                 
                 evento = ""
@@ -621,7 +616,6 @@ def generar_excel():
             
             curr_time = stop['dt_ini']
             idles_in_stop.sort(key=lambda x: x[0])
-            # En paradas la velocidad es 0, así que sí evalúa geocercas
             geo_id, geo_name = obtener_geocerca(stop['lat_ini'], stop['lng_ini'], 0, stop['origen'])
             
             for i_start, i_end in idles_in_stop:
@@ -636,10 +630,13 @@ def generar_excel():
                         tiempo_apagado_seg += dur_ap
                 
                 dur_id = (i_end - i_start).total_seconds()
-                if dur_id >= 60:
+                
+                # REGLA ESTRICTA DE KOWI: Si el ralentí de Mapon supera los mins indicados (ej. 1 min)
+                umbral_segundos = min_ralenti * 60
+                if dur_id >= umbral_segundos:
                     filas_brutas.append({
                         'fecha': i_start, 'origen': stop['origen'], 'velocidad': 0,
-                        'evento': 'Inicio de Ralentí', 'detalle': f"Detenido: {int(dur_id//60)} mins", 
+                        'evento': 'Ralentí', 'detalle': f"Motor encendido sin moverse: {int(dur_id//60)} mins", 
                         'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': geo_name
                     })
                     tiempo_ral_seg += dur_id
