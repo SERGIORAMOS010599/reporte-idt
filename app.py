@@ -13,23 +13,26 @@ import csv
 app = Flask(__name__)
 
 # ==========================================
-# CONFIGURACIÓN DE LA API Y CLIENTE
+# CONFIGURACIÓN DE LA API Y RUTAS
 # ==========================================
 API_KEY = "7bd626cb4d3874faf995ec075af15d2cd35ec99d"
 BASE_URL = "https://gps.idttecnologias.mx/api/v1"
-COMPANY_ID = "87534"  # ID de Alimentos Kowi
-TIMEZONE_OFFSET = -7  # Zona horaria de Hermosillo
+COMPANY_ID = "87534"
+TIMEZONE_OFFSET = -7
+
+# Forzar la ruta absoluta para que los servidores en la nube no se pierdan
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CSV_FILE_PATH = os.path.join(BASE_DIR, 'kowi_principales.csv')
 
 # ==========================================
 # MOTOR MAESTRO DE LECTURA CSV
 # ==========================================
 def cargar_geocercas_csv():
     geocercas = []
-    file_path = 'kowi_principales.csv'
     
-    if os.path.exists(file_path):
+    if os.path.exists(CSV_FILE_PATH):
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(CSV_FILE_PATH, 'r', encoding='utf-8') as f:
                 reader = csv.DictReader(f)
                 for row in reader:
                     nombre = row.get('Nombre zona', '').strip()
@@ -315,7 +318,7 @@ HTML_INTERFACE = """
 
 @app.route('/')
 def index():
-    # Recargar el CSV al actualizar la página web por si agregaste datos nuevos
+    # Recargar el CSV al actualizar la página web
     global GEOCERCAS_MAESTRAS
     GEOCERCAS_MAESTRAS = cargar_geocercas_csv()
     return render_template_string(HTML_INTERFACE)
@@ -376,7 +379,7 @@ def generar_excel():
             if not h: return "23:59:59" if es_fin else "00:00:00"
             return h if len(h) == 8 else h + ":00"
 
-        # CÁLCULO DIRECTO CONTRA EL CSV
+        # CÁLCULO DIRECTO CONTRA EL CSV MAESTRO
         def obtener_geocerca(lat, lng, address=""):
             for g in GEOCERCAS_MAESTRAS:
                 dist_m = math.sqrt((lat - g['lat'])**2 + (lng - g['lng'])**2) * 111000
@@ -487,7 +490,6 @@ def generar_excel():
                 if tipo == 'idle':
                     idle_sec = duracion_seg
                 else:
-                    # 1. Empalmamos con los idles oficiales de Mapon
                     if tipo == 'stop':
                         for i_start, i_end in parsed_idles:
                             overlap_start = max(dt_ini, i_start)
@@ -495,7 +497,6 @@ def generar_excel():
                             if overlap_end > overlap_start:
                                 idle_sec += (overlap_end - overlap_start).total_seconds()
                     
-                    # 2. Si Mapon no mandó nada y el camión no se mueve, usamos nuestra métrica
                     if idle_sec == 0 and speed == 0 and duracion_seg > 0:
                         umbral_segundos = min_ralenti * 60
                         if duracion_seg <= (umbral_segundos + 180): idle_sec = duracion_seg
