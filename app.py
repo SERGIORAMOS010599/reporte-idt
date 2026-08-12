@@ -20,21 +20,20 @@ BASE_URL = "https://gps.idttecnologias.mx/api/v1"
 COMPANY_ID = "87534"
 TIMEZONE_OFFSET = -7
 
-# Forzar la ruta absoluta para que los servidores en la nube no se pierdan
+# Forzar ruta absoluta para servidores en la nube (Render)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CSV_FILE_PATH = os.path.join(BASE_DIR, 'kowi_principales.csv')
 
 # ==========================================
-# MOTOR MAESTRO DE LECTURA CSV
+# LECTURA DEL ARCHIVO CSV
 # ==========================================
 def cargar_geocercas_csv():
     geocercas = []
-    
     if os.path.exists(CSV_FILE_PATH):
         try:
             with open(CSV_FILE_PATH, 'r', encoding='utf-8') as f:
                 reader = csv.DictReader(f)
-                for row in reader:
+                for i, row in enumerate(reader):
                     nombre = row.get('Nombre zona', '').strip()
                     lat_str = row.get('Latitud', '')
                     lng_str = row.get('Longitud', '')
@@ -43,8 +42,7 @@ def cargar_geocercas_csv():
                     if not nombre or not lat_str or not lng_str:
                         continue
                         
-                    # Calculamos el radio exacto en metros a partir del área en km2
-                    radio_m = 200 # Default por si falla el cálculo
+                    radio_m = 200 # Radio por defecto si el cálculo falla
                     try:
                         area_limpia = float(str(area_str).replace('km2', '').replace('m2', '').strip())
                         if 'km2' in str(area_str).lower():
@@ -52,15 +50,14 @@ def cargar_geocercas_csv():
                         else:
                             area_m2 = area_limpia
                         
-                        # Fórmula: Area = pi * r^2 -> r = sqrt(Area / pi)
+                        # r = raiz( Area / pi )
                         radio_calculado = math.sqrt(area_m2 / math.pi)
                         if radio_calculado > 0:
                             radio_m = radio_calculado
-                    except:
-                        pass
+                    except: pass
                         
                     geocercas.append({
-                        'id': f"CSV_{len(geocercas)}",
+                        'id': f"CSV_{i}",
                         'name': nombre,
                         'lat': float(lat_str),
                         'lng': float(lng_str),
@@ -68,10 +65,9 @@ def cargar_geocercas_csv():
                     })
         except Exception as e:
             print(f"Error cargando CSV: {e}")
-            
     return geocercas
 
-# Cargamos a la memoria RAM del servidor al iniciar
+# Cargamos el diccionario a memoria global
 GEOCERCAS_MAESTRAS = cargar_geocercas_csv()
 
 HTML_INTERFACE = """
@@ -122,7 +118,7 @@ HTML_INTERFACE = """
     <div class="card">
         <div class="header">
             <h2>📊 Reporte Ejecutivo Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Sincronizado con CSV Maestro (Alta Velocidad)</p>
+            <p>IDT Tecnologías - Sincronizado con Base de Datos CSV</p>
         </div>
         
         <div class="main-container">
@@ -177,7 +173,7 @@ HTML_INTERFACE = """
                 </div>
 
                 <div class="form-group">
-                    <label>Geocercas (Leídas de kowi_principales.csv):</label>
+                    <label>Geocercas (Opcional: Selecciona para asignar límite estricto):</label>
                     <select id="geofence_select" multiple="multiple" style="width: 100%;">
                         <option value="">⏳ Cargando geocercas locales...</option>
                     </select>
@@ -195,7 +191,7 @@ HTML_INTERFACE = """
             try {
                 const [resUnits, resGeos] = await Promise.all([
                     fetch('/api_unidades'),
-                    fetch('/api_geocercas_csv')
+                    fetch('/api_geocercas')
                 ]);
                 const units = await resUnits.json();
                 const geos = await resGeos.json();
@@ -213,10 +209,11 @@ HTML_INTERFACE = """
                 selectGeo.select2({ placeholder: "Buscar geocerca para límite personalizado...", width: '100%' });
 
                 $('#btn_submit').prop('disabled', false);
+                
                 if (geos.length === 0) {
-                    $('#status_msg').text("⚠️ No se encontró el archivo kowi_principales.csv en la carpeta.");
+                    $('#status_msg').text("⚠️ No se detectó el archivo kowi_principales.csv.");
                 } else {
-                    $('#status_msg').text(`✅ Base de datos CSV cargada correctamente (${geos.length} lugares).`);
+                    $('#status_msg').text(`✅ Base de datos lista (${geos.length} lugares cargados).`);
                 }
             } catch (e) {
                 $('#status_msg').text("Error cargando catálogos.");
@@ -248,7 +245,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⏳ Cruzando datos y generando reporte ejecutivo...";
+            status.innerText = "⏳ Generando reporte usando BD CSV...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -318,7 +315,7 @@ HTML_INTERFACE = """
 
 @app.route('/')
 def index():
-    # Recargar el CSV al actualizar la página web
+    # Recargar la lista CSV cada vez que alguien entra a la web
     global GEOCERCAS_MAESTRAS
     GEOCERCAS_MAESTRAS = cargar_geocercas_csv()
     return render_template_string(HTML_INTERFACE)
@@ -341,13 +338,18 @@ def api_unidades():
     except: 
         return jsonify([]), 500
 
-@app.route('/api_geocercas_csv')
-def api_geocercas_csv():
-    # Enviar las geocercas del CSV al select de la página web
+@app.route('/api_geocercas')
+def api_geocercas():
+    # Ahora la API interna solo devuelve las geocercas que leímos del CSV
     try:
-        menu_items = [{'geofence_id': g['id'], 'name': g['name']} for g in GEOCERCAS_MAESTRAS]
-        menu_items.sort(key=lambda x: x['name'])
-        return jsonify(menu_items)
+        finales = []
+        vistos = set()
+        for g in GEOCERCAS_MAESTRAS:
+            if g['name'] not in vistos:
+                vistos.add(g['name'])
+                finales.append({'geofence_id': g['id'], 'name': g['name']})
+        finales.sort(key=lambda x: x['name'])
+        return jsonify(finales)
     except:
         return jsonify([])
 
@@ -379,15 +381,13 @@ def generar_excel():
             if not h: return "23:59:59" if es_fin else "00:00:00"
             return h if len(h) == 8 else h + ":00"
 
-        # CÁLCULO DIRECTO CONTRA EL CSV MAESTRO
+        # BÚSQUEDA EXCLUSIVA EN CSV
         def obtener_geocerca(lat, lng, address=""):
             for g in GEOCERCAS_MAESTRAS:
                 dist_m = math.sqrt((lat - g['lat'])**2 + (lng - g['lng'])**2) * 111000
                 if dist_m <= g['radius']:
                     return g['id'], g['name']
-
-            # Respaldo textual si Kowi manda el nombre en el "address"
-            address_str = str(address).lower()
+                    
             if address and "+" not in address and "," not in address and "Zona Operativa" not in address:
                 return "GEO_API", address.strip()
                 
@@ -429,29 +429,11 @@ def generar_excel():
         try:
             response = requests.get(url, params=params, timeout=15)
             data = response.json()
-            rutas_encontradas = []
-            eventos_vistos = set()
             
-            def extraer_tramos(obj):
-                if isinstance(obj, dict):
-                    tipo = str(obj.get('type', '')).lower()
-                    has_start_end = ('start' in obj or 'start_time' in obj) and ('end' in obj or 'end_time' in obj)
-                    if tipo in ['route', 'stop', 'idle'] or has_start_end:
-                        sig = str(obj.get('start', {}).get('time', '')) + tipo
-                        if sig not in eventos_vistos:
-                            eventos_vistos.add(sig)
-                            rutas_encontradas.append(obj)
-                    for k, v in obj.items():
-                        if isinstance(v, (dict, list)): extraer_tramos(v)
-                elif isinstance(obj, list):
-                    for item in obj:
-                        if isinstance(item, (dict, list)): extraer_tramos(item)
-
-            extraer_tramos(data)
-
-            # Extraemos la lista de idles para el empalme
             unit_data = data.get('data', {}).get('units', [])[0] if data.get('data', {}).get('units') else {}
+            rutas_array = unit_data.get('routes', [])
             idles_array = unit_data.get('idles', [])
+            
             parsed_idles = []
             for idl in idles_array:
                 s_dt = parse_iso(idl.get('start', {}).get('time'))
@@ -459,33 +441,25 @@ def generar_excel():
                 if s_dt and e_dt:
                     parsed_idles.append((s_dt, e_dt))
 
-            for item in rutas_encontradas:
-                dt_ini = parse_iso(item.get('start', {}).get('time', item.get('start_time', '')))
-                dt_fin = parse_iso(item.get('end', {}).get('time', item.get('end_time', '')))
-                dur_raw = item.get('duration', item.get('time', 0))
-                try: duracion_seg = float(dur_raw)
-                except: duracion_seg = 0.0
-                
-                if dt_ini and dt_fin:
-                    calc_dur = (dt_fin - dt_ini).total_seconds()
-                    if calc_dur > duracion_seg:
-                        duracion_seg = calc_dur
-                elif dt_ini and not dt_fin: 
-                    dt_fin = dt_ini + timedelta(seconds=duracion_seg)
-                    
-                if not dt_ini: continue
+            for item in rutas_array:
+                dt_ini = parse_iso(item.get('start', {}).get('time'))
+                dt_fin = parse_iso(item.get('end', {}).get('time'))
+                if not dt_ini or not dt_fin: continue
 
-                origen = str(item.get('start', {}).get('address', item.get('start_address', 'Zona Operativa')))
-                lat_ini = float(item.get('start', {}).get('lat', item.get('start_lat', 27.19)))
-                lng_ini = float(item.get('start', {}).get('lng', item.get('start_lng', -109.55)))
-                lat_fin = float(item.get('end', {}).get('lat', item.get('end_lat', lat_ini)))
-                lng_fin = float(item.get('end', {}).get('lng', item.get('end_lng', lng_ini)))
+                duracion_seg = (dt_fin - dt_ini).total_seconds()
+                if duracion_seg <= 0: continue
+
+                origen = str(item.get('start', {}).get('address', 'Zona Operativa'))
+                lat_ini = float(item.get('start', {}).get('lat', 27.19))
+                lng_ini = float(item.get('start', {}).get('lng', -109.55))
+                lat_fin = float(item.get('end', {}).get('lat', lat_ini))
+                lng_fin = float(item.get('end', {}).get('lng', lng_ini))
                 
                 dist_km = float(item.get('distance', 0)) / 1000.0
                 speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
                 tipo = str(item.get('type', '')).lower()
                 
-                # CÁLCULO DE RALENTÍ BALANCEADO
+                # CRUCE EXACTO DEL RALENTÍ CON IDLES DE MAPON
                 idle_sec = 0.0
                 if tipo == 'idle':
                     idle_sec = duracion_seg
@@ -496,11 +470,11 @@ def generar_excel():
                             overlap_end = min(dt_fin, i_end)
                             if overlap_end > overlap_start:
                                 idle_sec += (overlap_end - overlap_start).total_seconds()
-                    
+                                
                     if idle_sec == 0 and speed == 0 and duracion_seg > 0:
                         umbral_segundos = min_ralenti * 60
                         if duracion_seg <= (umbral_segundos + 180): idle_sec = duracion_seg
-                        else: idle_sec = umbral_segundos + 120 
+                        else: idle_sec = umbral_segundos + 120
                 
                 idle_sec = min(idle_sec, duracion_seg)
 
