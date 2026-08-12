@@ -554,7 +554,11 @@ def generar_excel():
             delta_lat = (t['lat_fin'] - t['lat_ini'])
             delta_lng = (t['lng_fin'] - t['lng_ini'])
             
-            avg_speed = (t['distancia'] / (total_seconds / 3600)) if total_seconds > 0 else 0
+            # CANDADO ANTI-TELETRANSPORTACIÓN:
+            if total_seconds <= 0:
+                total_seconds = 1
+                
+            avg_speed = (t['distancia'] / (total_seconds / 3600))
             while curr_time <= end_time:
                 current_speed = round(random.uniform(avg_speed * 0.85, avg_speed * 1.15), 1)
                 current_speed = min(current_speed, t['velocidad']) if t['velocidad'] > 0 else current_speed
