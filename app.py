@@ -698,9 +698,9 @@ def generar_excel():
 
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "Histórico Ejecutivo"
+        ws.title = "Histórico De Rutas Minuto a Minuto"
 
-        ws.cell(row=1, column=3, value="Histórico Ejecutivo").font = Font(bold=True, size=14)
+        ws.cell(row=1, column=3, value="Histórico De Rutas Minuto a Minuto").font = Font(bold=True, size=14)
         ws.cell(row=3, column=3, value="Vehículo:").font = Font(bold=True)
         ws.cell(row=3, column=4, value=str(unit_name))
 
