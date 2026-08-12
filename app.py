@@ -85,7 +85,7 @@ def cargar_geocercas_excel():
                 
                 radio_calculado = math.sqrt(area_m2 / math.pi)
                 if radio_calculado > 0: 
-                    radio_m = min(radio_calculado, 1500) # Límite seguro
+                    radio_m = min(radio_calculado, 1500) 
             except: pass
             
             geocercas.append({
@@ -153,7 +153,7 @@ HTML_INTERFACE = """
     <div class="card">
         <div class="header">
             <h2>📊 Reporte Ejecutivo Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Sincronización Sensorial de Mapon</p>
+            <p>IDT Tecnologías - Sincronización Sensorial Avanzada</p>
         </div>
         
         <div class="main-container">
@@ -202,7 +202,7 @@ HTML_INTERFACE = """
                         <input type="number" id="limite_velocidad" value="80" min="1" max="150" required>
                     </div>
                     <div class="form-group">
-                        <label>Límite de Ralentí Permitido (mins):</label>
+                        <label>Filtro de Ralentí (mins):</label>
                         <input type="number" id="min_ralenti" value="2" min="1" max="60" required>
                     </div>
                 </div>
@@ -492,7 +492,6 @@ def generar_excel():
 
             unit_data = data.get('data', {}).get('units', [])[0] if data.get('data', {}).get('units') else {}
             
-            # EXTRACCIÓN PURA Y DURA DEL SWITCH DE IGNICIÓN DESDE MAPON
             idles_array = unit_data.get('idles', [])
             for idl in idles_array:
                 s_dt = parse_iso(idl.get('start', {}).get('time'))
@@ -538,11 +537,11 @@ def generar_excel():
         tiempo_mov_seg = 0
         tiempo_apagado_seg = 0
         tiempo_ral_total_seg = 0
-        tiempo_ral_excesivo_seg = 0
+        tiempo_ral_reportado_seg = 0
         tiempo_exceso_geo_seg = 0
         
         list_routes = [t for t in tramos_reales if t['tipo'] == 'route']
-        list_stops = [t for t in tramos_reales if t['tipo'] in ['stop']]
+        list_stops = [t for t in tramos_reales if t['tipo'] in ['stop', 'idle']]
 
         # 1. PROCESAR MOVIMIENTO
         for t in list_routes:
@@ -554,7 +553,7 @@ def generar_excel():
             delta_lat = (t['lat_fin'] - t['lat_ini'])
             delta_lng = (t['lng_fin'] - t['lng_ini'])
             
-            # CANDADO ANTI-TELETRANSPORTACIÓN:
+            # Candado matemático de seguridad
             if total_seconds <= 0:
                 total_seconds = 1
                 
@@ -597,9 +596,8 @@ def generar_excel():
                 })
                 curr_time += timedelta(minutes=1)
 
-        # 2. PROCESAR PARADAS Y EL SENSOR DE IGNICIÓN (RALENTÍ)
+        # 2. PROCESAR PARADAS Y SWITCH DE MOTOR (ESPEJO MAPON)
         for stop in list_stops:
-            # Encontrar qué partes del sensor encendido ('idles') cayeron dentro de esta parada
             idles_in_stop = []
             for idl in parsed_idles:
                 overlap_start = max(stop['dt_ini'], idl['dt_ini'])
@@ -607,62 +605,54 @@ def generar_excel():
                 if overlap_end > overlap_start:
                     idles_in_stop.append((overlap_start, overlap_end))
             
+            if stop['tipo'] == 'idle' and not idles_in_stop:
+                idles_in_stop.append((stop['dt_ini'], stop['dt_fin']))
+                
             curr_time = stop['dt_ini']
             idles_in_stop.sort(key=lambda x: x[0])
             geo_id, geo_name = obtener_geocerca(stop['lat_ini'], stop['lng_ini'], 0, stop['origen'])
             
             umbral_segundos = min_ralenti * 60
+            events = []
             
             for i_start, i_end in idles_in_stop:
-                # Todo el tiempo antes de encender el motor es Apagado (Switch OFF)
+                # Transición 1: Si el motor estaba apagado, lo encendemos
                 if i_start > curr_time:
-                    dur_ap = (i_start - curr_time).total_seconds()
-                    if dur_ap >= 60:
-                        filas_brutas.append({
-                            'fecha': curr_time, 'origen': stop['origen'], 'velocidad': 0,
-                            'evento': 'Motor Apagado', 'detalle': f"Llave cerrada: {int(dur_ap//60)} mins", 
-                            'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': geo_name
-                        })
-                        tiempo_apagado_seg += dur_ap
+                    dur_off = (i_start - curr_time).total_seconds()
+                    events.append({'time': curr_time, 'event': 'Motor apagado', 'dur': dur_off})
+                    events.append({'time': i_start, 'event': 'Motor encendido', 'dur': 0})
                 
-                # Todo el tiempo que duró la señal de encendido sin moverse es Ralentí (Switch ON)
-                dur_id = (i_end - i_start).total_seconds()
-                tiempo_ral_total_seg += dur_id
+                # Evaluación estricta de Ralentí
+                dur_on = (i_end - i_start).total_seconds()
+                tiempo_ral_total_seg += dur_on
                 
-                if dur_id >= umbral_segundos:
-                    # Infracción de Ralentí
-                    filas_brutas.append({
-                        'fecha': i_start, 'origen': stop['origen'], 'velocidad': 0,
-                        'evento': 'Ralentí Excesivo', 'detalle': f"Motor ON / 0 km/h: {int(dur_id//60)} mins", 
-                        'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': geo_name
-                    })
-                    tiempo_ral_excesivo_seg += dur_id
-                elif dur_id >= 60:
-                    # Ralentí permitido (ej. semáforo)
-                    filas_brutas.append({
-                        'fecha': i_start, 'origen': stop['origen'], 'velocidad': 0,
-                        'evento': 'Ralentí Permitido', 'detalle': f"Pausa corta: {int(dur_id//60)} mins", 
-                        'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': geo_name
-                    })
-                    
-                curr_time = max(curr_time, i_end)
+                if dur_on >= umbral_segundos:
+                    events.append({'time': i_start + timedelta(seconds=1), 'event': 'Ralentí', 'dur': dur_on})
+                    tiempo_ral_reportado_seg += dur_on
                 
-            # Todo el tiempo que quedó después de apagar el motor al final de la parada (Switch OFF)
+                curr_time = i_end
+                
+            # Transición 2: Si quedó tiempo libre al final de la parada, el motor se apagó
             if curr_time < stop['dt_fin']:
-                dur_ap = (stop['dt_fin'] - curr_time).total_seconds()
-                if dur_ap >= 60:
-                    filas_brutas.append({
-                        'fecha': curr_time, 'origen': stop['origen'], 'velocidad': 0,
-                        'evento': 'Motor Apagado', 'detalle': f"Llave cerrada: {int(dur_ap//60)} mins", 
-                        'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': geo_name
-                    })
-                    tiempo_apagado_seg += dur_ap
-            
-            filas_brutas.append({
-                'fecha': stop['dt_fin'], 'origen': stop['origen'], 'velocidad': 0,
-                'evento': 'Fin de Parada', 'detalle': "-", 
-                'lat': stop['lat_fin'], 'lng': stop['lng_fin'], 'geocerca': geo_name
-            })
+                dur_off = (stop['dt_fin'] - curr_time).total_seconds()
+                events.append({'time': curr_time, 'event': 'Motor apagado', 'dur': dur_off})
+                events.append({'time': stop['dt_fin'], 'event': 'Motor encendido', 'dur': 0})
+                
+            # Agregar a las filas brutas
+            for ev in events:
+                if ev['event'] == 'Motor apagado':
+                    tiempo_apagado_seg += ev['dur']
+                    detalle = f"Apagado por {int(ev['dur']//60)} mins" if ev['dur'] >= 60 else "Apagado (Pausa corta)"
+                elif ev['event'] == 'Ralentí':
+                    detalle = f"Motor encendido sin moverse: {int(ev['dur']//60)} mins"
+                else:
+                    detalle = "-"
+                    
+                filas_brutas.append({
+                    'fecha': ev['time'], 'origen': stop['origen'], 'velocidad': 0,
+                    'evento': ev['event'], 'detalle': detalle,
+                    'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': geo_name
+                })
 
         filas_brutas.sort(key=lambda x: x['fecha'])
         vistos = set()
@@ -675,7 +665,7 @@ def generar_excel():
 
         def calc_hrs_mins(segundos): return int(segundos // 3600), int((segundos % 3600) // 60)
         mov_hrs, mov_mins = calc_hrs_mins(tiempo_mov_seg)
-        ral_hrs, ral_mins = calc_hrs_mins(tiempo_ral_excesivo_seg) # Solo reporta el EXCESIVO
+        ral_hrs, ral_mins = calc_hrs_mins(tiempo_ral_reportado_seg)
         muerto_hrs, muerto_mins = calc_hrs_mins(tiempo_apagado_seg)
         exceso_geo_hrs, exceso_geo_mins = calc_hrs_mins(tiempo_exceso_geo_seg)
 
@@ -685,7 +675,7 @@ def generar_excel():
 
         total_segundos = tiempo_mov_seg + tiempo_ral_total_seg + tiempo_apagado_seg
         porc_mov = round((tiempo_mov_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
-        porc_ral = round((tiempo_ral_excesivo_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
+        porc_ral = round((tiempo_ral_reportado_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
         porc_muerto = round((tiempo_apagado_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
 
         rutas_unicas = {t['dt_ini'].strftime('%Y%m%d%H%M%S'): t['distancia'] for t in list_routes if t['distancia'] > 0}
@@ -721,7 +711,7 @@ def generar_excel():
 
         ws.cell(row=7, column=1, value="Velocidad Promedio:").font = Font(bold=True)
         ws.cell(row=7, column=2, value=f"{round(prom_vel, 1)} km/h")
-        ws.cell(row=7, column=3, value="Ralentí Excesivo (Motor Encendido):").font = Font(bold=True)
+        ws.cell(row=7, column=3, value="Ralentí (Motor Encendido):").font = Font(bold=True)
         ws.cell(row=7, column=4, value=f"{ral_hrs} hrs {ral_mins} mins ({porc_ral}%)").font = Font(color="FF0000")
         ws.cell(row=7, column=5, value="Exceso en Geocercas:").font = Font(bold=True)
         ws.cell(row=7, column=6, value=f"{exceso_geo_hrs} hrs {exceso_geo_mins} mins").font = Font(color="FF0000", bold=True)
@@ -756,7 +746,7 @@ def generar_excel():
             if f['geocerca'] != "Fuera de geocerca":
                 geo_cell.font = Font(color="008000", bold=True)
             
-            if "Exceso" in f['evento'] or "Ralentí Excesivo" in f['evento']: 
+            if "Exceso" in f['evento'] or "Ralentí" in f['evento']: 
                 ws.cell(row=row_idx, column=6).font = Font(color="FF0000", bold=True)
             
             map_cell = ws.cell(row=row_idx, column=9, value="mapa")
