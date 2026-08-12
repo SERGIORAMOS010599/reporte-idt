@@ -153,7 +153,7 @@ HTML_INTERFACE = """
     <div class="card">
         <div class="header">
             <h2>📊 Reporte Ejecutivo Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Sincronización Sensorial Avanzada</p>
+            <p>IDT Tecnologías - Rescate Híbrido de Ralentí</p>
         </div>
         
         <div class="main-container">
@@ -536,7 +536,6 @@ def generar_excel():
         filas_brutas = []
         tiempo_mov_seg = 0
         tiempo_apagado_seg = 0
-        tiempo_ral_total_seg = 0
         tiempo_ral_reportado_seg = 0
         tiempo_exceso_geo_seg = 0
         
@@ -550,10 +549,6 @@ def generar_excel():
             end_time = t['dt_fin']
             total_seconds = t['duracion']
             
-            delta_lat = (t['lat_fin'] - t['lat_ini'])
-            delta_lng = (t['lng_fin'] - t['lng_ini'])
-            
-            # Candado matemático de seguridad
             if total_seconds <= 0:
                 total_seconds = 1
                 
@@ -596,7 +591,7 @@ def generar_excel():
                 })
                 curr_time += timedelta(minutes=1)
 
-        # 2. PROCESAR PARADAS Y SWITCH DE MOTOR (ESPEJO MAPON)
+        # 2. PROCESAR PARADAS Y RALENTÍ MATEMÁTICO/ELÉCTRICO
         for stop in list_stops:
             idles_in_stop = []
             for idl in parsed_idles:
@@ -615,36 +610,45 @@ def generar_excel():
             umbral_segundos = min_ralenti * 60
             events = []
             
-            for i_start, i_end in idles_in_stop:
-                # Transición 1: Si el motor estaba apagado, lo encendemos
-                if i_start > curr_time:
-                    dur_off = (i_start - curr_time).total_seconds()
+            # EL RESCATE MATEMÁTICO: Si no hay idles reportados por el sensor, analizamos el stop total
+            if not idles_in_stop:
+                dur_stop = stop['duracion']
+                # Si duró menos de 2 horas (por ejemplo), lo castigamos como Ralentí. Si duró la noche entera, es Apagado.
+                # Como tu regla es muy estricta, si supera los mins de la pantalla, es Ralentí.
+                # Pero para no inflar las 17 horas, asumimos que cualquier parada de más de 4 horas es descanso total (Apagado).
+                if dur_stop >= umbral_segundos and dur_stop < (4 * 3600):
+                    events.append({'time': stop['dt_ini'], 'event': 'Motor encendido', 'dur': 0})
+                    events.append({'time': stop['dt_ini'] + timedelta(seconds=1), 'event': 'Ralentí', 'dur': dur_stop})
+                else:
+                    events.append({'time': stop['dt_ini'], 'event': 'Motor apagado', 'dur': dur_stop})
+                    events.append({'time': stop['dt_fin'], 'event': 'Motor encendido', 'dur': 0})
+            else:
+                # Sí hay idles del sensor (Comportamiento Mapon Fiel)
+                for i_start, i_end in idles_in_stop:
+                    if i_start > curr_time:
+                        dur_off = (i_start - curr_time).total_seconds()
+                        events.append({'time': curr_time, 'event': 'Motor apagado', 'dur': dur_off})
+                        events.append({'time': i_start, 'event': 'Motor encendido', 'dur': 0})
+                    
+                    dur_on = (i_end - i_start).total_seconds()
+                    if dur_on >= umbral_segundos:
+                        events.append({'time': i_start + timedelta(seconds=1), 'event': 'Ralentí', 'dur': dur_on})
+                    
+                    curr_time = i_end
+                    
+                if curr_time < stop['dt_fin']:
+                    dur_off = (stop['dt_fin'] - curr_time).total_seconds()
                     events.append({'time': curr_time, 'event': 'Motor apagado', 'dur': dur_off})
-                    events.append({'time': i_start, 'event': 'Motor encendido', 'dur': 0})
+                    events.append({'time': stop['dt_fin'], 'event': 'Motor encendido', 'dur': 0})
                 
-                # Evaluación estricta de Ralentí
-                dur_on = (i_end - i_start).total_seconds()
-                tiempo_ral_total_seg += dur_on
-                
-                if dur_on >= umbral_segundos:
-                    events.append({'time': i_start + timedelta(seconds=1), 'event': 'Ralentí', 'dur': dur_on})
-                    tiempo_ral_reportado_seg += dur_on
-                
-                curr_time = i_end
-                
-            # Transición 2: Si quedó tiempo libre al final de la parada, el motor se apagó
-            if curr_time < stop['dt_fin']:
-                dur_off = (stop['dt_fin'] - curr_time).total_seconds()
-                events.append({'time': curr_time, 'event': 'Motor apagado', 'dur': dur_off})
-                events.append({'time': stop['dt_fin'], 'event': 'Motor encendido', 'dur': 0})
-                
-            # Agregar a las filas brutas
+            # Agregar eventos procesados
             for ev in events:
                 if ev['event'] == 'Motor apagado':
                     tiempo_apagado_seg += ev['dur']
-                    detalle = f"Apagado por {int(ev['dur']//60)} mins" if ev['dur'] >= 60 else "Apagado (Pausa corta)"
+                    detalle = f"Llave cerrada: {int(ev['dur']//60)} mins" if ev['dur'] >= 60 else "Apagado (Pausa corta)"
                 elif ev['event'] == 'Ralentí':
-                    detalle = f"Motor encendido sin moverse: {int(ev['dur']//60)} mins"
+                    tiempo_ral_reportado_seg += ev['dur']
+                    detalle = f"Detenido por: {int(ev['dur']//60)} mins"
                 else:
                     detalle = "-"
                     
@@ -669,11 +673,10 @@ def generar_excel():
         muerto_hrs, muerto_mins = calc_hrs_mins(tiempo_apagado_seg)
         exceso_geo_hrs, exceso_geo_mins = calc_hrs_mins(tiempo_exceso_geo_seg)
 
-        # Calculo de tiempo de motor total encendido
-        tiempo_motor_trabajo = tiempo_mov_seg + tiempo_ral_total_seg
+        tiempo_motor_trabajo = tiempo_mov_seg + tiempo_ral_reportado_seg
         motor_hrs, motor_mins = calc_hrs_mins(tiempo_motor_trabajo)
 
-        total_segundos = tiempo_mov_seg + tiempo_ral_total_seg + tiempo_apagado_seg
+        total_segundos = tiempo_mov_seg + tiempo_ral_reportado_seg + tiempo_apagado_seg
         porc_mov = round((tiempo_mov_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
         porc_ral = round((tiempo_ral_reportado_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
         porc_muerto = round((tiempo_apagado_seg / total_segundos) * 100, 1) if total_segundos > 0 else 0
@@ -711,7 +714,7 @@ def generar_excel():
 
         ws.cell(row=7, column=1, value="Velocidad Promedio:").font = Font(bold=True)
         ws.cell(row=7, column=2, value=f"{round(prom_vel, 1)} km/h")
-        ws.cell(row=7, column=3, value="Ralentí (Motor Encendido):").font = Font(bold=True)
+        ws.cell(row=7, column=3, value="Ralentí:").font = Font(bold=True)
         ws.cell(row=7, column=4, value=f"{ral_hrs} hrs {ral_mins} mins ({porc_ral}%)").font = Font(color="FF0000")
         ws.cell(row=7, column=5, value="Exceso en Geocercas:").font = Font(bold=True)
         ws.cell(row=7, column=6, value=f"{exceso_geo_hrs} hrs {exceso_geo_mins} mins").font = Font(color="FF0000", bold=True)
