@@ -153,7 +153,7 @@ HTML_INTERFACE = """
     <div class="card">
         <div class="header">
             <h2>📊 Reporte Ejecutivo Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Rescate Híbrido de Ralentí</p>
+            <p>IDT Tecnologías - Sincronización Sensorial Avanzada</p>
         </div>
         
         <div class="main-container">
@@ -536,6 +536,7 @@ def generar_excel():
         filas_brutas = []
         tiempo_mov_seg = 0
         tiempo_apagado_seg = 0
+        tiempo_ral_total_seg = 0
         tiempo_ral_reportado_seg = 0
         tiempo_exceso_geo_seg = 0
         
@@ -549,6 +550,11 @@ def generar_excel():
             end_time = t['dt_fin']
             total_seconds = t['duracion']
             
+            # ¡AQUÍ ESTABAN LAS DOS LÍNEAS PERDIDAS!
+            delta_lat = (t['lat_fin'] - t['lat_ini'])
+            delta_lng = (t['lng_fin'] - t['lng_ini'])
+            
+            # Candado matemático de seguridad
             if total_seconds <= 0:
                 total_seconds = 1
                 
@@ -613,9 +619,6 @@ def generar_excel():
             # EL RESCATE MATEMÁTICO: Si no hay idles reportados por el sensor, analizamos el stop total
             if not idles_in_stop:
                 dur_stop = stop['duracion']
-                # Si duró menos de 2 horas (por ejemplo), lo castigamos como Ralentí. Si duró la noche entera, es Apagado.
-                # Como tu regla es muy estricta, si supera los mins de la pantalla, es Ralentí.
-                # Pero para no inflar las 17 horas, asumimos que cualquier parada de más de 4 horas es descanso total (Apagado).
                 if dur_stop >= umbral_segundos and dur_stop < (4 * 3600):
                     events.append({'time': stop['dt_ini'], 'event': 'Motor encendido', 'dur': 0})
                     events.append({'time': stop['dt_ini'] + timedelta(seconds=1), 'event': 'Ralentí', 'dur': dur_stop})
