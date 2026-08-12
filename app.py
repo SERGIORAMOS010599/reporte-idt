@@ -8,7 +8,6 @@ import random
 import os
 import json
 import math
-import csv
 
 app = Flask(__name__)
 
@@ -34,53 +33,28 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
     return R * c
 
 # ==========================================
-# LECTOR UNIVERSAL (CSV o EXCEL)
+# LECTOR EXCEL MEJORADO (Límite 800m)
 # ==========================================
-def cargar_geocercas_maestras():
+def cargar_geocercas_excel():
     geocercas = []
     base_dir = os.path.dirname(os.path.abspath(__file__))
     
-    posibles_archivos = [
-        'kowi_principales.csv', 'kowi principales.csv',
-        'kowi_principales.xlsx', 'kowi principales.xlsx'
-    ]
-    
+    posibles_archivos = ['kowi_principales.xlsx', 'kowi principales.xlsx']
     ruta_final = None
-    es_excel = False
     for archivo in posibles_archivos:
         ruta_temp = os.path.join(base_dir, archivo)
         if os.path.exists(ruta_temp):
             ruta_final = ruta_temp
-            es_excel = archivo.endswith('.xlsx')
             break
             
     if not ruta_final:
-        return [{'error': 'file_not_found'}]
-
-    filas_procesadas = []
+        return [{'error': 'file_not_found', 'msg': 'No se encontró el archivo .xlsx en Render'}]
 
     try:
-        if es_excel:
-            wb = openpyxl.load_workbook(ruta_final, data_only=True)
-            ws = wb.active
-            for row in ws.iter_rows(values_only=True):
-                if not any(row): continue
-                if len([c for c in row if c is not None]) == 1 and isinstance(row[0], str):
-                    texto = row[0].replace('\t', ',')
-                    filas_procesadas.append(texto.split(','))
-                else:
-                    filas_procesadas.append([str(c) if c is not None else '' for c in row])
-        else:
-            with open(ruta_final, 'r', encoding='utf-8-sig') as f:
-                contenido = f.read().replace('\t', ',')
-                lector = csv.reader(io.StringIO(contenido))
-                for row in lector:
-                    if any(row): filas_procesadas.append(row)
-                    
-        if len(filas_procesadas) < 2:
-            return [{'error': 'parsing_failed', 'msg': 'El archivo parece estar vacío o sin formato'}]
-
-        headers = [str(h).lower().strip() for h in filas_procesadas[0]]
+        wb = openpyxl.load_workbook(ruta_final, data_only=True)
+        ws = wb.active
+        
+        headers = [str(cell.value).lower().strip() if cell.value else '' for cell in ws[1]]
         
         idx_nom = next((i for i, h in enumerate(headers) if 'nombre' in h or 'zona' in h), -1)
         idx_lat = next((i for i, h in enumerate(headers) if 'lat' in h), -1)
@@ -88,57 +62,49 @@ def cargar_geocercas_maestras():
         idx_area = next((i for i, h in enumerate(headers) if 'rea' in h or 'area' in h), -1)
         
         if idx_nom == -1 or idx_lat == -1 or idx_lon == -1:
-            return [{'error': 'parsing_failed', 'msg': f'No se detectaron las columnas. Encontradas: {headers}'}]
+            return [{'error': 'parsing_failed', 'msg': f'Columnas no detectadas. Encabezados: {headers}'}]
             
-        for i, row in enumerate(filas_procesadas[1:]):
+        for i, row in enumerate(ws.iter_rows(min_row=2, values_only=True)):
+            if not row[idx_nom] or not row[idx_lat] or not row[idx_lon]:
+                continue
+                
+            nombre = str(row[idx_nom]).strip()
+            lat_str = str(row[idx_lat]).strip()
+            lng_str = str(row[idx_lon]).strip()
+            area_str = str(row[idx_area]).strip() if idx_area != -1 and row[idx_area] else ''
+            
+            radio_m = 200 # Radio base
             try:
-                nombre = str(row[idx_nom]).strip() if len(row) > idx_nom else ''
-                lat_str = str(row[idx_lat]).strip() if len(row) > idx_lat else ''
-                lng_str = str(row[idx_lon]).strip() if len(row) > idx_lon else ''
-                area_str = str(row[idx_area]).strip() if idx_area != -1 and len(row) > idx_area else ''
+                area_limpia_str = str(area_str).lower().replace('km2', '').replace('m2', '').replace(',', '').strip()
+                area_limpia = float(area_limpia_str)
                 
-                if not nombre or not lat_str or not lng_str:
-                    continue
-                    
-                radio_m = 200
-                try:
-                    area_limpia_str = str(area_str).lower().replace('km2', '').replace('m2', '').strip()
-                    # Corrección de decimales (ej: 33,33 a 33.33)
-                    if ',' in area_limpia_str and '.' not in area_limpia_str:
-                        area_limpia_str = area_limpia_str.replace(',', '.')
-                    else:
-                        area_limpia_str = area_limpia_str.replace(',', '')
-                        
-                    area_limpia = float(area_limpia_str)
-                    
-                    if 'km2' in str(area_str).lower(): 
-                        area_m2 = area_limpia * 1000000
-                    else: 
-                        area_m2 = area_limpia
-                    
-                    radio_calculado = math.sqrt(area_m2 / math.pi)
-                    if radio_calculado > 0: 
-                        # Tope máximo de 15km para evitar burbujas gigantes
-                        radio_m = min(radio_calculado, 15000)
-                except: pass
+                if 'km2' in str(area_str).lower(): 
+                    area_m2 = area_limpia * 1000000
+                else: 
+                    area_m2 = area_limpia
                 
-                geocercas.append({
-                    'id': f"LOCAL_{i}",
-                    'name': nombre,
-                    'lat': float(lat_str),
-                    'lng': float(lng_str),
-                    'radius': radio_m
-                })
+                radio_calculado = math.sqrt(area_m2 / math.pi)
+                if radio_calculado > 0: 
+                    # LIMITE DRÁSTICO ANTI-BURBUJAS: Ninguna geocerca puede medir más de 800m de radio
+                    radio_m = min(radio_calculado, 800)
             except: pass
             
+            geocercas.append({
+                'id': f"LOCAL_{i}",
+                'name': nombre,
+                'lat': float(lat_str),
+                'lng': float(lng_str),
+                'radius': radio_m
+            })
+            
         if not geocercas:
-            return [{'error': 'parsing_failed', 'msg': 'No se encontraron coordenadas válidas en el archivo.'}]
+            return [{'error': 'parsing_failed', 'msg': 'Excel vacío o datos inválidos.'}]
             
         return geocercas
     except Exception as e:
         return [{'error': 'exception', 'msg': str(e)}]
 
-GEOCERCAS_MAESTRAS = cargar_geocercas_maestras()
+GEOCERCAS_MAESTRAS = cargar_geocercas_excel()
 
 HTML_INTERFACE = """
 <!DOCTYPE html>
@@ -188,7 +154,7 @@ HTML_INTERFACE = """
     <div class="card">
         <div class="header">
             <h2>📊 Reporte Ejecutivo Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Sincronizado con Archivo Maestro (Alta Velocidad)</p>
+            <p>IDT Tecnologías - Motor Anti Falsos Positivos</p>
         </div>
         
         <div class="main-container">
@@ -243,7 +209,7 @@ HTML_INTERFACE = """
                 </div>
 
                 <div class="form-group">
-                    <label>Geocercas (Leídas de kowi_principales):</label>
+                    <label>Geocercas (Leídas de Excel):</label>
                     <select id="geofence_select" multiple="multiple" style="width: 100%;">
                         <option value="">⏳ Cargando geocercas locales...</option>
                     </select>
@@ -275,11 +241,7 @@ HTML_INTERFACE = """
                 selectGeo.empty();
                 
                 if (geos.length > 0 && geos[0].error) {
-                    if (geos[0].error === 'file_not_found') {
-                        $('#status_msg').html("⚠️ No se encontró el archivo <b>kowi_principales</b> en el servidor.");
-                    } else {
-                        $('#status_msg').html("⚠️ Problema al leer el archivo: " + geos[0].msg);
-                    }
+                    $('#status_msg').html("⚠️ Error en archivo Excel: " + geos[0].msg);
                     $('#btn_submit').prop('disabled', true);
                 } else if (geos.length === 0) {
                     $('#status_msg').html("⚠️ El archivo de geocercas está vacío.");
@@ -291,7 +253,7 @@ HTML_INTERFACE = """
                     selectGeo.select2({ placeholder: "Buscar geocerca para límite personalizado...", width: '100%' });
                     
                     $('#btn_submit').prop('disabled', false);
-                    $('#status_msg').html(`✅ Archivo cargado correctamente (<b>${geos.length} geocercas activas</b>).`);
+                    $('#status_msg').html(`✅ Excel cargado correctamente (<b>${geos.length} geocercas activas</b>).`);
                 }
             } catch (e) {
                 $('#status_msg').text("Error cargando catálogos.");
@@ -394,7 +356,7 @@ HTML_INTERFACE = """
 @app.route('/')
 def index():
     global GEOCERCAS_MAESTRAS
-    GEOCERCAS_MAESTRAS = cargar_geocercas_maestras()
+    GEOCERCAS_MAESTRAS = cargar_geocercas_excel()
     return render_template_string(HTML_INTERFACE)
 
 @app.route('/api_unidades')
@@ -457,8 +419,12 @@ def generar_excel():
 
         geos_validas = [g for g in GEOCERCAS_MAESTRAS if 'error' not in g]
         
-        # BÚSQUEDA PRECISA CON HAVERSINE
-        def obtener_geocerca(lat, lng, address=""):
+        # BÚSQUEDA PRECISA (SOLO APLICA SI VELOCIDAD < 50 km/h)
+        def obtener_geocerca(lat, lng, velocidad_actual, address=""):
+            # Si va hecho la raya en carretera, ignoramos las geocercas
+            if velocidad_actual > 50:
+                return None, "Fuera de geocerca"
+                
             for g in geos_validas:
                 dist_m = calcular_distancia(lat, lng, g['lat'], g['lng'])
                 if dist_m <= g['radius']:
@@ -615,7 +581,8 @@ def generar_excel():
                 curr_lat = t['lat_ini'] + (delta_lat * prog)
                 curr_lng = t['lng_ini'] + (delta_lng * prog)
                 
-                geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, t['origen'])
+                # APLICAMOS EL FILTRO DE VELOCIDAD
+                geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, current_speed, t['origen'])
                 
                 evento = ""
                 detalle = "-"
@@ -654,7 +621,8 @@ def generar_excel():
             
             curr_time = stop['dt_ini']
             idles_in_stop.sort(key=lambda x: x[0])
-            geo_id, geo_name = obtener_geocerca(stop['lat_ini'], stop['lng_ini'], stop['origen'])
+            # En paradas la velocidad es 0, así que sí evalúa geocercas
+            geo_id, geo_name = obtener_geocerca(stop['lat_ini'], stop['lng_ini'], 0, stop['origen'])
             
             for i_start, i_end in idles_in_stop:
                 if i_start > curr_time:
