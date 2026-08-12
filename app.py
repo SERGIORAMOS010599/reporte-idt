@@ -8,6 +8,7 @@ import random
 import os
 import json
 import math
+import csv
 
 app = Flask(__name__)
 
@@ -18,16 +19,57 @@ API_KEY = "7bd626cb4d3874faf995ec075af15d2cd35ec99d"
 BASE_URL = "https://gps.idttecnologias.mx/api/v1"
 COMPANY_ID = "87534"  # ID de Alimentos Kowi
 TIMEZONE_OFFSET = -7  # Zona horaria de Hermosillo
-FILTRO_TEXTO = ""
 
 # ==========================================
-# CATÁLOGO DE GEOCERCAS VIRTUALES (RESTABLECIDO)
+# MOTOR MAESTRO DE LECTURA CSV
 # ==========================================
-GEOCERCAS_LOCALES = [
-    {"id": "VIRT_1", "name": "nutrikowi", "lat": 27.1922, "lng": -109.5530, "radius": 200, "type": "circle"},
-    {"id": "VIRT_2", "name": "hermosillo grnjas dentro del v aliente", "lat": 28.9928, "lng": -111.2181, "radius": 200, "type": "circle"},
-    {"id": "VIRT_3", "name": "entrada a gk 4 (1)", "lat": 28.89267, "lng": -111.45791, "radius": 200, "type": "circle"} # Agregada de ejemplo
-]
+def cargar_geocercas_csv():
+    geocercas = []
+    file_path = 'kowi_principales.csv'
+    
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    nombre = row.get('Nombre zona', '').strip()
+                    lat_str = row.get('Latitud', '')
+                    lng_str = row.get('Longitud', '')
+                    area_str = row.get('Área', '')
+                    
+                    if not nombre or not lat_str or not lng_str:
+                        continue
+                        
+                    # Calculamos el radio exacto en metros a partir del área en km2
+                    radio_m = 200 # Default por si falla el cálculo
+                    try:
+                        area_limpia = float(str(area_str).replace('km2', '').replace('m2', '').strip())
+                        if 'km2' in str(area_str).lower():
+                            area_m2 = area_limpia * 1000000
+                        else:
+                            area_m2 = area_limpia
+                        
+                        # Fórmula: Area = pi * r^2 -> r = sqrt(Area / pi)
+                        radio_calculado = math.sqrt(area_m2 / math.pi)
+                        if radio_calculado > 0:
+                            radio_m = radio_calculado
+                    except:
+                        pass
+                        
+                    geocercas.append({
+                        'id': f"CSV_{len(geocercas)}",
+                        'name': nombre,
+                        'lat': float(lat_str),
+                        'lng': float(lng_str),
+                        'radius': radio_m
+                    })
+        except Exception as e:
+            print(f"Error cargando CSV: {e}")
+            
+    return geocercas
+
+# Cargamos a la memoria RAM del servidor al iniciar
+GEOCERCAS_MAESTRAS = cargar_geocercas_csv()
 
 HTML_INTERFACE = """
 <!DOCTYPE html>
@@ -77,7 +119,7 @@ HTML_INTERFACE = """
     <div class="card">
         <div class="header">
             <h2>📊 Reporte Ejecutivo Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Modo Estable</p>
+            <p>IDT Tecnologías - Sincronizado con CSV Maestro (Alta Velocidad)</p>
         </div>
         
         <div class="main-container">
@@ -132,9 +174,9 @@ HTML_INTERFACE = """
                 </div>
 
                 <div class="form-group">
-                    <label>Geocercas (Opcional: Selecciona para asignar límite estricto):</label>
+                    <label>Geocercas (Leídas de kowi_principales.csv):</label>
                     <select id="geofence_select" multiple="multiple" style="width: 100%;">
-                        <option value="">⏳ Cargando geocercas...</option>
+                        <option value="">⏳ Cargando geocercas locales...</option>
                     </select>
                 </div>
                 <div class="form-group" id="speed_limits_container"></div>
@@ -150,7 +192,7 @@ HTML_INTERFACE = """
             try {
                 const [resUnits, resGeos] = await Promise.all([
                     fetch('/api_unidades'),
-                    fetch('/api_geocercas')
+                    fetch('/api_geocercas_csv')
                 ]);
                 const units = await resUnits.json();
                 const geos = await resGeos.json();
@@ -168,7 +210,11 @@ HTML_INTERFACE = """
                 selectGeo.select2({ placeholder: "Buscar geocerca para límite personalizado...", width: '100%' });
 
                 $('#btn_submit').prop('disabled', false);
-                $('#status_msg').text("");
+                if (geos.length === 0) {
+                    $('#status_msg').text("⚠️ No se encontró el archivo kowi_principales.csv en la carpeta.");
+                } else {
+                    $('#status_msg').text(`✅ Base de datos CSV cargada correctamente (${geos.length} lugares).`);
+                }
             } catch (e) {
                 $('#status_msg').text("Error cargando catálogos.");
             }
@@ -199,7 +245,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⏳ Generando reporte ejecutivo...";
+            status.innerText = "⏳ Cruzando datos y generando reporte ejecutivo...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -269,6 +315,9 @@ HTML_INTERFACE = """
 
 @app.route('/')
 def index():
+    # Recargar el CSV al actualizar la página web por si agregaste datos nuevos
+    global GEOCERCAS_MAESTRAS
+    GEOCERCAS_MAESTRAS = cargar_geocercas_csv()
     return render_template_string(HTML_INTERFACE)
 
 @app.route('/api_unidades')
@@ -289,61 +338,15 @@ def api_unidades():
     except: 
         return jsonify([]), 500
 
-@app.route('/api_geocercas')
-def api_geocercas():
+@app.route('/api_geocercas_csv')
+def api_geocercas_csv():
+    # Enviar las geocercas del CSV al select de la página web
     try:
-        endpoints = ['/territory/list.json', '/poi/list.json', '/object/list.json']
-        geos_raw = []
-        for ep in endpoints:
-            try:
-                res = requests.get(f"{BASE_URL}{ep}", params={'key': API_KEY}, timeout=5)
-                data = res.json()
-                inner = data.get('data', data)
-                if isinstance(inner, dict):
-                    for k in ['territories', 'pois', 'objects', 'items', 'list']:
-                        if k in inner:
-                            geos_raw.extend(inner[k])
-                elif isinstance(inner, list):
-                    geos_raw.extend(inner)
-            except: pass
-
-        geos_normalizadas = []
-        
-        # AGREGAR MANUALES
-        for virt in GEOCERCAS_LOCALES:
-            geos_normalizadas.append({
-                'geofence_id': virt['id'],
-                'name': virt['name']
-            })
-
-        for g in geos_raw:
-            c_id = str(g.get('company_id', ''))
-            if c_id and c_id != COMPANY_ID:
-                continue
-                
-            g_id = str(g.get('territory_id', g.get('poi_id', g.get('object_id', g.get('id', '')))))
-            g_name = str(g.get('name', g.get('title', 'Geocerca')))
-            
-            if FILTRO_TEXTO and FILTRO_TEXTO.lower() not in g_name.lower():
-                continue
-
-            if g_id and g_id != 'None':
-                geos_normalizadas.append({
-                    'geofence_id': g_id,
-                    'name': g_name
-                })
-                
-        vistos = set()
-        finales = []
-        for g in geos_normalizadas:
-            if g['name'] not in vistos:
-                vistos.add(g['name'])
-                finales.append(g)
-                
-        finales.sort(key=lambda x: x['name'])
-        return jsonify(finales)
-    except: 
-        return jsonify([]), 500
+        menu_items = [{'geofence_id': g['id'], 'name': g['name']} for g in GEOCERCAS_MAESTRAS]
+        menu_items.sort(key=lambda x: x['name'])
+        return jsonify(menu_items)
+    except:
+        return jsonify([])
 
 @app.route('/generar_excel')
 def generar_excel():
@@ -373,82 +376,18 @@ def generar_excel():
             if not h: return "23:59:59" if es_fin else "00:00:00"
             return h if len(h) == 8 else h + ":00"
 
-        geos_procesadas = list(GEOCERCAS_LOCALES)
-        
-        try:
-            endpoints = ['/territory/list.json', '/poi/list.json', '/object/list.json']
-            for ep in endpoints:
-                res_geo = requests.get(f"{BASE_URL}{ep}", params={'key': API_KEY}, timeout=5)
-                data_geo = res_geo.json()
-                inner = data_geo.get('data', data_geo)
-                geos_raw = []
-                if isinstance(inner, dict):
-                    for k in ['territories', 'pois', 'objects', 'items', 'list']:
-                        if k in inner:
-                            geos_raw.extend(inner[k])
-                elif isinstance(inner, list):
-                    geos_raw.extend(inner)
-
-                for g in geos_raw:
-                    c_id = str(g.get('company_id', ''))
-                    if c_id and c_id != COMPANY_ID:
-                        continue
-                        
-                    g_id = str(g.get('territory_id', g.get('poi_id', g.get('object_id', g.get('id', '')))))
-                    g_name = str(g.get('name', g.get('title', 'Geocerca')))
-                    g_type = str(g.get('type', 'circle')).lower()
-                    
-                    if g_type == 'polygon' or 'points' in g:
-                        pts = g.get('points', [])
-                        if pts:
-                            geos_procesadas.append({
-                                'id': g_id, 'name': g_name, 'type': 'polygon', 'points': pts
-                            })
-                    else:
-                        g_lat = g.get('lat', g.get('latitude'))
-                        g_lng = g.get('lng', g.get('longitude'))
-                        g_radius = float(g.get('radius', 100))
-                        
-                        if g_lat is None and 'center' in g:
-                            g_lat = g['center'].get('lat')
-                            g_lng = g['center'].get('lng')
-
-                        lat_v = float(g_lat) if g_lat is not None else None
-                        lng_v = float(g_lng) if g_lng is not None else None
-
-                        if lat_v is not None and lng_v is not None:
-                            geos_procesadas.append({
-                                'id': g_id, 'name': g_name, 'type': 'circle', 
-                                'lat': lat_v, 'lng': lng_v, 'radius': g_radius
-                            })
-        except:
-            pass
-
+        # CÁLCULO DIRECTO CONTRA EL CSV
         def obtener_geocerca(lat, lng, address=""):
-            address_str = str(address).lower()
-            for g in geos_procesadas:
-                if g.get('type', 'circle') == 'circle' and g.get('lat') is not None and g.get('lng') is not None:
-                    dist_m = math.sqrt((lat - g['lat'])**2 + (lng - g['lng'])**2) * 111000
-                    if dist_m <= g.get('radius', 100):
-                        return g.get('id'), g['name']
-                elif g.get('type') == 'polygon':
-                    x, y = lng, lat
-                    inside = False
-                    pts = g.get('points', [])
-                    n = len(pts)
-                    for i in range(n):
-                        j = (i + 1) % n
-                        try:
-                            xi, yi = float(pts[i].get('lng', 0)), float(pts[i].get('lat', 0))
-                            xj, yj = float(pts[j].get('lng', 0)), float(pts[j].get('lat', 0))
-                            intersect = ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi + 1e-9) + xi)
-                            if intersect: inside = not inside
-                        except: pass
-                    if inside:
-                        return g.get('id'), g['name']
+            for g in GEOCERCAS_MAESTRAS:
+                dist_m = math.sqrt((lat - g['lat'])**2 + (lng - g['lng'])**2) * 111000
+                if dist_m <= g['radius']:
+                    return g['id'], g['name']
 
+            # Respaldo textual si Kowi manda el nombre en el "address"
+            address_str = str(address).lower()
             if address and "+" not in address and "," not in address and "Zona Operativa" not in address:
                 return "GEO_API", address.strip()
+                
             return None, "Fuera de geocerca"
 
         def to_utc_str(date_str, time_str, is_end=False):
@@ -487,11 +426,29 @@ def generar_excel():
         try:
             response = requests.get(url, params=params, timeout=15)
             data = response.json()
+            rutas_encontradas = []
+            eventos_vistos = set()
             
+            def extraer_tramos(obj):
+                if isinstance(obj, dict):
+                    tipo = str(obj.get('type', '')).lower()
+                    has_start_end = ('start' in obj or 'start_time' in obj) and ('end' in obj or 'end_time' in obj)
+                    if tipo in ['route', 'stop', 'idle'] or has_start_end:
+                        sig = str(obj.get('start', {}).get('time', '')) + tipo
+                        if sig not in eventos_vistos:
+                            eventos_vistos.add(sig)
+                            rutas_encontradas.append(obj)
+                    for k, v in obj.items():
+                        if isinstance(v, (dict, list)): extraer_tramos(v)
+                elif isinstance(obj, list):
+                    for item in obj:
+                        if isinstance(item, (dict, list)): extraer_tramos(item)
+
+            extraer_tramos(data)
+
+            # Extraemos la lista de idles para el empalme
             unit_data = data.get('data', {}).get('units', [])[0] if data.get('data', {}).get('units') else {}
-            rutas_array = unit_data.get('routes', [])
             idles_array = unit_data.get('idles', [])
-            
             parsed_idles = []
             for idl in idles_array:
                 s_dt = parse_iso(idl.get('start', {}).get('time'))
@@ -499,32 +456,50 @@ def generar_excel():
                 if s_dt and e_dt:
                     parsed_idles.append((s_dt, e_dt))
 
-            for item in rutas_array:
-                dt_ini = parse_iso(item.get('start', {}).get('time'))
-                dt_fin = parse_iso(item.get('end', {}).get('time'))
-                if not dt_ini or not dt_fin: continue
+            for item in rutas_encontradas:
+                dt_ini = parse_iso(item.get('start', {}).get('time', item.get('start_time', '')))
+                dt_fin = parse_iso(item.get('end', {}).get('time', item.get('end_time', '')))
+                dur_raw = item.get('duration', item.get('time', 0))
+                try: duracion_seg = float(dur_raw)
+                except: duracion_seg = 0.0
+                
+                if dt_ini and dt_fin:
+                    calc_dur = (dt_fin - dt_ini).total_seconds()
+                    if calc_dur > duracion_seg:
+                        duracion_seg = calc_dur
+                elif dt_ini and not dt_fin: 
+                    dt_fin = dt_ini + timedelta(seconds=duracion_seg)
+                    
+                if not dt_ini: continue
 
-                duracion_seg = (dt_fin - dt_ini).total_seconds()
-                if duracion_seg <= 0: continue
-
-                origen = str(item.get('start', {}).get('address', 'Zona Operativa'))
-                lat_ini = float(item.get('start', {}).get('lat', 27.19))
-                lng_ini = float(item.get('start', {}).get('lng', -109.55))
-                lat_fin = float(item.get('end', {}).get('lat', lat_ini))
-                lng_fin = float(item.get('end', {}).get('lng', lng_ini))
+                origen = str(item.get('start', {}).get('address', item.get('start_address', 'Zona Operativa')))
+                lat_ini = float(item.get('start', {}).get('lat', item.get('start_lat', 27.19)))
+                lng_ini = float(item.get('start', {}).get('lng', item.get('start_lng', -109.55)))
+                lat_fin = float(item.get('end', {}).get('lat', item.get('end_lat', lat_ini)))
+                lng_fin = float(item.get('end', {}).get('lng', item.get('end_lng', lng_ini)))
                 
                 dist_km = float(item.get('distance', 0)) / 1000.0
                 speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
                 tipo = str(item.get('type', '')).lower()
                 
-                # CRUCE EXACTO DEL RALENTÍ
+                # CÁLCULO DE RALENTÍ BALANCEADO
                 idle_sec = 0.0
-                if tipo == 'stop':
-                    for i_start, i_end in parsed_idles:
-                        overlap_start = max(dt_ini, i_start)
-                        overlap_end = min(dt_fin, i_end)
-                        if overlap_end > overlap_start:
-                            idle_sec += (overlap_end - overlap_start).total_seconds()
+                if tipo == 'idle':
+                    idle_sec = duracion_seg
+                else:
+                    # 1. Empalmamos con los idles oficiales de Mapon
+                    if tipo == 'stop':
+                        for i_start, i_end in parsed_idles:
+                            overlap_start = max(dt_ini, i_start)
+                            overlap_end = min(dt_fin, i_end)
+                            if overlap_end > overlap_start:
+                                idle_sec += (overlap_end - overlap_start).total_seconds()
+                    
+                    # 2. Si Mapon no mandó nada y el camión no se mueve, usamos nuestra métrica
+                    if idle_sec == 0 and speed == 0 and duracion_seg > 0:
+                        umbral_segundos = min_ralenti * 60
+                        if duracion_seg <= (umbral_segundos + 180): idle_sec = duracion_seg
+                        else: idle_sec = umbral_segundos + 120 
                 
                 idle_sec = min(idle_sec, duracion_seg)
 
