@@ -23,7 +23,7 @@ TIMEZONE_OFFSET = -7
 # FÓRMULA HAVERSINE (Precisión Satelital)
 # ==========================================
 def calcular_distancia(lat1, lon1, lat2, lon2):
-    R = 6371000 # Radio de la Tierra en metros
+    R = 6371000 
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
@@ -73,7 +73,7 @@ def cargar_geocercas_excel():
             lng_str = str(row[idx_lon]).strip()
             area_str = str(row[idx_area]).strip() if idx_area != -1 and row[idx_area] else ''
             
-            radio_m = 200 # Radio base
+            radio_m = 200 
             try:
                 area_limpia_str = str(area_str).lower().replace('km2', '').replace('m2', '').replace(',', '').strip()
                 area_limpia = float(area_limpia_str)
@@ -85,7 +85,6 @@ def cargar_geocercas_excel():
                 
                 radio_calculado = math.sqrt(area_m2 / math.pi)
                 if radio_calculado > 0: 
-                    # LIMITE DRÁSTICO ANTI-BURBUJAS: Ninguna geocerca puede medir más de 800m de radio
                     radio_m = min(radio_calculado, 800)
             except: pass
             
@@ -154,7 +153,7 @@ HTML_INTERFACE = """
     <div class="card">
         <div class="header">
             <h2>📊 Reporte Ejecutivo Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Sincronización Estricta (Opción B)</p>
+            <p>IDT Tecnologías - Sincronización Híbrida de Paradas Estrictas</p>
         </div>
         
         <div class="main-container">
@@ -203,8 +202,7 @@ HTML_INTERFACE = """
                         <input type="number" id="limite_velocidad" value="80" min="1" max="150" required>
                     </div>
                     <div class="form-group">
-                        <label>Ignorar Ralentís menores a (mins):</label>
-                        <!-- Puesto en 1 por defecto por la regla estricta de Kowi -->
+                        <label>Tolerancia de Parada (mins):</label>
                         <input type="number" id="min_ralenti" value="1" min="1" max="60" required>
                     </div>
                 </div>
@@ -420,7 +418,6 @@ def generar_excel():
 
         geos_validas = [g for g in GEOCERCAS_MAESTRAS if 'error' not in g]
         
-        # BÚSQUEDA PRECISA (SOLO APLICA SI VELOCIDAD < 50 km/h)
         def obtener_geocerca(lat, lng, velocidad_actual, address=""):
             if velocidad_actual > 50:
                 return None, "Fuera de geocerca"
@@ -527,25 +524,11 @@ def generar_excel():
                 speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
                 tipo = str(item.get('type', '')).lower()
                 
-                # CÁLCULO DE RALENTÍ 100% ESPEJO MAPON
-                idle_sec = 0.0
-                if tipo == 'idle':
-                    idle_sec = duracion_seg
-                else:
-                    if tipo == 'stop':
-                        for i_start, i_end in parsed_idles:
-                            overlap_start = max(dt_ini, i_start)
-                            overlap_end = min(dt_fin, i_end)
-                            if overlap_end > overlap_start:
-                                idle_sec += (overlap_end - overlap_start).total_seconds()
-                
-                idle_sec = min(idle_sec, duracion_seg)
-
                 tramos_reales.append({
                     'dt_ini': dt_ini, 'dt_fin': dt_fin, 'origen': origen, 'distancia': dist_km,
                     'velocidad': speed, 'lat_ini': lat_ini, 'lng_ini': lng_ini,
                     'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg,
-                    'idle_sec': idle_sec, 'tipo': tipo
+                    'tipo': tipo
                 })
         except: pass
 
@@ -618,9 +601,53 @@ def generar_excel():
             idles_in_stop.sort(key=lambda x: x[0])
             geo_id, geo_name = obtener_geocerca(stop['lat_ini'], stop['lng_ini'], 0, stop['origen'])
             
-            for i_start, i_end in idles_in_stop:
-                if i_start > curr_time:
-                    dur_ap = (i_start - curr_time).total_seconds()
+            umbral_segundos = min_ralenti * 60
+            
+            if not idles_in_stop:
+                # El sensor no mandó ignición, aplicamos la regla implacable
+                dur_stop = stop['duracion']
+                if dur_stop >= umbral_segundos:
+                    filas_brutas.append({
+                        'fecha': stop['dt_ini'], 'origen': stop['origen'], 'velocidad': 0,
+                        'evento': 'Parada Prolongada (Ralentí)', 'detalle': f"Infracción: Detenido {int(dur_stop//60)} mins", 
+                        'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': geo_name
+                    })
+                    tiempo_ral_seg += dur_stop
+                elif dur_stop >= 60:
+                    filas_brutas.append({
+                        'fecha': stop['dt_ini'], 'origen': stop['origen'], 'velocidad': 0,
+                        'evento': 'Parada Corta', 'detalle': f"Permitida: {int(dur_stop//60)} mins", 
+                        'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': geo_name
+                    })
+                    tiempo_apagado_seg += dur_stop
+            else:
+                # Sí hay señal de motor, separamos ralentí vs apagado
+                for i_start, i_end in idles_in_stop:
+                    if i_start > curr_time:
+                        dur_ap = (i_start - curr_time).total_seconds()
+                        if dur_ap >= 60:
+                            filas_brutas.append({
+                                'fecha': curr_time, 'origen': stop['origen'], 'velocidad': 0,
+                                'evento': 'Motor apagado', 'detalle': f"Apagado: {int(dur_ap//60)} mins", 
+                                'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': geo_name
+                            })
+                            tiempo_apagado_seg += dur_ap
+                    
+                    dur_id = (i_end - i_start).total_seconds()
+                    if dur_id >= umbral_segundos:
+                        filas_brutas.append({
+                            'fecha': i_start, 'origen': stop['origen'], 'velocidad': 0,
+                            'evento': 'Parada Prolongada (Ralentí)', 'detalle': f"Infracción: Motor encendido {int(dur_id//60)} mins", 
+                            'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': geo_name
+                        })
+                        tiempo_ral_seg += dur_id
+                    elif dur_id >= 60:
+                        tiempo_apagado_seg += dur_id
+                        
+                    curr_time = max(curr_time, i_end)
+                    
+                if curr_time < stop['dt_fin']:
+                    dur_ap = (stop['dt_fin'] - curr_time).total_seconds()
                     if dur_ap >= 60:
                         filas_brutas.append({
                             'fecha': curr_time, 'origen': stop['origen'], 'velocidad': 0,
@@ -628,34 +655,10 @@ def generar_excel():
                             'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': geo_name
                         })
                         tiempo_apagado_seg += dur_ap
-                
-                dur_id = (i_end - i_start).total_seconds()
-                
-                # REGLA ESTRICTA DE KOWI: Si el ralentí de Mapon supera los mins indicados (ej. 1 min)
-                umbral_segundos = min_ralenti * 60
-                if dur_id >= umbral_segundos:
-                    filas_brutas.append({
-                        'fecha': i_start, 'origen': stop['origen'], 'velocidad': 0,
-                        'evento': 'Ralentí', 'detalle': f"Motor encendido sin moverse: {int(dur_id//60)} mins", 
-                        'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': geo_name
-                    })
-                    tiempo_ral_seg += dur_id
-                    
-                curr_time = max(curr_time, i_end)
-                
-            if curr_time < stop['dt_fin']:
-                dur_ap = (stop['dt_fin'] - curr_time).total_seconds()
-                if dur_ap >= 60:
-                    filas_brutas.append({
-                        'fecha': curr_time, 'origen': stop['origen'], 'velocidad': 0,
-                        'evento': 'Motor apagado', 'detalle': f"Apagado: {int(dur_ap//60)} mins", 
-                        'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': geo_name
-                    })
-                    tiempo_apagado_seg += dur_ap
             
             filas_brutas.append({
                 'fecha': stop['dt_fin'], 'origen': stop['origen'], 'velocidad': 0,
-                'evento': 'Motor encendido', 'detalle': "-", 
+                'evento': 'Motor encendido / En Movimiento', 'detalle': "-", 
                 'lat': stop['lat_fin'], 'lng': stop['lng_fin'], 'geocerca': geo_name
             })
 
@@ -705,14 +708,14 @@ def generar_excel():
 
         ws.cell(row=6, column=1, value="Velocidad Máxima:").font = Font(bold=True)
         ws.cell(row=6, column=2, value=f"{round(max_vel, 1)} km/h")
-        ws.cell(row=6, column=3, value="Tiempo Muerto (Apagado):").font = Font(bold=True)
+        ws.cell(row=6, column=3, value="Paradas Permitidas / TM:").font = Font(bold=True)
         ws.cell(row=6, column=4, value=f"{muerto_hrs} hrs {muerto_mins} mins ({porc_muerto}%)")
         ws.cell(row=6, column=5, value="Fecha Final:").font = Font(bold=True)
         ws.cell(row=6, column=6, value=fecha_fin_legible)
 
         ws.cell(row=7, column=1, value="Velocidad Promedio:").font = Font(bold=True)
         ws.cell(row=7, column=2, value=f"{round(prom_vel, 1)} km/h")
-        ws.cell(row=7, column=3, value="Tiempo en Ralentí:").font = Font(bold=True)
+        ws.cell(row=7, column=3, value="Paradas Prolongadas (Ralentí):").font = Font(bold=True)
         ws.cell(row=7, column=4, value=f"{ral_hrs} hrs {ral_mins} mins ({porc_ral}%)").font = Font(color="FF0000")
         ws.cell(row=7, column=5, value="Exceso en Geocercas:").font = Font(bold=True)
         ws.cell(row=7, column=6, value=f"{exceso_geo_hrs} hrs {exceso_geo_mins} mins").font = Font(color="FF0000", bold=True)
@@ -747,7 +750,7 @@ def generar_excel():
             if f['geocerca'] != "Fuera de geocerca":
                 geo_cell.font = Font(color="008000", bold=True)
             
-            if "Exceso" in f['evento'] or "Ralentí" in f['evento']: 
+            if "Exceso" in f['evento'] or "Ralentí" in f['evento'] or "Prolongada" in f['evento']: 
                 ws.cell(row=row_idx, column=6).font = Font(color="FF0000", bold=True)
             
             map_cell = ws.cell(row=row_idx, column=9, value="mapa")
