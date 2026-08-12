@@ -111,7 +111,7 @@ HTML_INTERFACE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Reporte Ejecutivo Minuto a Minuto - IDT</title>
+    <title>Histórico De Rutas Minuto a Minuto - IDT</title>
     
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
@@ -141,9 +141,10 @@ HTML_INTERFACE = """
         .select2-container--default .select2-selection--single .select2-selection__rendered { color: #2c3e50 !important; font-size: 13px !important; }
         .select2-container--default .select2-selection--single .select2-selection__arrow { height: 38px !important; }
         
-        .btn-submit { width: 100%; background: #28a745; color: white; padding: 12px; border: none; border-radius: 6px; font-weight: bold; font-size: 14px; cursor: pointer; transition: background 0.2s; margin-top: 10px; }
-        .btn-submit:hover { background: #218838; }
-        .btn-submit:disabled { background: #a5d6a7; cursor: not-allowed; }
+        /* BOTÓN AZUL CLARO */
+        .btn-submit { width: 100%; background: #00a8ff; color: white; padding: 12px; border: none; border-radius: 6px; font-weight: bold; font-size: 14px; cursor: pointer; transition: background 0.2s; margin-top: 10px; }
+        .btn-submit:hover { background: #008be3; }
+        .btn-submit:disabled { background: #8cd6ff; cursor: not-allowed; }
         
         .status-msg { font-size: 13px; color: #e67e22; margin-top: 10px; text-align: center; font-weight: bold; }
         .retry-btn { font-size: 11px; color: #007bff; text-decoration: underline; cursor: pointer; margin-left: 8px; }
@@ -152,7 +153,7 @@ HTML_INTERFACE = """
 <body>
     <div class="card">
         <div class="header">
-            <h2>📊 Reporte Ejecutivo Minuto a Minuto</h2>
+            <h2>📊 Histórico De Rutas Minuto a Minuto</h2>
             <p>IDT Tecnologías - Sincronización Sensorial Avanzada</p>
         </div>
         
@@ -164,6 +165,8 @@ HTML_INTERFACE = """
                 <button type="button" onclick="setRange('esta_semana')">Esta Semana</button>
                 <button type="button" onclick="setRange('semana_anterior')">Semana anterior</button>
                 <button type="button" onclick="setRange('ultimos_7_dias')">Últimos 7 días</button>
+                <button type="button" onclick="setRange('este_mes')">Este mes</button>
+                <button type="button" onclick="setRange('mes_anterior')">Mes anterior</button>
             </div>
 
             <div class="form-content">
@@ -215,7 +218,7 @@ HTML_INTERFACE = """
                 </div>
                 <div class="form-group" id="speed_limits_container"></div>
 
-                <button type="button" class="btn-submit" id="btn_submit" onclick="generarReporte()" disabled>📥 Generar Reporte Ejecutivo</button>
+                <button type="button" class="btn-submit" id="btn_submit" onclick="generarReporte()" disabled>📥 Generar reporte</button>
                 <div id="status_msg" class="status-msg"></div>
             </div>
         </div>
@@ -284,7 +287,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⏳ Extrayendo sensores y calculando reporte ejecutivo...";
+            status.innerText = "⏳ Extrayendo sensores y calculando histórico...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -341,6 +344,9 @@ HTML_INTERFACE = """
             else if (type === 'esta_semana') { const day = now.getDay() || 7; start.setDate(now.getDate() - day + 1); end = now; }
             else if (type === 'semana_anterior') { const day = now.getDay() || 7; start.setDate(now.getDate() - day - 6); end.setDate(now.getDate() - day); }
             else if (type === 'ultimos_7_dias') { start.setDate(now.getDate() - 6); end = now; }
+            else if (type === 'este_mes') { start = new Date(now.getFullYear(), now.getMonth(), 1); end = now; }
+            else if (type === 'mes_anterior') { start = new Date(now.getFullYear(), now.getMonth() - 1, 1); end = new Date(now.getFullYear(), now.getMonth(), 0); }
+            
             document.getElementById('fecha_inicio').value = formatDate(start);
             document.getElementById('fecha_fin').value = formatDate(end);
         }
