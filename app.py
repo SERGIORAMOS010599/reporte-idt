@@ -287,7 +287,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⏳ Extrayendo sensores y calculando histórico...";
+            status.innerText = "⏳ Extrayendo sensores y calculando histórico de rutas... (Puede tardar si es mucha información)";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -439,18 +439,6 @@ def generar_excel():
                 
             return None, "Fuera de geocerca"
 
-        def to_utc_str(date_str, time_str, is_end=False):
-            if not date_str: date_str = "2026-08-09"
-            if not time_str: time_str = "23:59:59" if is_end else "00:00:00"
-            if len(time_str) == 5: time_str += ":00"
-            if len(time_str) != 8: time_str = "23:59:59" if is_end else "00:00:00"
-            try:
-                local_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
-                utc_dt = local_dt - timedelta(hours=TIMEZONE_OFFSET)
-                return utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-            except:
-                return "2026-08-09T00:00:00Z"
-
         def parse_iso(iso_str):
             if not iso_str: return None
             try:
@@ -459,85 +447,105 @@ def generar_excel():
                 return dt_utc + timedelta(hours=TIMEZONE_OFFSET)
             except: return None
 
-        f_in_api = to_utc_str(f_in, hora_inicio)
-        f_fin_api = to_utc_str(f_fin, hora_fin, True)
-
+        # --- MOTOR DE PAGINACIÓN AUTOMÁTICA (CHUNKED REQUESTS) ---
+        dt_inicio_req = datetime.strptime(f"{f_in} {hora_inicio}", "%Y-%m-%d %H:%M:%S")
+        dt_fin_req = datetime.strptime(f"{f_fin} {hora_fin}", "%Y-%m-%d %H:%M:%S")
+        
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
-        params = {
-            "key": API_KEY, 
-            "unit_id": unit_id.replace("ID:", "").strip(), 
-            "from": f_in_api, 
-            "till": f_fin_api,
-            "include": "metrics,stops,idles,routes"
-        }
-
+        
         tramos_reales = []
         parsed_idles = []
-        try:
-            response = requests.get(url, params=params, timeout=15)
-            data = response.json()
-            rutas_encontradas = []
-            eventos_vistos = set()
+        eventos_vistos = set()
+        rutas_encontradas = []
+
+        current_start = dt_inicio_req
+        while current_start < dt_fin_req:
+            # Cortamos en pedazos de máximo 7 días para no saturar a Mapon
+            current_end = current_start + timedelta(days=7)
+            if current_end > dt_fin_req:
+                current_end = dt_fin_req
+                
+            chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            def extraer_tramos(obj):
-                if isinstance(obj, dict):
-                    tipo = str(obj.get('type', '')).lower()
-                    has_start_end = ('start' in obj or 'start_time' in obj) and ('end' in obj or 'end_time' in obj)
-                    if tipo in ['route', 'stop', 'idle'] or has_start_end:
-                        sig = str(obj.get('start', {}).get('time', '')) + tipo
-                        if sig not in eventos_vistos:
-                            eventos_vistos.add(sig)
-                            rutas_encontradas.append(obj)
-                    for k, v in obj.items():
-                        if isinstance(v, (dict, list)): extraer_tramos(v)
-                elif isinstance(obj, list):
-                    for item in obj:
-                        if isinstance(item, (dict, list)): extraer_tramos(item)
+            params = {
+                "key": API_KEY, 
+                "unit_id": unit_id.replace("ID:", "").strip(), 
+                "from": chunk_start_utc, 
+                "till": chunk_end_utc,
+                "include": "metrics,stops,idles,routes"
+            }
 
-            extraer_tramos(data)
+            try:
+                # Damos 45 segundos de tolerancia por cada bloque
+                response = requests.get(url, params=params, timeout=45)
+                data = response.json()
+                
+                def extraer_tramos(obj):
+                    if isinstance(obj, dict):
+                        tipo = str(obj.get('type', '')).lower()
+                        has_start_end = ('start' in obj or 'start_time' in obj) and ('end' in obj or 'end_time' in obj)
+                        if tipo in ['route', 'stop', 'idle'] or has_start_end:
+                            sig = str(obj.get('start', {}).get('time', '')) + tipo
+                            if sig not in eventos_vistos:
+                                eventos_vistos.add(sig)
+                                rutas_encontradas.append(obj)
+                        for k, v in obj.items():
+                            if isinstance(v, (dict, list)): extraer_tramos(v)
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            if isinstance(item, (dict, list)): extraer_tramos(item)
 
-            unit_data = data.get('data', {}).get('units', [])[0] if data.get('data', {}).get('units') else {}
+                extraer_tramos(data)
+
+                unit_data = data.get('data', {}).get('units', [])[0] if data.get('data', {}).get('units') else {}
+                
+                idles_array = unit_data.get('idles', [])
+                for idl in idles_array:
+                    s_dt = parse_iso(idl.get('start', {}).get('time'))
+                    e_dt = parse_iso(idl.get('end', {}).get('time'))
+                    if s_dt and e_dt:
+                        parsed_idles.append({'dt_ini': s_dt, 'dt_fin': e_dt})
+                        
+            except Exception as e:
+                pass # Si un chunk falla temporalmente, pasa al siguiente
+                
+            # Avanzamos al siguiente periodo
+            current_start = current_end
+
+        # Procesar todo lo encontrado en los chunks
+        for item in rutas_encontradas:
+            dt_ini = parse_iso(item.get('start', {}).get('time', item.get('start_time', '')))
+            dt_fin = parse_iso(item.get('end', {}).get('time', item.get('end_time', '')))
+            dur_raw = item.get('duration', item.get('time', 0))
+            try: duracion_seg = float(dur_raw)
+            except: duracion_seg = 0.0
             
-            idles_array = unit_data.get('idles', [])
-            for idl in idles_array:
-                s_dt = parse_iso(idl.get('start', {}).get('time'))
-                e_dt = parse_iso(idl.get('end', {}).get('time'))
-                if s_dt and e_dt:
-                    parsed_idles.append({'dt_ini': s_dt, 'dt_fin': e_dt})
+            if dt_ini and dt_fin:
+                calc_dur = (dt_fin - dt_ini).total_seconds()
+                if calc_dur > duracion_seg:
+                    duracion_seg = calc_dur
+            elif dt_ini and not dt_fin: 
+                dt_fin = dt_ini + timedelta(seconds=duracion_seg)
+                
+            if not dt_ini: continue
 
-            for item in rutas_encontradas:
-                dt_ini = parse_iso(item.get('start', {}).get('time', item.get('start_time', '')))
-                dt_fin = parse_iso(item.get('end', {}).get('time', item.get('end_time', '')))
-                dur_raw = item.get('duration', item.get('time', 0))
-                try: duracion_seg = float(dur_raw)
-                except: duracion_seg = 0.0
-                
-                if dt_ini and dt_fin:
-                    calc_dur = (dt_fin - dt_ini).total_seconds()
-                    if calc_dur > duracion_seg:
-                        duracion_seg = calc_dur
-                elif dt_ini and not dt_fin: 
-                    dt_fin = dt_ini + timedelta(seconds=duracion_seg)
-                    
-                if not dt_ini: continue
-
-                origen = str(item.get('start', {}).get('address', item.get('start_address', 'Zona Operativa')))
-                lat_ini = float(item.get('start', {}).get('lat', item.get('start_lat', 27.19)))
-                lng_ini = float(item.get('start', {}).get('lng', item.get('start_lng', -109.55)))
-                lat_fin = float(item.get('end', {}).get('lat', item.get('end_lat', lat_ini)))
-                lng_fin = float(item.get('end', {}).get('lng', item.get('end_lng', lng_ini)))
-                
-                dist_km = float(item.get('distance', 0)) / 1000.0
-                speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
-                tipo = str(item.get('type', '')).lower()
-                
-                tramos_reales.append({
-                    'dt_ini': dt_ini, 'dt_fin': dt_fin, 'origen': origen, 'distancia': dist_km,
-                    'velocidad': speed, 'lat_ini': lat_ini, 'lng_ini': lng_ini,
-                    'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg,
-                    'tipo': tipo
-                })
-        except: pass
+            origen = str(item.get('start', {}).get('address', item.get('start_address', 'Zona Operativa')))
+            lat_ini = float(item.get('start', {}).get('lat', item.get('start_lat', 27.19)))
+            lng_ini = float(item.get('start', {}).get('lng', item.get('start_lng', -109.55)))
+            lat_fin = float(item.get('end', {}).get('lat', item.get('end_lat', lat_ini)))
+            lng_fin = float(item.get('end', {}).get('lng', item.get('end_lng', lng_ini)))
+            
+            dist_km = float(item.get('distance', 0)) / 1000.0
+            speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
+            tipo = str(item.get('type', '')).lower()
+            
+            tramos_reales.append({
+                'dt_ini': dt_ini, 'dt_fin': dt_fin, 'origen': origen, 'distancia': dist_km,
+                'velocidad': speed, 'lat_ini': lat_ini, 'lng_ini': lng_ini,
+                'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg,
+                'tipo': tipo
+            })
 
         filas_brutas = []
         tiempo_mov_seg = 0
@@ -556,11 +564,9 @@ def generar_excel():
             end_time = t['dt_fin']
             total_seconds = t['duracion']
             
-            # ¡AQUÍ ESTABAN LAS DOS LÍNEAS PERDIDAS!
             delta_lat = (t['lat_fin'] - t['lat_ini'])
             delta_lng = (t['lng_fin'] - t['lng_ini'])
             
-            # Candado matemático de seguridad
             if total_seconds <= 0:
                 total_seconds = 1
                 
@@ -622,7 +628,7 @@ def generar_excel():
             umbral_segundos = min_ralenti * 60
             events = []
             
-            # EL RESCATE MATEMÁTICO: Si no hay idles reportados por el sensor, analizamos el stop total
+            # EL RESCATE MATEMÁTICO
             if not idles_in_stop:
                 dur_stop = stop['duracion']
                 if dur_stop >= umbral_segundos and dur_stop < (4 * 3600):
@@ -632,7 +638,6 @@ def generar_excel():
                     events.append({'time': stop['dt_ini'], 'event': 'Motor apagado', 'dur': dur_stop})
                     events.append({'time': stop['dt_fin'], 'event': 'Motor encendido', 'dur': 0})
             else:
-                # Sí hay idles del sensor (Comportamiento Mapon Fiel)
                 for i_start, i_end in idles_in_stop:
                     if i_start > curr_time:
                         dur_off = (i_start - curr_time).total_seconds()
@@ -698,9 +703,9 @@ def generar_excel():
 
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "Histórico De Rutas Minuto a Minuto"
+        ws.title = "Histórico Ejecutivo"
 
-        ws.cell(row=1, column=3, value="Histórico De Rutas Minuto a Minuto").font = Font(bold=True, size=14)
+        ws.cell(row=1, column=3, value="Histórico Ejecutivo").font = Font(bold=True, size=14)
         ws.cell(row=3, column=3, value="Vehículo:").font = Font(bold=True)
         ws.cell(row=3, column=4, value=str(unit_name))
 
@@ -769,6 +774,9 @@ def generar_excel():
             ws.cell(row=row_idx, column=10, value=round(f['lng'], 6))
             ws.cell(row=row_idx, column=11, value=round(f['lat'], 6))
             row_idx += 1
+
+        if len(filas_finales) == 0:
+            ws.cell(row=11, column=1, value="No se encontraron datos en este rango de fechas. Verifique el periodo seleccionado en Mapon.")
 
         buf = io.BytesIO()
         wb.save(buf)
