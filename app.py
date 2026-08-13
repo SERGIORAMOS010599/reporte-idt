@@ -141,7 +141,6 @@ HTML_INTERFACE = """
         .select2-container--default .select2-selection--single .select2-selection__rendered { color: #2c3e50 !important; font-size: 13px !important; }
         .select2-container--default .select2-selection--single .select2-selection__arrow { height: 38px !important; }
         
-        /* BOTÓN AZUL CLARO */
         .btn-submit { width: 100%; background: #00a8ff; color: white; padding: 12px; border: none; border-radius: 6px; font-weight: bold; font-size: 14px; cursor: pointer; transition: background 0.2s; margin-top: 10px; }
         .btn-submit:hover { background: #008be3; }
         .btn-submit:disabled { background: #8cd6ff; cursor: not-allowed; }
@@ -463,7 +462,7 @@ def generar_excel():
 
         current_start = dt_inicio_req
         while current_start < dt_fin_req:
-            current_end = current_start + timedelta(days=7)
+            current_end = current_start + timedelta(days=15)
             if current_end > dt_fin_req:
                 current_end = dt_fin_req
                 
@@ -512,6 +511,16 @@ def generar_excel():
                 pass 
                 
             current_start = current_end
+
+        # Eliminar posibles duplicados de Idles en los cortes de los chunks
+        idles_unicos = []
+        vistos_idles = set()
+        for idl in parsed_idles:
+            sig = f"{idl['dt_ini']}_{idl['dt_fin']}"
+            if sig not in vistos_idles:
+                vistos_idles.add(sig)
+                idles_unicos.append(idl)
+        parsed_idles = idles_unicos
 
         for item in rutas_encontradas:
             dt_ini = parse_iso(item.get('start', {}).get('time', item.get('start_time', '')))
