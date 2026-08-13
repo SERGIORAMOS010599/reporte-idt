@@ -94,12 +94,15 @@ HTML_INTERFACE = """
     <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
 
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f9; padding: 20px; margin: 0; padding-bottom: 80px; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f9; padding: 20px; margin: 0; }
         .card { max-width: 820px; margin: 0 auto; background: #ffffff; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); position: relative; z-index: 10; }
         
-        .header { text-align: center; margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 15px;}
+        /* NUEVO HEADER CON LOGOS LATERALES */
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 15px; }
+        .header-text { flex: 1; text-align: center; padding: 0 15px; }
         .header h2 { color: #1a252f; margin: 0 0 5px 0; font-size: 22px; }
         .header p { color: #7f8c8d; font-size: 13px; margin: 0; }
+        .logo-img { max-height: 55px; max-width: 140px; object-fit: contain; }
         
         /* OVERLAY DE CARGA (VIDEO) */
         #loading_overlay {
@@ -117,10 +120,6 @@ HTML_INTERFACE = """
         }
         .loading-text { margin-top: 25px; font-size: 22px; font-weight: bold; color: #2c3e50; }
         .loading-subtext { color: #e67e22; margin-top: 8px; font-size: 15px; font-weight: 600; text-align: center; }
-
-        /* LOGOS EN LAS ESQUINAS INFERIORES */
-        .logo-bottom-left { position: fixed; bottom: 20px; left: 20px; max-height: 55px; z-index: 100; object-fit: contain; }
-        .logo-bottom-right { position: fixed; bottom: 20px; right: 20px; max-height: 55px; z-index: 100; object-fit: contain; }
 
         .main-container { display: flex; gap: 20px; }
         .presets-sidebar { width: 190px; border-right: 1px solid #eee; padding-right: 15px; display: flex; flex-direction: column; gap: 6px; }
@@ -153,14 +152,18 @@ HTML_INTERFACE = """
         <div class="loading-subtext" id="overlay_status">Conectando con servidores...</div>
     </div>
 
-    <!-- LOGOS FLOTANTES EN LAS ESQUINAS INFERIORES -->
-    <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-bottom-left" alt="Kowi">
-    <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-bottom-right" alt="IDT Tecnologías">
-
     <div class="card">
         <div class="header">
-            <h2>📊 Histórico De Rutas Minuto a Minuto</h2>
-            <p>Motor Asíncrono de Procesamiento Masivo</p>
+            <!-- LOGO IZQUIERDO -->
+            <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
+            
+            <div class="header-text">
+                <h2>Histórico De Rutas Minuto a Minuto</h2>
+                <p>Motor Asíncrono de Procesamiento Masivo</p>
+            </div>
+            
+            <!-- LOGO DERECHO -->
+            <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
         
         <div class="main-container">
@@ -286,7 +289,6 @@ HTML_INTERFACE = """
             
             btn.disabled = true;
             
-            // MOSTRAR LA PANTALLA DE VIDEO
             overlay.style.display = 'flex';
             overlayStatus.innerText = "⏳ Iniciando conexión segura...";
 
