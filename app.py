@@ -97,7 +97,7 @@ HTML_INTERFACE = """
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f9; padding: 20px; margin: 0; }
         .card { max-width: 820px; margin: 0 auto; background: #ffffff; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); position: relative; z-index: 10; }
         
-        /* NUEVO HEADER CON LOGOS LATERALES */
+        /* HEADER CON LOGOS ALINEADOS */
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 15px; }
         .header-text { flex: 1; text-align: center; padding: 0 15px; }
         .header h2 { color: #1a252f; margin: 0 0 5px 0; font-size: 22px; }
@@ -132,6 +132,8 @@ HTML_INTERFACE = """
         label { display: block; font-weight: 600; margin-bottom: 5px; color: #34495e; font-size: 12px; }
         select, input { width: 100%; padding: 9px; border: 1px solid #dcdfe6; border-radius: 6px; box-sizing: border-box; font-size: 13px; color: #2c3e50; }
         .select2-container .select2-selection--single { height: 40px !important; border: 1px solid #dcdfe6 !important; border-radius: 6px !important; display: flex !important; align-items: center !important; }
+        .select2-container--default .select2-selection--single .select2-selection__rendered { color: #2c3e50 !important; font-size: 13px !important; }
+        .select2-container--default .select2-selection--single .select2-selection__arrow { height: 38px !important; }
         .btn-submit { width: 100%; background: #00a8ff; color: white; padding: 12px; border: none; border-radius: 6px; font-weight: bold; font-size: 14px; cursor: pointer; transition: background 0.2s; margin-top: 10px; }
         .btn-submit:hover { background: #008be3; }
         .btn-submit:disabled { background: #8cd6ff; cursor: not-allowed; }
@@ -142,10 +144,10 @@ HTML_INTERFACE = """
 </head>
 <body>
 
-    <!-- PANTALLA DE CARGA CON VIDEO (Carga desde la carpeta static) -->
+    <!-- PANTALLA DE CARGA CON VIDEO -->
     <div id="loading_overlay">
         <video autoplay loop muted playsinline>
-            <source src="{{ url_for('static', filename='video_carga.mp4') }}" type="video/mp4">
+            <source src="{{ url_for('static', filename='video_kowi.mp4') }}" type="video/mp4">
             Tu navegador no soporta videos.
         </video>
         <div class="loading-text">Generando Reporte Ejecutivo...</div>
@@ -154,7 +156,7 @@ HTML_INTERFACE = """
 
     <div class="card">
         <div class="header">
-            <!-- LOGO IZQUIERDO -->
+            <!-- LOGO KOWI (Izquierda) -->
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             
             <div class="header-text">
@@ -162,7 +164,7 @@ HTML_INTERFACE = """
                 <p>Motor Asíncrono de Procesamiento Masivo</p>
             </div>
             
-            <!-- LOGO DERECHO -->
+            <!-- LOGO IDT (Derecha) -->
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
         
@@ -289,6 +291,7 @@ HTML_INTERFACE = """
             
             btn.disabled = true;
             
+            // MOSTRAR PANTALLA DE CARGA CON VIDEO
             overlay.style.display = 'flex';
             overlayStatus.innerText = "⏳ Iniciando conexión segura...";
 
