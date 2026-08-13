@@ -94,11 +94,34 @@ HTML_INTERFACE = """
     <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
 
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f9; padding: 20px; margin: 0; }
-        .card { max-width: 820px; margin: 0 auto; background: #ffffff; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }
-        .header { text-align: center; margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 15px; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f9; padding: 20px; margin: 0; padding-bottom: 80px; }
+        .card { max-width: 820px; margin: 0 auto; background: #ffffff; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); position: relative; z-index: 10; }
+        
+        .header { text-align: center; margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 15px;}
         .header h2 { color: #1a252f; margin: 0 0 5px 0; font-size: 22px; }
         .header p { color: #7f8c8d; font-size: 13px; margin: 0; }
+        
+        /* OVERLAY DE CARGA (VIDEO) */
+        #loading_overlay {
+            display: none; 
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(255, 255, 255, 0.96);
+            z-index: 9999;
+            flex-direction: column; justify-content: center; align-items: center;
+        }
+        #loading_overlay video {
+            max-width: 500px;
+            width: 90%;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+        }
+        .loading-text { margin-top: 25px; font-size: 22px; font-weight: bold; color: #2c3e50; }
+        .loading-subtext { color: #e67e22; margin-top: 8px; font-size: 15px; font-weight: 600; text-align: center; }
+
+        /* LOGOS EN LAS ESQUINAS INFERIORES */
+        .logo-bottom-left { position: fixed; bottom: 20px; left: 20px; max-height: 55px; z-index: 100; object-fit: contain; }
+        .logo-bottom-right { position: fixed; bottom: 20px; right: 20px; max-height: 55px; z-index: 100; object-fit: contain; }
+
         .main-container { display: flex; gap: 20px; }
         .presets-sidebar { width: 190px; border-right: 1px solid #eee; padding-right: 15px; display: flex; flex-direction: column; gap: 6px; }
         .presets-sidebar button { background: #f8f9fa; border: 1px solid #dde2e5; color: #495057; text-align: left; padding: 8px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
@@ -119,10 +142,25 @@ HTML_INTERFACE = """
     </style>
 </head>
 <body>
+
+    <!-- PANTALLA DE CARGA CON VIDEO (Carga desde la carpeta static) -->
+    <div id="loading_overlay">
+        <video autoplay loop muted playsinline>
+            <source src="{{ url_for('static', filename='video_carga.mp4') }}" type="video/mp4">
+            Tu navegador no soporta videos.
+        </video>
+        <div class="loading-text">Generando Reporte Ejecutivo...</div>
+        <div class="loading-subtext" id="overlay_status">Conectando con servidores...</div>
+    </div>
+
+    <!-- LOGOS FLOTANTES EN LAS ESQUINAS INFERIORES -->
+    <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-bottom-left" alt="Kowi">
+    <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-bottom-right" alt="IDT Tecnologías">
+
     <div class="card">
         <div class="header">
             <h2>📊 Histórico De Rutas Minuto a Minuto</h2>
-            <p>IDT Tecnologías - Motor Asíncrono de Procesamiento Masivo</p>
+            <p>Motor Asíncrono de Procesamiento Masivo</p>
         </div>
         
         <div class="main-container">
@@ -239,12 +277,18 @@ HTML_INTERFACE = """
         async function iniciarReporte() {
             const btn = document.getElementById('btn_submit');
             const status = document.getElementById('status_msg');
+            const overlay = document.getElementById('loading_overlay');
+            const overlayStatus = document.getElementById('overlay_status');
+            
             const unitId = $('#unit_select').val();
             const unitText = $('#unit_select option:selected').text();
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⏳ Iniciando conexión segura...";
+            
+            // MOSTRAR LA PANTALLA DE VIDEO
+            overlay.style.display = 'flex';
+            overlayStatus.innerText = "⏳ Iniciando conexión segura...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -273,20 +317,24 @@ HTML_INTERFACE = """
                     const sData = await sRes.json();
 
                     if (sData.status === 'procesando') {
-                        status.innerText = `⏳ ${sData.msg}`;
+                        overlayStatus.innerText = `⏳ ${sData.msg}`;
                     } else if (sData.status === 'completado') {
                         clearInterval(interval);
+                        overlay.style.display = 'none';
                         status.innerText = "¡Listo! Descargando reporte...";
                         window.location.href = `/descargar_reporte?task_id=${taskId}&unit_name=${encodeURIComponent(unitText)}`;
                         btn.disabled = false;
                     } else if (sData.status === 'error') {
                         clearInterval(interval);
+                        overlay.style.display = 'none';
                         status.innerText = `❌ Error: ${sData.msg}`;
                         btn.disabled = false;
+                        alert("Error en el reporte: " + sData.msg);
                     }
                 }, 3000);
 
             } catch (e) {
+                overlay.style.display = 'none';
                 status.innerText = "Error al iniciar el reporte.";
                 btn.disabled = false;
             }
