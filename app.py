@@ -125,7 +125,7 @@ HTML_INTERFACE = """
         .header p { color: #7f8c8d; font-size: 13px; margin: 0; }
         
         .main-container { display: flex; gap: 20px; }
-        .presets-sidebar { width: 180px; border-right: 1px solid #eee; padding-right: 15px; display: flex; flex-direction: column; gap: 6px; }
+        .presets-sidebar { width: 190px; border-right: 1px solid #eee; padding-right: 15px; display: flex; flex-direction: column; gap: 6px; }
         .presets-sidebar button { background: #f8f9fa; border: 1px solid #dde2e5; color: #495057; text-align: left; padding: 8px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
         .presets-sidebar button:hover { background: #e9ecef; color: #212529; }
         
@@ -141,12 +141,15 @@ HTML_INTERFACE = """
         .select2-container--default .select2-selection--single .select2-selection__rendered { color: #2c3e50 !important; font-size: 13px !important; }
         .select2-container--default .select2-selection--single .select2-selection__arrow { height: 38px !important; }
         
+        /* BOTÓN AZUL CLARO */
         .btn-submit { width: 100%; background: #00a8ff; color: white; padding: 12px; border: none; border-radius: 6px; font-weight: bold; font-size: 14px; cursor: pointer; transition: background 0.2s; margin-top: 10px; }
         .btn-submit:hover { background: #008be3; }
         .btn-submit:disabled { background: #8cd6ff; cursor: not-allowed; }
         
         .status-msg { font-size: 13px; color: #e67e22; margin-top: 10px; text-align: center; font-weight: bold; }
         .retry-btn { font-size: 11px; color: #007bff; text-decoration: underline; cursor: pointer; margin-left: 8px; }
+        
+        hr { border: 0; border-top: 1px solid #dde2e5; margin: 5px 0; }
     </style>
 </head>
 <body>
@@ -164,8 +167,12 @@ HTML_INTERFACE = """
                 <button type="button" onclick="setRange('esta_semana')">Esta Semana</button>
                 <button type="button" onclick="setRange('semana_anterior')">Semana anterior</button>
                 <button type="button" onclick="setRange('ultimos_7_dias')">Últimos 7 días</button>
-                <button type="button" onclick="setRange('este_mes')">Este mes</button>
-                <button type="button" onclick="setRange('mes_anterior')">Mes anterior</button>
+                <hr>
+                <button type="button" onclick="setRange('q1_este_mes')">1ra Quincena (Mes Actual)</button>
+                <button type="button" onclick="setRange('q2_este_mes')">2da Quincena (Mes Actual)</button>
+                <hr>
+                <button type="button" onclick="setRange('q1_mes_anterior')">1ra Quincena (Mes Pasado)</button>
+                <button type="button" onclick="setRange('q2_mes_anterior')">2da Quincena (Mes Pasado)</button>
             </div>
 
             <div class="form-content">
@@ -286,7 +293,7 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            status.innerText = "⏳ Extrayendo sensores y calculando histórico de rutas... (Puede tardar si es mucha información)";
+            status.innerText = "⏳ Extrayendo sensores y calculando histórico... (Procesar muchos días tomará unos segundos)";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -322,8 +329,8 @@ HTML_INTERFACE = """
             } else {
                 const errorDetail = await res.text();
                 console.error("Error backend:", errorDetail);
-                alert("Error de Python: " + errorDetail);
-                status.innerText = "Error en la generación.";
+                alert("Servidor saturado por demasiados días: " + errorDetail);
+                status.innerText = "Error. Intenta procesar menos días a la vez (Quincenal).";
             }
             btn.disabled = false;
         }
@@ -343,8 +350,10 @@ HTML_INTERFACE = """
             else if (type === 'esta_semana') { const day = now.getDay() || 7; start.setDate(now.getDate() - day + 1); end = now; }
             else if (type === 'semana_anterior') { const day = now.getDay() || 7; start.setDate(now.getDate() - day - 6); end.setDate(now.getDate() - day); }
             else if (type === 'ultimos_7_dias') { start.setDate(now.getDate() - 6); end = now; }
-            else if (type === 'este_mes') { start = new Date(now.getFullYear(), now.getMonth(), 1); end = now; }
-            else if (type === 'mes_anterior') { start = new Date(now.getFullYear(), now.getMonth() - 1, 1); end = new Date(now.getFullYear(), now.getMonth(), 0); }
+            else if (type === 'q1_este_mes') { start = new Date(now.getFullYear(), now.getMonth(), 1); end = new Date(now.getFullYear(), now.getMonth(), 15); }
+            else if (type === 'q2_este_mes') { start = new Date(now.getFullYear(), now.getMonth(), 16); end = new Date(now.getFullYear(), now.getMonth() + 1, 0); }
+            else if (type === 'q1_mes_anterior') { start = new Date(now.getFullYear(), now.getMonth() - 1, 1); end = new Date(now.getFullYear(), now.getMonth() - 1, 15); }
+            else if (type === 'q2_mes_anterior') { start = new Date(now.getFullYear(), now.getMonth() - 1, 16); end = new Date(now.getFullYear(), now.getMonth(), 0); }
             
             document.getElementById('fecha_inicio').value = formatDate(start);
             document.getElementById('fecha_fin').value = formatDate(end);
