@@ -134,8 +134,8 @@ HTML_INTERFACE = """
                 <button type="button" onclick="setRange('semana_anterior')">Semana anterior</button>
                 <button type="button" onclick="setRange('ultimos_7_dias')">Últimos 7 días</button>
                 <hr>
-                <button type="button" onclick="setRange('este_mes')">Mes Completo (Actual)</button>
-                <button type="button" onclick="setRange('mes_anterior')">Mes Completo (Pasado)</button>
+                <button type="button" onclick="setRange('este_mes')">Mes completo</button>
+                <button type="button" onclick="setRange('mes_anterior')">Mes anterior</button>
             </div>
 
             <div class="form-content">
@@ -264,12 +264,10 @@ HTML_INTERFACE = """
             });
 
             try {
-                // Paso 1: Pedirle al servidor que inicie el trabajo en el cuarto trasero
                 const resInit = await fetch(`/iniciar_reporte?${params.toString()}`);
                 const dataInit = await resInit.json();
                 const taskId = dataInit.task_id;
 
-                // Paso 2: Preguntarle cada 3 segundos cómo va
                 const interval = setInterval(async () => {
                     const sRes = await fetch(`/estado_reporte?task_id=${taskId}`);
                     const sData = await sRes.json();
@@ -354,10 +352,8 @@ def iniciar_reporte():
     task_id = str(uuid.uuid4())
     TASKS[task_id] = {'status': 'procesando', 'msg': 'Iniciando hilo de trabajo...'}
     
-    # Recolectar parámetros
     params = request.args.to_dict()
     
-    # Iniciar trabajo en segundo plano
     thread = threading.Thread(target=procesar_reporte_bg, args=(task_id, params))
     thread.daemon = True
     thread.start()
@@ -423,7 +419,7 @@ def procesar_reporte_bg(task_id, params):
         rutas_encontradas = []
 
         current_start = dt_inicio_req
-        chunk_days = 10 # Bajamos a 10 para mayor fluidez
+        chunk_days = 10 
         
         while current_start < dt_fin_req:
             current_end = current_start + timedelta(days=chunk_days)
@@ -712,7 +708,6 @@ def procesar_reporte_bg(task_id, params):
         if len(filas_finales) == 0:
             ws.cell(row=11, column=1, value="No se encontraron datos. Verifique el periodo seleccionado en Mapon.")
 
-        # Guardar en archivo temporal
         fd, path = tempfile.mkstemp(suffix=".xlsx")
         with os.fdopen(fd, 'wb') as f:
             wb.save(f)
