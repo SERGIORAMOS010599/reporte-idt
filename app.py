@@ -448,8 +448,11 @@ def generar_excel():
             except: return None
 
         # --- MOTOR DE PAGINACIÓN AUTOMÁTICA (CHUNKED REQUESTS) ---
-        dt_inicio_req = datetime.strptime(f"{f_in} {hora_inicio}", "%Y-%m-%d %H:%M:%S")
-        dt_fin_req = datetime.strptime(f"{f_fin} {hora_fin}", "%Y-%m-%d %H:%M:%S")
+        hora_inicio_str = normalizar_hora(hora_inicio)
+        hora_fin_str = normalizar_hora(hora_fin, True)
+        
+        dt_inicio_req = datetime.strptime(f"{f_in} {hora_inicio_str}", "%Y-%m-%d %H:%M:%S")
+        dt_fin_req = datetime.strptime(f"{f_fin} {hora_fin_str}", "%Y-%m-%d %H:%M:%S")
         
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
         
@@ -460,7 +463,6 @@ def generar_excel():
 
         current_start = dt_inicio_req
         while current_start < dt_fin_req:
-            # Cortamos en pedazos de máximo 7 días para no saturar a Mapon
             current_end = current_start + timedelta(days=7)
             if current_end > dt_fin_req:
                 current_end = dt_fin_req
@@ -477,7 +479,6 @@ def generar_excel():
             }
 
             try:
-                # Damos 45 segundos de tolerancia por cada bloque
                 response = requests.get(url, params=params, timeout=45)
                 data = response.json()
                 
@@ -508,12 +509,10 @@ def generar_excel():
                         parsed_idles.append({'dt_ini': s_dt, 'dt_fin': e_dt})
                         
             except Exception as e:
-                pass # Si un chunk falla temporalmente, pasa al siguiente
+                pass 
                 
-            # Avanzamos al siguiente periodo
             current_start = current_end
 
-        # Procesar todo lo encontrado en los chunks
         for item in rutas_encontradas:
             dt_ini = parse_iso(item.get('start', {}).get('time', item.get('start_time', '')))
             dt_fin = parse_iso(item.get('end', {}).get('time', item.get('end_time', '')))
