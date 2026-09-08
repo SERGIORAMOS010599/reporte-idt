@@ -2,15 +2,13 @@ from flask import Flask, render_template_string, request, send_file, jsonify
 import requests
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill
-import io
-from datetime import datetime, timedelta
-import random
+import math
 import os
 import json
-import math
 import threading
 import uuid
 import tempfile
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
@@ -26,7 +24,7 @@ TIMEZONE_OFFSET = -7
 TASKS = {}
 
 # ==========================================
-# FÓRMULA HAVERSINE Y FUNCIONES DE RUTA
+# FÓRMULA HAVERSINE
 # ==========================================
 def calcular_distancia(lat1, lon1, lat2, lon2):
     R = 6371000 
@@ -37,53 +35,6 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2.0)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlon/2.0)**2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
-
-def decode_polyline(polyline_str):
-    index, lat, lng = 0, 0, 0
-    coordinates = []
-    changes = {'latitude': 0, 'longitude': 0}
-    try:
-        while index < len(polyline_str):
-            for unit in ['latitude', 'longitude']: 
-                shift, result = 0, 0
-                while True:
-                    if index >= len(polyline_str): break
-                    byte = ord(polyline_str[index]) - 63
-                    index += 1
-                    result |= (byte & 0x1f) << shift
-                    shift += 5
-                    if not byte >= 0x20: break
-                if (result & 1): changes[unit] = ~(result >> 1)
-                else: changes[unit] = (result >> 1)
-            lat += changes['latitude']
-            lng += changes['longitude']
-            coordinates.append((lat / 100000.0, lng / 100000.0))
-    except: pass
-    return coordinates
-
-def interpolate_on_polyline(points, progress):
-    if not points: return 0.0, 0.0
-    if len(points) == 1: return points[0]
-    
-    dists = [0.0]
-    for i in range(1, len(points)):
-        dists.append(dists[-1] + calcular_distancia(points[i-1][0], points[i-1][1], points[i][0], points[i][1]))
-    
-    total_dist = dists[-1]
-    if total_dist == 0: return points[0]
-        
-    target_dist = total_dist * progress
-    
-    for i in range(1, len(dists)):
-        if dists[i] >= target_dist:
-            segment_length = dists[i] - dists[i-1]
-            if segment_length == 0: return points[i]
-            segment_prog = (target_dist - dists[i-1]) / segment_length
-            lat = points[i-1][0] + (points[i][0] - points[i-1][0]) * segment_prog
-            lng = points[i-1][1] + (points[i][1] - points[i-1][1]) * segment_prog
-            return (lat, lng)
-            
-    return points[-1]
 
 # ==========================================
 # LECTOR EXCEL
@@ -143,28 +94,18 @@ HTML_INTERFACE = """
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f9; padding: 20px; margin: 0; }
         .card { max-width: 820px; margin: 0 auto; background: #ffffff; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); position: relative; z-index: 10; }
-        
-        /* HEADER CON LOGOS ALINEADOS */
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 15px; }
         .header-text { flex: 1; text-align: center; padding: 0 15px; }
         .header h2 { color: #1a252f; margin: 0 0 5px 0; font-size: 22px; }
         .header p { color: #7f8c8d; font-size: 13px; margin: 0; }
         .logo-img { max-height: 55px; max-width: 140px; object-fit: contain; }
         
-        /* OVERLAY DE CARGA (VIDEO) */
         #loading_overlay {
-            display: none; 
-            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(255, 255, 255, 0.96);
-            z-index: 9999;
+            display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(255, 255, 255, 0.96); z-index: 9999;
             flex-direction: column; justify-content: center; align-items: center;
         }
-        #loading_overlay video {
-            max-width: 500px;
-            width: 90%;
-            border-radius: 12px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.15);
-        }
+        #loading_overlay video { max-width: 500px; width: 90%; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.15); }
         .loading-text { margin-top: 25px; font-size: 22px; font-weight: bold; color: #2c3e50; }
         .loading-subtext { color: #e67e22; margin-top: 8px; font-size: 15px; font-weight: 600; text-align: center; }
 
@@ -190,12 +131,9 @@ HTML_INTERFACE = """
     </style>
 </head>
 <body>
-
-    <!-- PANTALLA DE CARGA CON VIDEO -->
     <div id="loading_overlay">
         <video autoplay loop muted playsinline>
             <source src="{{ url_for('static', filename='video_kowi.mp4') }}" type="video/mp4">
-            Tu navegador no soporta videos.
         </video>
         <div class="loading-text">Generando Reporte Ejecutivo...</div>
         <div class="loading-subtext" id="overlay_status">Conectando con servidores...</div>
@@ -203,15 +141,11 @@ HTML_INTERFACE = """
 
     <div class="card">
         <div class="header">
-            <!-- LOGO KOWI (Izquierda) -->
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
-            
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
                 <p>Motor Asíncrono de Procesamiento Masivo</p>
             </div>
-            
-            <!-- LOGO IDT (Derecha) -->
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
         
@@ -338,7 +272,6 @@ HTML_INTERFACE = """
             
             btn.disabled = true;
             
-            // MOSTRAR PANTALLA DE CARGA CON VIDEO
             overlay.style.display = 'flex';
             overlayStatus.innerText = "⏳ Iniciando conexión segura...";
 
@@ -513,10 +446,13 @@ def procesar_reporte_bg(task_id, params):
         dt_fin_req = datetime.strptime(f"{f_fin} {hora_fin}", "%Y-%m-%d %H:%M:%S")
         
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
+        url_hist = "https://gps.idttecnologias.mx/api/v1/unit_data/history.json"
+        
         tramos_reales = []
         parsed_idles = []
         eventos_vistos = set()
         rutas_encontradas = []
+        puntos_historial = []  # NUEVO: Arreglo donde guardaremos las coordenadas puras
 
         current_start = dt_inicio_req
         chunk_days = 10 
@@ -530,11 +466,28 @@ def procesar_reporte_bg(task_id, params):
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            # SE AÑADE 'polyline' A LA PETICIÓN
-            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,stops,idles,routes,polyline"}
+            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,stops,idles,routes"}
+            req_hist = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc}
+            
             try:
+                # 1. Obtenemos Rutas y Paradas (Resumen)
                 response = requests.get(url, params=req_params, timeout=45)
                 data = response.json()
+                
+                # 2. Obtenemos la Telemetría Real (Coordenadas exactas)
+                resp_hist = requests.get(url_hist, params=req_hist, timeout=45)
+                data_hist = resp_hist.json()
+                hist_array = data_hist.get('data', {}).get('units', [{}])[0].get('history', [])
+                
+                for hp in hist_array:
+                    h_dt = parse_iso(hp.get('time'))
+                    if h_dt:
+                        puntos_historial.append({
+                            'dt': h_dt,
+                            'lat': float(hp.get('lat', 0)),
+                            'lng': float(hp.get('lng', 0)),
+                            'speed': float(hp.get('speed', 0))
+                        })
                 
                 def extraer_tramos(obj):
                     if isinstance(obj, dict):
@@ -595,18 +548,13 @@ def procesar_reporte_bg(task_id, params):
             dist_km = float(item.get('distance', 0)) / 1000.0
             speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
             
-            # --- DECODIFICACIÓN DE RUTA REAL ---
-            poly_str = item.get('polyline', '')
-            puntos_ruta = decode_polyline(poly_str) if poly_str else [(lat_ini, lng_ini), (lat_fin, lng_fin)]
-            
             tramos_reales.append({
                 'dt_ini': dt_ini, 'dt_fin': dt_fin, 'origen': origen, 'distancia': dist_km,
                 'velocidad': speed, 'lat_ini': lat_ini, 'lng_ini': lng_ini,
-                'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg, 'tipo': str(item.get('type', '')).lower(),
-                'puntos_ruta': puntos_ruta
+                'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg, 'tipo': str(item.get('type', '')).lower()
             })
 
-        TASKS[task_id]['msg'] = "Calculando movimiento y evaluando geocercas (minuto a minuto)..."
+        TASKS[task_id]['msg'] = "Calculando movimiento y evaluando geocercas (usando puntos reales)..."
 
         filas_brutas = []
         tiempo_mov_seg = 0
@@ -620,21 +568,23 @@ def procesar_reporte_bg(task_id, params):
 
         for t in list_routes:
             tiempo_mov_seg += t['duracion']
-            curr_time = t['dt_ini']
-            end_time = t['dt_fin']
-            total_seconds = t['duracion'] if t['duracion'] > 0 else 1
             
-            avg_speed = (t['distancia'] / (total_seconds / 3600)) if total_seconds > 0 else 0
+            # FILTRAMOS EXCLUSIVAMENTE LOS PUNTOS GPS EXACTOS DE ESTE TRAMO
+            puntos_ruta = [p for p in puntos_historial if t['dt_ini'] <= p['dt'] <= t['dt_fin']]
             
-            while curr_time <= end_time:
-                current_speed = round(random.uniform(avg_speed * 0.85, avg_speed * 1.15), 1)
-                current_speed = min(current_speed, t['velocidad']) if t['velocidad'] > 0 else current_speed
-                if current_speed == 0: current_speed = avg_speed
+            # Respaldo de seguridad en caso de que Mapon no mande puntos en el history
+            if not puntos_ruta:
+                puntos_ruta = [
+                    {'dt': t['dt_ini'], 'lat': t['lat_ini'], 'lng': t['lng_ini'], 'speed': t['velocidad']},
+                    {'dt': t['dt_fin'], 'lat': t['lat_fin'], 'lng': t['lng_fin'], 'speed': t['velocidad']}
+                ]
                 
-                prog = min((curr_time - t['dt_ini']).total_seconds() / total_seconds, 1.0)
-                
-                # --- INTERPOLACIÓN SOBRE LA POLILÍNEA REAL ---
-                curr_lat, curr_lng = interpolate_on_polyline(t.get('puntos_ruta', []), prog)
+            last_time = None
+            for p in puntos_ruta:
+                curr_time = p['dt']
+                curr_lat = p['lat']
+                curr_lng = p['lng']
+                current_speed = p['speed']
                 
                 geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, current_speed, t['origen'])
                 
@@ -654,13 +604,14 @@ def procesar_reporte_bg(task_id, params):
                     if current_speed > limite_aplicable:
                         evento = f"Exceso en {geo_name}"
                         detalle = f"Vel: {current_speed} (Límite: {limite_aplicable})"
-                        tiempo_exceso_geo_seg += 60
+                        dt_diff = (curr_time - last_time).total_seconds() if last_time else 60
+                        tiempo_exceso_geo_seg += dt_diff
                 elif current_speed > limite_velocidad:
                     evento = "Exceso de velocidad"
                     detalle = f"Vel: {current_speed} (Límite: {limite_velocidad})"
 
                 filas_brutas.append({'fecha': curr_time, 'origen': t['origen'], 'velocidad': current_speed, 'evento': evento, 'detalle': detalle, 'lat': curr_lat, 'lng': curr_lng, 'geocerca': geo_name})
-                curr_time += timedelta(minutes=1)
+                last_time = curr_time
 
         TASKS[task_id]['msg'] = "Analizando descansos y tiempo de ralentí..."
 
