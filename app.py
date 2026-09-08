@@ -566,25 +566,27 @@ def procesar_reporte_bg(task_id, params):
         list_routes = [t for t in tramos_reales if t['tipo'] == 'route']
         list_stops = [t for t in tramos_reales if t['tipo'] in ['stop', 'idle']]
 
-        for t in list_routes:
+for t in list_routes:
             tiempo_mov_seg += t['duracion']
+            curr_time = t['dt_ini']
+            end_time = t['dt_fin']
+            total_seconds = t['duracion'] if t['duracion'] > 0 else 1
             
-            # FILTRAMOS EXCLUSIVAMENTE LOS PUNTOS GPS EXACTOS DE ESTE TRAMO
-            puntos_ruta = [p for p in puntos_historial if t['dt_ini'] <= p['dt'] <= t['dt_fin']]
+            # 1. Obtenemos las coordenadas geométricas de la carretera (Polyline)
+            puntos_carretera = t.get('puntos_ruta', [])
             
-            # Respaldo de seguridad en caso de que Mapon no mande puntos en el history
-            if not puntos_ruta:
-                puntos_ruta = [
-                    {'dt': t['dt_ini'], 'lat': t['lat_ini'], 'lng': t['lng_ini'], 'speed': t['velocidad']},
-                    {'dt': t['dt_fin'], 'lat': t['lat_fin'], 'lng': t['lng_fin'], 'speed': t['velocidad']}
-                ]
+            # Respaldo por si Mapon no envía la curva
+            if len(puntos_carretera) < 2:
+                puntos_carretera = [(t['lat_ini'], t['lng_ini']), (t['lat_fin'], t['lng_fin'])]
                 
-            last_time = None
-            for p in puntos_ruta:
-                curr_time = p['dt']
-                curr_lat = p['lat']
-                curr_lng = p['lng']
-                current_speed = p['speed']
+            # 2. Generamos un punto minuto a minuto, pero deslizándolo SOBRE LA CARRETERA
+            while curr_time <= end_time:
+                # Calculamos qué porcentaje del viaje llevamos
+                prog = min((curr_time - t['dt_ini']).total_seconds() / total_seconds, 1.0)
+                
+                # Proyectamos la coordenada exactamente sobre el trazo de la calle/carretera
+                curr_lat, curr_lng = interpolate_on_polyline(puntos_carretera, prog)
+                current_speed = t['velocidad']  # Velocidad general del tramo
                 
                 geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, current_speed, t['origen'])
                 
@@ -604,14 +606,18 @@ def procesar_reporte_bg(task_id, params):
                     if current_speed > limite_aplicable:
                         evento = f"Exceso en {geo_name}"
                         detalle = f"Vel: {current_speed} (Límite: {limite_aplicable})"
-                        dt_diff = (curr_time - last_time).total_seconds() if last_time else 60
-                        tiempo_exceso_geo_seg += dt_diff
+                        tiempo_exceso_geo_seg += 60
                 elif current_speed > limite_velocidad:
                     evento = "Exceso de velocidad"
                     detalle = f"Vel: {current_speed} (Límite: {limite_velocidad})"
 
-                filas_brutas.append({'fecha': curr_time, 'origen': t['origen'], 'velocidad': current_speed, 'evento': evento, 'detalle': detalle, 'lat': curr_lat, 'lng': curr_lng, 'geocerca': geo_name})
-                last_time = curr_time
+                filas_brutas.append({
+                    'fecha': curr_time, 'origen': t['origen'], 'velocidad': current_speed, 
+                    'evento': evento, 'detalle': detalle, 'lat': curr_lat, 'lng': curr_lng, 
+                    'geocerca': geo_name
+                })
+                
+                curr_time += timedelta(minutes=1)
 
         TASKS[task_id]['msg'] = "Analizando descansos y tiempo de ralentí..."
 
