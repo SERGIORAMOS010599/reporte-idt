@@ -26,7 +26,7 @@ TIMEZONE_OFFSET = -7
 TASKS = {}
 
 # ==========================================
-# FÓRMULA HAVERSINE
+# FÓRMULA HAVERSINE Y FUNCIONES DE RUTA
 # ==========================================
 def calcular_distancia(lat1, lon1, lat2, lon2):
     R = 6371000 
@@ -37,6 +37,53 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2.0)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlon/2.0)**2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
+
+def decode_polyline(polyline_str):
+    index, lat, lng = 0, 0, 0
+    coordinates = []
+    changes = {'latitude': 0, 'longitude': 0}
+    try:
+        while index < len(polyline_str):
+            for unit in ['latitude', 'longitude']: 
+                shift, result = 0, 0
+                while True:
+                    if index >= len(polyline_str): break
+                    byte = ord(polyline_str[index]) - 63
+                    index += 1
+                    result |= (byte & 0x1f) << shift
+                    shift += 5
+                    if not byte >= 0x20: break
+                if (result & 1): changes[unit] = ~(result >> 1)
+                else: changes[unit] = (result >> 1)
+            lat += changes['latitude']
+            lng += changes['longitude']
+            coordinates.append((lat / 100000.0, lng / 100000.0))
+    except: pass
+    return coordinates
+
+def interpolate_on_polyline(points, progress):
+    if not points: return 0.0, 0.0
+    if len(points) == 1: return points[0]
+    
+    dists = [0.0]
+    for i in range(1, len(points)):
+        dists.append(dists[-1] + calcular_distancia(points[i-1][0], points[i-1][1], points[i][0], points[i][1]))
+    
+    total_dist = dists[-1]
+    if total_dist == 0: return points[0]
+        
+    target_dist = total_dist * progress
+    
+    for i in range(1, len(dists)):
+        if dists[i] >= target_dist:
+            segment_length = dists[i] - dists[i-1]
+            if segment_length == 0: return points[i]
+            segment_prog = (target_dist - dists[i-1]) / segment_length
+            lat = points[i-1][0] + (points[i][0] - points[i-1][0]) * segment_prog
+            lng = points[i-1][1] + (points[i][1] - points[i-1][1]) * segment_prog
+            return (lat, lng)
+            
+    return points[-1]
 
 # ==========================================
 # LECTOR EXCEL
@@ -483,7 +530,8 @@ def procesar_reporte_bg(task_id, params):
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,stops,idles,routes"}
+            # SE AÑADE 'polyline' A LA PETICIÓN
+            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,stops,idles,routes,polyline"}
             try:
                 response = requests.get(url, params=req_params, timeout=45)
                 data = response.json()
@@ -547,10 +595,15 @@ def procesar_reporte_bg(task_id, params):
             dist_km = float(item.get('distance', 0)) / 1000.0
             speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
             
+            # --- DECODIFICACIÓN DE RUTA REAL ---
+            poly_str = item.get('polyline', '')
+            puntos_ruta = decode_polyline(poly_str) if poly_str else [(lat_ini, lng_ini), (lat_fin, lng_fin)]
+            
             tramos_reales.append({
                 'dt_ini': dt_ini, 'dt_fin': dt_fin, 'origen': origen, 'distancia': dist_km,
                 'velocidad': speed, 'lat_ini': lat_ini, 'lng_ini': lng_ini,
-                'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg, 'tipo': str(item.get('type', '')).lower()
+                'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg, 'tipo': str(item.get('type', '')).lower(),
+                'puntos_ruta': puntos_ruta
             })
 
         TASKS[task_id]['msg'] = "Calculando movimiento y evaluando geocercas (minuto a minuto)..."
@@ -571,9 +624,7 @@ def procesar_reporte_bg(task_id, params):
             end_time = t['dt_fin']
             total_seconds = t['duracion'] if t['duracion'] > 0 else 1
             
-            delta_lat = (t['lat_fin'] - t['lat_ini'])
-            delta_lng = (t['lng_fin'] - t['lng_ini'])
-            avg_speed = (t['distancia'] / (total_seconds / 3600))
+            avg_speed = (t['distancia'] / (total_seconds / 3600)) if total_seconds > 0 else 0
             
             while curr_time <= end_time:
                 current_speed = round(random.uniform(avg_speed * 0.85, avg_speed * 1.15), 1)
@@ -581,8 +632,10 @@ def procesar_reporte_bg(task_id, params):
                 if current_speed == 0: current_speed = avg_speed
                 
                 prog = min((curr_time - t['dt_ini']).total_seconds() / total_seconds, 1.0)
-                curr_lat = t['lat_ini'] + (delta_lat * prog)
-                curr_lng = t['lng_ini'] + (delta_lng * prog)
+                
+                # --- INTERPOLACIÓN SOBRE LA POLILÍNEA REAL ---
+                curr_lat, curr_lng = interpolate_on_polyline(t.get('puntos_ruta', []), prog)
+                
                 geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, current_speed, t['origen'])
                 
                 evento = ""
