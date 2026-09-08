@@ -24,7 +24,7 @@ TIMEZONE_OFFSET = -7
 TASKS = {}
 
 # ==========================================
-# FÓRMULA HAVERSINE
+# FÓRMULA HAVERSINE Y RUTAS
 # ==========================================
 def calcular_distancia(lat1, lon1, lat2, lon2):
     R = 6371000 
@@ -35,6 +35,54 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2.0)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlon/2.0)**2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
+
+def decode_polyline(polyline_str):
+    index, lat, lng = 0, 0, 0
+    coordinates = []
+    changes = {'latitude': 0, 'longitude': 0}
+    try:
+        while index < len(polyline_str):
+            for unit in ['latitude', 'longitude']: 
+                shift, result = 0, 0
+                while True:
+                    if index >= len(polyline_str): break
+                    byte = ord(polyline_str[index]) - 63
+                    index += 1
+                    result |= (byte & 0x1f) << shift
+                    shift += 5
+                    if not byte >= 0x20: break
+                if (result & 1): changes[unit] = ~(result >> 1)
+                else: changes[unit] = (result >> 1)
+            lat += changes['latitude']
+            lng += changes['longitude']
+            coordinates.append((lat / 100000.0, lng / 100000.0))
+    except Exception:
+        pass
+    return coordinates
+
+def interpolate_on_polyline(points, progress):
+    if not points: return 0.0, 0.0
+    if len(points) == 1: return points[0]
+    
+    dists = [0.0]
+    for i in range(1, len(points)):
+        dists.append(dists[-1] + calcular_distancia(points[i-1][0], points[i-1][1], points[i][0], points[i][1]))
+    
+    total_dist = dists[-1]
+    if total_dist == 0: return points[0]
+        
+    target_dist = total_dist * progress
+    
+    for i in range(1, len(dists)):
+        if dists[i] >= target_dist:
+            segment_length = dists[i] - dists[i-1]
+            if segment_length == 0: return points[i]
+            segment_prog = (target_dist - dists[i-1]) / segment_length
+            lat = points[i-1][0] + (points[i][0] - points[i-1][0]) * segment_prog
+            lng = points[i-1][1] + (points[i][1] - points[i-1][1]) * segment_prog
+            return (lat, lng)
+            
+    return points[-1]
 
 # ==========================================
 # LECTOR EXCEL
@@ -59,7 +107,7 @@ def cargar_geocercas_excel():
         idx_lon = next((i for i, h in enumerate(headers) if 'lon' in h or 'lng' in h), -1)
         idx_area = next((i for i, h in enumerate(headers) if 'rea' in h or 'area' in h), -1)
         
-        if idx_nom == -1 or idx_lat == -1 or idx_lon == -1: return [{'error': 'parsing_failed', 'msg': f'Columnas no detectadas.'}]
+        if idx_nom == -1 or idx_lat == -1 or idx_lon == -1: return [{'error': 'parsing_failed', 'msg': 'Columnas no detectadas.'}]
             
         for i, row in enumerate(ws.iter_rows(min_row=2, values_only=True)):
             if not row[idx_nom] or not row[idx_lat] or not row[idx_lon]: continue
@@ -73,7 +121,8 @@ def cargar_geocercas_excel():
                 area_m2 = area_limpia * 1000000 if 'km2' in str(area_str).lower() else area_limpia
                 radio_calculado = math.sqrt(area_m2 / math.pi)
                 if radio_calculado > 0: radio_m = min(radio_calculado, 1500) 
-            except: pass
+            except Exception:
+                pass
             geocercas.append({'id': f"LOCAL_{i}", 'name': nombre, 'lat': float(lat_str), 'lng': float(lng_str), 'radius': radio_m})
         return geocercas
     except Exception as e: return [{'error': 'exception', 'msg': str(e)}]
@@ -94,18 +143,28 @@ HTML_INTERFACE = """
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f9; padding: 20px; margin: 0; }
         .card { max-width: 820px; margin: 0 auto; background: #ffffff; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); position: relative; z-index: 10; }
+        
+        /* HEADER CON LOGOS ALINEADOS */
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 15px; }
         .header-text { flex: 1; text-align: center; padding: 0 15px; }
         .header h2 { color: #1a252f; margin: 0 0 5px 0; font-size: 22px; }
         .header p { color: #7f8c8d; font-size: 13px; margin: 0; }
         .logo-img { max-height: 55px; max-width: 140px; object-fit: contain; }
         
+        /* OVERLAY DE CARGA (VIDEO) */
         #loading_overlay {
-            display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(255, 255, 255, 0.96); z-index: 9999;
+            display: none; 
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(255, 255, 255, 0.96);
+            z-index: 9999;
             flex-direction: column; justify-content: center; align-items: center;
         }
-        #loading_overlay video { max-width: 500px; width: 90%; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.15); }
+        #loading_overlay video {
+            max-width: 500px;
+            width: 90%;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+        }
         .loading-text { margin-top: 25px; font-size: 22px; font-weight: bold; color: #2c3e50; }
         .loading-subtext { color: #e67e22; margin-top: 8px; font-size: 15px; font-weight: 600; text-align: center; }
 
@@ -131,9 +190,11 @@ HTML_INTERFACE = """
     </style>
 </head>
 <body>
+
     <div id="loading_overlay">
         <video autoplay loop muted playsinline>
             <source src="{{ url_for('static', filename='video_kowi.mp4') }}" type="video/mp4">
+            Tu navegador no soporta videos.
         </video>
         <div class="loading-text">Generando Reporte Ejecutivo...</div>
         <div class="loading-subtext" id="overlay_status">Conectando con servidores...</div>
@@ -271,7 +332,6 @@ HTML_INTERFACE = """
             if (!unitId) { alert("Por favor selecciona una unidad."); return; }
             
             btn.disabled = true;
-            
             overlay.style.display = 'flex';
             overlayStatus.innerText = "⏳ Iniciando conexión segura...";
 
@@ -368,7 +428,8 @@ def api_unidades():
         units_raw = data.get('data', {}).get('units', [])
         unidades_filtradas = [u for u in units_raw if not str(u.get('company_id', '')) or str(u.get('company_id', '')) == COMPANY_ID]
         return jsonify(unidades_filtradas)
-    except: return jsonify([]), 500
+    except Exception:
+        return jsonify([]), 500
 
 @app.route('/api_geocercas_locales')
 def api_geocercas_locales():
@@ -423,8 +484,10 @@ def procesar_reporte_bg(task_id, params):
         hora_fin = normalizar_hora(params.get('hora_fin', '23:59:59'), True)
         limite_velocidad = int(params.get('limite_velocidad', 80))
         min_ralenti = int(params.get('min_ralenti', 2))
-        try: geo_limits = json.loads(params.get('geos', '{}'))
-        except: geo_limits = {}
+        try: 
+            geo_limits = json.loads(params.get('geos', '{}'))
+        except Exception: 
+            geo_limits = {}
 
         geos_validas = [g for g in GEOCERCAS_MAESTRAS if 'error' not in g]
 
@@ -440,19 +503,17 @@ def procesar_reporte_bg(task_id, params):
         def parse_iso(iso_str):
             if not iso_str: return None
             try: return datetime.strptime(str(iso_str).replace('Z', '').split('.')[0], '%Y-%m-%dT%H:%M:%S') + timedelta(hours=TIMEZONE_OFFSET)
-            except: return None
+            except Exception: return None
 
         dt_inicio_req = datetime.strptime(f"{f_in} {hora_inicio}", "%Y-%m-%d %H:%M:%S")
         dt_fin_req = datetime.strptime(f"{f_fin} {hora_fin}", "%Y-%m-%d %H:%M:%S")
         
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
-        url_hist = "https://gps.idttecnologias.mx/api/v1/unit_data/history.json"
         
         tramos_reales = []
         parsed_idles = []
         eventos_vistos = set()
         rutas_encontradas = []
-        puntos_historial = []  # NUEVO: Arreglo donde guardaremos las coordenadas puras
 
         current_start = dt_inicio_req
         chunk_days = 10 
@@ -466,28 +527,11 @@ def procesar_reporte_bg(task_id, params):
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,stops,idles,routes"}
-            req_hist = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc}
+            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,stops,idles,routes,polyline"}
             
             try:
-                # 1. Obtenemos Rutas y Paradas (Resumen)
                 response = requests.get(url, params=req_params, timeout=45)
                 data = response.json()
-                
-                # 2. Obtenemos la Telemetría Real (Coordenadas exactas)
-                resp_hist = requests.get(url_hist, params=req_hist, timeout=45)
-                data_hist = resp_hist.json()
-                hist_array = data_hist.get('data', {}).get('units', [{}])[0].get('history', [])
-                
-                for hp in hist_array:
-                    h_dt = parse_iso(hp.get('time'))
-                    if h_dt:
-                        puntos_historial.append({
-                            'dt': h_dt,
-                            'lat': float(hp.get('lat', 0)),
-                            'lng': float(hp.get('lng', 0)),
-                            'speed': float(hp.get('speed', 0))
-                        })
                 
                 def extraer_tramos(obj):
                     if isinstance(obj, dict):
@@ -510,7 +554,8 @@ def procesar_reporte_bg(task_id, params):
                     s_dt = parse_iso(idl.get('start', {}).get('time'))
                     e_dt = parse_iso(idl.get('end', {}).get('time'))
                     if s_dt and e_dt: parsed_idles.append({'dt_ini': s_dt, 'dt_fin': e_dt})
-            except Exception as e: pass 
+            except Exception:
+                pass 
             
             current_start = current_end
 
@@ -529,13 +574,16 @@ def procesar_reporte_bg(task_id, params):
             dt_ini = parse_iso(item.get('start', {}).get('time', item.get('start_time', '')))
             dt_fin = parse_iso(item.get('end', {}).get('time', item.get('end_time', '')))
             dur_raw = item.get('duration', item.get('time', 0))
-            try: duracion_seg = float(dur_raw)
-            except: duracion_seg = 0.0
+            try: 
+                duracion_seg = float(dur_raw)
+            except Exception: 
+                duracion_seg = 0.0
             
             if dt_ini and dt_fin:
                 calc_dur = (dt_fin - dt_ini).total_seconds()
                 if calc_dur > duracion_seg: duracion_seg = calc_dur
-            elif dt_ini and not dt_fin: dt_fin = dt_ini + timedelta(seconds=duracion_seg)
+            elif dt_ini and not dt_fin: 
+                dt_fin = dt_ini + timedelta(seconds=duracion_seg)
                 
             if not dt_ini: continue
 
@@ -548,13 +596,17 @@ def procesar_reporte_bg(task_id, params):
             dist_km = float(item.get('distance', 0)) / 1000.0
             speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
             
+            poly_str = item.get('polyline', '')
+            puntos_ruta = decode_polyline(poly_str) if poly_str else [(lat_ini, lng_ini), (lat_fin, lng_fin)]
+            
             tramos_reales.append({
                 'dt_ini': dt_ini, 'dt_fin': dt_fin, 'origen': origen, 'distancia': dist_km,
                 'velocidad': speed, 'lat_ini': lat_ini, 'lng_ini': lng_ini,
-                'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg, 'tipo': str(item.get('type', '')).lower()
+                'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg, 'tipo': str(item.get('type', '')).lower(),
+                'puntos_ruta': puntos_ruta
             })
 
-        TASKS[task_id]['msg'] = "Calculando movimiento y evaluando geocercas (usando puntos reales)..."
+        TASKS[task_id]['msg'] = "Calculando movimiento y evaluando geocercas sobre la carretera..."
 
         filas_brutas = []
         tiempo_mov_seg = 0
@@ -566,27 +618,20 @@ def procesar_reporte_bg(task_id, params):
         list_routes = [t for t in tramos_reales if t['tipo'] == 'route']
         list_stops = [t for t in tramos_reales if t['tipo'] in ['stop', 'idle']]
 
-for t in list_routes:
+        for t in list_routes:
             tiempo_mov_seg += t['duracion']
             curr_time = t['dt_ini']
             end_time = t['dt_fin']
             total_seconds = t['duracion'] if t['duracion'] > 0 else 1
             
-            # 1. Obtenemos las coordenadas geométricas de la carretera (Polyline)
             puntos_carretera = t.get('puntos_ruta', [])
-            
-            # Respaldo por si Mapon no envía la curva
             if len(puntos_carretera) < 2:
                 puntos_carretera = [(t['lat_ini'], t['lng_ini']), (t['lat_fin'], t['lng_fin'])]
                 
-            # 2. Generamos un punto minuto a minuto, pero deslizándolo SOBRE LA CARRETERA
             while curr_time <= end_time:
-                # Calculamos qué porcentaje del viaje llevamos
                 prog = min((curr_time - t['dt_ini']).total_seconds() / total_seconds, 1.0)
-                
-                # Proyectamos la coordenada exactamente sobre el trazo de la calle/carretera
                 curr_lat, curr_lng = interpolate_on_polyline(puntos_carretera, prog)
-                current_speed = t['velocidad']  # Velocidad general del tramo
+                current_speed = t['velocidad'] 
                 
                 geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, current_speed, t['origen'])
                 
@@ -599,7 +644,7 @@ for t in list_routes:
                     for gid, gdata in geo_limits.items():
                         if gdata['name'].lower() == geo_name.lower():
                             try: limite_aplicable = int(gdata['limit'])
-                            except: pass
+                            except Exception: pass
                             matched_limit = True
                             break
                                 
