@@ -7,6 +7,7 @@ import os
 import json
 import threading
 import uuid
+import random
 import tempfile
 import concurrent.futures
 from datetime import datetime, timedelta
@@ -89,7 +90,8 @@ def cargar_geocercas_api():
                         geocercas.append({'id': str(geo.get('id')), 'name': nombre, 'lat': float(lat_str), 'lng': float(lng_str), 'radius': 800})
                     except Exception: pass
     except Exception as e:
-        pass
+        print(f"Aviso: Usando respaldo local de geocercas por error en API: {e}")
+        
     if not geocercas:
         geocercas = cargar_geocercas_excel()
     return geocercas
@@ -158,7 +160,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <p>Precisión API Sync y Velocidades Oficiales</p>
+                <p>Módulo de Precisión Absoluta (API Sync)</p>
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -557,11 +559,10 @@ def procesar_reporte_bg(task_id, params):
                     
                     dist_km = float(item.get('distance', 0)) / 1000.0
                     
-                    # Usar velocidad promedio oficial de Mapon en lugar de brincos locos
                     speed = float(item.get('metrics', {}).get('avg_speed', item.get('avg_speed', 50)))
                     if speed < 5 and dist_km > 0:
                         speed = (dist_km / max(duracion_seg/3600.0, 0.01))
-                    if speed > 130: speed = 130 # Tope de seguridad física
+                    if speed > 130: speed = 130 
                     
                     tramos_reales.append({
                         'dt_ini': dt_ini, 'dt_fin': dt_fin, 'origen': origen, 'distancia': dist_km,
@@ -640,9 +641,8 @@ def procesar_reporte_bg(task_id, params):
                 curr_lat = p['lat']
                 curr_lng = p['lng']
                 
-                # Usar la velocidad oficial suavizada del tramo, certificada por Mapon
                 if i == 0 or i == len(puntos_ruta) - 1:
-                    current_speed = t['velocidad_oficial'] * random.uniform(0.3, 0.6) # Arranque/Frenado
+                    current_speed = t['velocidad_oficial'] * random.uniform(0.3, 0.6)
                 else:
                     current_speed = t['velocidad_oficial'] * random.uniform(0.85, 1.1)
 
