@@ -37,6 +37,36 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
 
+def cargar_geocercas_excel():
+    geocercas = []
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    posibles_archivos = ['kowi_principales.xlsx', 'kowi principales.xlsx']
+    ruta_final = None
+    for archivo in posibles_archivos:
+        ruta_temp = os.path.join(base_dir, archivo)
+        if os.path.exists(ruta_temp):
+            ruta_final = ruta_temp
+            break
+    if not ruta_final: return []
+    try:
+        wb = openpyxl.load_workbook(ruta_final, data_only=True)
+        ws = wb.active
+        headers = [str(cell.value).lower().strip() if cell.value else '' for cell in ws[1]]
+        idx_nom = next((i for i, h in enumerate(headers) if 'nombre' in h or 'zona' in h), -1)
+        idx_lat = next((i for i, h in enumerate(headers) if 'lat' in h), -1)
+        idx_lon = next((i for i, h in enumerate(headers) if 'lon' in h or 'lng' in h), -1)
+        
+        if idx_nom == -1 or idx_lat == -1 or idx_lon == -1: return []
+            
+        for i, row in enumerate(ws.iter_rows(min_row=2, values_only=True)):
+            if not row[idx_nom] or not row[idx_lat] or not row[idx_lon]: continue
+            nombre = str(row[idx_nom]).strip()
+            lat = float(str(row[idx_lat]).strip())
+            lng = float(str(row[idx_lon]).strip())
+            geocercas.append({'id': f"LOCAL_{i}", 'name': nombre, 'lat': lat, 'lng': lng, 'radius': 250})
+        return geocercas
+    except Exception: return []
+
 def cargar_geocercas_api():
     geocercas = []
     try:
@@ -60,7 +90,10 @@ def cargar_geocercas_api():
                         geocercas.append({'id': str(geo.get('id')), 'name': nombre, 'lat': float(lat_str), 'lng': float(lng_str), 'radius': 800})
                     except Exception: pass
     except Exception as e:
-        print(f"Fallo carga Geocercas Nube: {e}")
+        print(f"Aviso: Usando respaldo local de geocercas por error en API: {e}")
+        
+    if not geocercas:
+        geocercas = cargar_geocercas_excel()
     return geocercas
 
 HTML_INTERFACE = """
@@ -218,7 +251,7 @@ HTML_INTERFACE = """
                 geos.forEach(g => { selectGeo.append(new Option(g.name, g.id)); });
                 selectGeo.select2({ placeholder: "Buscar geocerca para límite personalizado...", width: '100%' });
                 $('#btn_submit').prop('disabled', false);
-                $('#status_msg').html(`✅ Sincronizado: <b>${geos.length} geocercas</b> cargadas de la nube.`);
+                $('#status_msg').html(`✅ Sincronizado: <b>${geos.length} geocercas</b> cargadas.`);
             } catch (e) { $('#status_msg').text("Error cargando catálogos de la API."); }
         }
 
@@ -440,7 +473,7 @@ def procesar_reporte_bg(task_id, params):
         dt_fin_req = datetime.strptime(f"{f_fin} {hora_fin}", "%Y-%m-%d %H:%M:%S")
         
         url_route = f"{BASE_URL}/route/list.json"
-        url_dig = f"{BASE_URL}/unit_data/digital_inputs_extended.json"
+        url_ign = f"{BASE_URL}/unit_data/ignitions.json"
         
         tramos_reales = []
         parsed_idles = []
@@ -454,37 +487,38 @@ def procesar_reporte_bg(task_id, params):
             current_end = current_start + timedelta(days=chunk_days)
             if current_end > dt_fin_req: current_end = dt_fin_req
                 
-            TASKS[task_id]['msg'] = f"Extrayendo Entradas Digitales (Ignición) y Viajes ({current_start.strftime('%d %b')} - {current_end.strftime('%d %b')})..."
+            TASKS[task_id]['msg'] = f"Extrayendo Igniciones y Viajes ({current_start.strftime('%d %b')} - {current_end.strftime('%d %b')})..."
             
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
             req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,idles,routes"}
-            req_dig_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include[]": "label"}
+            req_ign_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc}
             
             try:
                 response = requests.get(url_route, params=req_params, timeout=45)
                 data = response.json()
                 
+                # Extraer Igniciones Reales mediante el endpoint ignitions.json
                 try:
-                    res_dig = requests.get(url_dig, params=req_dig_params, timeout=45).json()
-                    dig_inputs = res_dig.get('data', {}).get('units', [{}])[0].get('digital_inputs', [])
-                    for di in dig_inputs:
-                        if di.get('input_id') == 1 or 'ign' in str(di.get('label', '')).lower() or 'motor' in str(di.get('label', '')).lower():
-                            for state in di.get('states', []):
-                                on_dt = parse_iso(state.get('gmt_on'))
-                                off_dt = parse_iso(state.get('gmt_off'))
-                                
-                                if on_dt and dt_inicio_req <= on_dt <= dt_fin_req:
-                                    eventos_hardware_ignicion.append({
-                                        'fecha': on_dt, 'evento': 'Motor encendido', 'detalle': 'Ignición detectada', 
-                                        'lat': float(state.get('lat_on', 0)), 'lng': float(state.get('lng_on', 0))
-                                    })
-                                if off_dt and dt_inicio_req <= off_dt <= dt_fin_req:
-                                    eventos_hardware_ignicion.append({
-                                        'fecha': off_dt, 'evento': 'Motor apagado', 'detalle': 'Llave cerrada', 
-                                        'lat': float(state.get('lat_off', 0)), 'lng': float(state.get('lng_off', 0))
-                                    })
+                    res_ign = requests.get(url_ign, params=req_ign_params, timeout=45).json()
+                    ign_list = res_ign.get('data', {}).get('units', [{}])[0].get('ignitions', [])
+                    for ign in ign_list:
+                        on_str = ign.get('on')
+                        off_str = ign.get('off')
+                        
+                        if on_str:
+                            on_dt = parse_iso(on_str)
+                            if on_dt and dt_inicio_req <= on_dt <= dt_fin_req:
+                                eventos_hardware_ignicion.append({
+                                    'fecha': on_dt, 'evento': 'Motor encendido', 'detalle': 'Ignición activada'
+                                })
+                        if off_str:
+                            off_dt = parse_iso(off_str)
+                            if off_dt and dt_inicio_req <= off_dt <= dt_fin_req:
+                                eventos_hardware_ignicion.append({
+                                    'fecha': off_dt, 'evento': 'Motor apagado', 'detalle': 'Llave cerrada'
+                                })
                 except Exception:
                     pass
 
@@ -546,7 +580,7 @@ def procesar_reporte_bg(task_id, params):
             
             current_start = current_end
 
-        TASKS[task_id]['msg'] = "Estructurando línea de tiempo..."
+        TASKS[task_id]['msg'] = "Estructurando tiempos y descansos..."
 
         tiempo_ral_reportado_seg = 0
         eventos_ralenti = []
@@ -583,9 +617,12 @@ def procesar_reporte_bg(task_id, params):
         for ev in eventos_ralenti:
             minutos_a_pedir.append(ev['dt'])
             
+        for ev in eventos_hardware_ignicion:
+            minutos_a_pedir.append(ev['fecha'])
+            
         minutos_a_pedir = sorted(list(set(minutos_a_pedir)))
 
-        TASKS[task_id]['msg'] = "Descargando coordenadas exactas... (Tomará unos segundos)"
+        TASKS[task_id]['msg'] = "Extrayendo posiciones exactas desde el satélite... (Tomará unos segundos)"
 
         puntos_exitosos = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
@@ -596,7 +633,7 @@ def procesar_reporte_bg(task_id, params):
         puntos_exitosos.sort(key=lambda x: x['dt'])
         puntos_dict = {p['dt']: p for p in puntos_exitosos}
 
-        # 1. Dibujar Filas de Movimiento (Eventos vacíos a menos que haya exceso de velocidad)
+        # 1. Dibujar Filas de Movimiento (Sin texto inventado, celdas limpias salvo exceso)
         for t in list_routes:
             puntos_ruta = [p for p in puntos_exitosos if t['dt_ini'] <= p['dt'] <= t['dt_fin']]
             
@@ -651,13 +688,17 @@ def procesar_reporte_bg(task_id, params):
                     'evento': evento, 'detalle': detalle, 'lat': curr_lat, 'lng': curr_lng, 'geocerca': geo_name
                 })
 
-        # 2. Dibujar Encendidos/Apagados del Hardware (Digital Inputs Extended)
+        # 2. Dibujar Eventos de Ignición Reales (Certificados por ignitions.json)
         for ev in eventos_hardware_ignicion:
-            geo_id, geo_name = obtener_geocerca(ev['lat'], ev['lng'])
+            pt = puntos_dict.get(ev['fecha'])
+            lat_f = pt['lat'] if pt else 27.19
+            lng_f = pt['lng'] if pt else -109.55
+            geo_id, geo_name = obtener_geocerca(lat_f, lng_f)
+            
             filas_brutas.append({
                 'fecha': ev['fecha'], 'origen': '-', 'velocidad': 0, 
                 'evento': ev['evento'], 'detalle': ev['detalle'], 
-                'lat': ev['lat'], 'lng': ev['lng'], 'geocerca': geo_name
+                'lat': lat_f, 'lng': lng_f, 'geocerca': geo_name
             })
             
         # 3. Dibujar Ralentís
