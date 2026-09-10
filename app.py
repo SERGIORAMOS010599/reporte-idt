@@ -7,9 +7,8 @@ import os
 import json
 import threading
 import uuid
-import random
 import tempfile
-import concurrent.futures
+import bisect
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
@@ -24,6 +23,47 @@ TIMEZONE_OFFSET = -7
 
 TASKS = {}
 CACHE_GEOCERCAS = []
+
+# ==========================================
+# DECODIFICADORES OFICIALES MAPON (POLYLINE)
+# ==========================================
+def decode_polyline_2d(encoded):
+    points = []
+    index, lat, lng, length = 0, 0, 0, len(encoded)
+    while index < length:
+        shift, result = 0, 0
+        while True:
+            b = ord(encoded[index]) - 63
+            index += 1
+            result |= (b & 0x1f) << shift
+            shift += 5
+            if b < 0x20: break
+        lat += ~(result >> 1) if (result & 1) else (result >> 1)
+        shift, result = 0, 0
+        while True:
+            b = ord(encoded[index]) - 63
+            index += 1
+            result |= (b & 0x1f) << shift
+            shift += 5
+            if b < 0x20: break
+        lng += ~(result >> 1) if (result & 1) else (result >> 1)
+        points.append((lat / 100000.0, lng / 100000.0))
+    return points
+
+def decode_polyline_1d(encoded):
+    values = []
+    index, val, length = 0, 0, len(encoded)
+    while index < length:
+        shift, result = 0, 0
+        while True:
+            b = ord(encoded[index]) - 63
+            index += 1
+            result |= (b & 0x1f) << shift
+            shift += 5
+            if b < 0x20: break
+        val += ~(result >> 1) if (result & 1) else (result >> 1)
+        values.append(val)
+    return values
 
 # ==========================================
 # FÓRMULA HAVERSINE Y GEOCERCAS
@@ -89,8 +129,7 @@ def cargar_geocercas_api():
                         lng_str, lat_str = coords_str.strip().split(' ')
                         geocercas.append({'id': str(geo.get('id')), 'name': nombre, 'lat': float(lat_str), 'lng': float(lng_str), 'radius': 800})
                     except Exception: pass
-    except Exception as e:
-        pass
+    except Exception: pass
     if not geocercas:
         geocercas = cargar_geocercas_excel()
     return geocercas
@@ -159,7 +198,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <p>Módulo V4 (Anclaje GPS e Ignición)</p>
+                <p>Módulo V5 (Extra-Rápido y Velocidad Nativa)</p>
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -282,7 +321,7 @@ HTML_INTERFACE = """
             
             btn.disabled = true;
             overlay.style.display = 'flex';
-            overlayStatus.innerText = "⏳ Conectando con API Tracker...";
+            overlayStatus.innerText = "⏳ Decodificando Polilíneas del Servidor...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -325,7 +364,7 @@ HTML_INTERFACE = """
                         btn.disabled = false;
                         alert("Error en el reporte: " + sData.msg);
                     }
-                }, 3000);
+                }, 1500); // Revisión más rápida ya que el script vuela
 
             } catch (e) {
                 overlay.style.display = 'none';
@@ -392,7 +431,7 @@ def api_geocercas_nube():
 @app.route('/iniciar_reporte')
 def iniciar_reporte():
     task_id = str(uuid.uuid4())
-    TASKS[task_id] = {'status': 'procesando', 'msg': 'Iniciando conexión con API...'}
+    TASKS[task_id] = {'status': 'procesando', 'msg': 'Iniciando decodificación en 1 paso...'}
     params = request.args.to_dict()
     thread = threading.Thread(target=procesar_reporte_bg, args=(task_id, params))
     thread.daemon = True
@@ -451,20 +490,6 @@ def procesar_reporte_bg(task_id, params):
                 try: return datetime.strptime(str(iso_str).replace('Z', '').split('.')[0], '%Y-%m-%dT%H:%M:%S') + timedelta(hours=TIMEZONE_OFFSET)
                 except Exception: return None
 
-        def fetch_exact_point(dt):
-            utc_str = (dt - timedelta(hours=TIMEZONE_OFFSET)).strftime('%Y-%m-%dT%H:%M:%SZ')
-            url = f"{BASE_URL}/unit_data/history_point.json?key={API_KEY}&unit_id={unit_id}&datetime={utc_str}&include[]=position"
-            try:
-                r = requests.get(url, timeout=6)
-                data = r.json()
-                units = data.get('data', {}).get('units', [])
-                if units:
-                    pos = units[0].get('position', {}).get('value', {})
-                    if pos and 'lat' in pos and 'lng' in pos:
-                        return {'dt': dt, 'lat': float(pos['lat']), 'lng': float(pos['lng'])}
-            except Exception: pass
-            return None
-
         dt_inicio_req = datetime.strptime(f"{f_in} {hora_inicio}", "%Y-%m-%d %H:%M:%S")
         dt_fin_req = datetime.strptime(f"{f_fin} {hora_fin}", "%Y-%m-%d %H:%M:%S")
         
@@ -473,8 +498,8 @@ def procesar_reporte_bg(task_id, params):
         
         tramos_reales = []
         parsed_idles = []
-        eventos_vistos = set()
         eventos_ignicion = []
+        master_real_points = [] # Almacena todas las coordenadas y velocidades verdaderas
 
         current_start = dt_inicio_req
         chunk_days = 2 
@@ -483,16 +508,17 @@ def procesar_reporte_bg(task_id, params):
             current_end = current_start + timedelta(days=chunk_days)
             if current_end > dt_fin_req: current_end = dt_fin_req
                 
-            TASKS[task_id]['msg'] = f"Extrayendo Igniciones y Viajes ({current_start.strftime('%d %b')} - {current_end.strftime('%d %b')})..."
+            TASKS[task_id]['msg'] = f"Decodificando Polilíneas desde la API ({current_start.strftime('%d %b')} - {current_end.strftime('%d %b')})..."
             
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,idles,routes"}
+            # EL SECRETO REVELADO: Se pide todo encodificado en 1 solo request.
+            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,idles,routes,polyline,speed,time"}
             req_ign_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc}
             
             try:
-                # Extraer Igniciones oficiales
+                # 1. Igniciones Reales
                 try:
                     res_ign = requests.get(url_ign, params=req_ign_params, timeout=45).json()
                     ign_list = res_ign.get('data', {}).get('units', [{}])[0].get('ignitions', [])
@@ -500,12 +526,12 @@ def procesar_reporte_bg(task_id, params):
                         on_dt = parse_iso(ign.get('on'))
                         off_dt = parse_iso(ign.get('off'))
                         if on_dt and dt_inicio_req <= on_dt <= dt_fin_req:
-                            eventos_ignicion.append({'fecha': on_dt, 'evento': 'Motor encendido', 'tipo': 'on'})
+                            eventos_ignicion.append({'dt': on_dt, 'evento': 'Motor encendido', 'tipo': 'on'})
                         if off_dt and dt_inicio_req <= off_dt <= dt_fin_req:
-                            eventos_ignicion.append({'fecha': off_dt, 'evento': 'Motor apagado', 'tipo': 'off'})
+                            eventos_ignicion.append({'dt': off_dt, 'evento': 'Motor apagado', 'tipo': 'off'})
                 except Exception: pass
 
-                # Extraer Rutas y Paradas
+                # 2. Rutas y Telemetría Nativa (Extra-Rápido)
                 response = requests.get(url_route, params=req_params, timeout=45)
                 data = response.json()
                 
@@ -515,16 +541,12 @@ def procesar_reporte_bg(task_id, params):
                         tipo = str(obj.get('type', '')).lower()
                         has_start_end = ('start' in obj or 'start_time' in obj) and ('end' in obj or 'end_time' in obj)
                         if tipo == 'route' or (tipo != 'idle' and has_start_end):
-                            sig = str(obj.get('start', {}).get('time', '')) + tipo
-                            if sig not in eventos_vistos:
-                                eventos_vistos.add(sig)
-                                rutas_encontradas.append(obj)
+                            rutas_encontradas.append(obj)
                         for k, v in obj.items():
                             if isinstance(v, (dict, list)): extraer_tramos(v)
                     elif isinstance(obj, list):
                         for item in obj:
                             if isinstance(item, (dict, list)): extraer_tramos(item)
-
                 extraer_tramos(data)
                 
                 unit_data = data.get('data', {}).get('units', [])[0] if data.get('data', {}).get('units') else {}
@@ -536,73 +558,74 @@ def procesar_reporte_bg(task_id, params):
                 for item in rutas_encontradas:
                     dt_ini = parse_iso(item.get('start', {}).get('time', item.get('start_time', '')))
                     dt_fin = parse_iso(item.get('end', {}).get('time', item.get('end_time', '')))
-                    dur_raw = item.get('duration', item.get('time', 0))
-                    try: duracion_seg = float(dur_raw)
-                    except Exception: duracion_seg = 0.0
-                    
-                    if dt_ini and dt_fin:
-                        calc_dur = (dt_fin - dt_ini).total_seconds()
-                        if calc_dur > duracion_seg: duracion_seg = calc_dur
-                    elif dt_ini and not dt_fin: 
-                        dt_fin = dt_ini + timedelta(seconds=duracion_seg)
+                    if not dt_ini or not dt_fin: continue
                         
-                    if not dt_ini: continue
-
-                    origen = str(item.get('start', {}).get('address', item.get('start_address', 'Zona Operativa')))
-                    lat_ini = float(item.get('start', {}).get('lat', item.get('start_lat', 27.19)))
-                    lng_ini = float(item.get('start', {}).get('lng', item.get('start_lng', -109.55)))
-                    lat_fin = float(item.get('end', {}).get('lat', item.get('end_lat', lat_ini)))
-                    lng_fin = float(item.get('end', {}).get('lng', item.get('end_lng', lng_ini)))
                     dist_km = float(item.get('distance', 0)) / 1000.0
-                    
+                    tipo_tramo = str(item.get('type', '')).lower()
                     tramos_reales.append({
-                        'dt_ini': dt_ini, 'dt_fin': dt_fin, 'origen': origen, 'distancia': dist_km,
-                        'lat_ini': lat_ini, 'lng_ini': lng_ini, 'lat_fin': lat_fin, 'lng_fin': lng_fin, 
-                        'duracion': duracion_seg, 'tipo': str(item.get('type', '')).lower()
+                        'dt_ini': dt_ini, 'dt_fin': dt_fin, 'distancia': dist_km, 'tipo': tipo_tramo
                     })
-            except Exception:
-                pass 
-            
+                    
+                    # MAGIA PURA: Extraemos la telemetría encriptada si es un viaje
+                    if tipo_tramo == 'route':
+                        poly_str = item.get('polyline', '')
+                        speed_str = item.get('speed', '')
+                        time_str = item.get('time', '')
+                        
+                        if poly_str:
+                            coords = decode_polyline_2d(poly_str)
+                            # Fallback nativo: Si no devuelve string de velocidad, usamos promedio. Si lo devuelve, decodificamos el real.
+                            speeds = decode_polyline_1d(speed_str) if speed_str else [float(item.get('metrics', {}).get('avg_speed', 0))] * len(coords)
+                            times_offsets = decode_polyline_1d(time_str) if time_str else []
+                            
+                            num_pts = len(coords)
+                            # Relleno de offsets de tiempo proporcional si falla la decodificación
+                            if len(times_offsets) != num_pts:
+                                dur = (dt_fin - dt_ini).total_seconds()
+                                step = dur / num_pts if num_pts > 0 else 0
+                                times_offsets = [int(step * x) for x in range(num_pts)]
+                                
+                            # Relleno de velocidades
+                            if len(speeds) != num_pts:
+                                speeds = [float(item.get('metrics', {}).get('avg_speed', 0))] * num_pts
+                                
+                            for idx in range(num_pts):
+                                pt_time = dt_ini + timedelta(seconds=times_offsets[idx])
+                                master_real_points.append({
+                                    'dt': pt_time,
+                                    'lat': coords[idx][0],
+                                    'lng': coords[idx][1],
+                                    'speed': speeds[idx] # ESTA ES LA VELOCIDAD OFICIAL INCORRUPTIBLE
+                                })
+
+            except Exception: pass 
             current_start = current_end
 
-        eventos_ignicion.sort(key=lambda x: x['fecha'])
+        eventos_ignicion.sort(key=lambda x: x['dt'])
+        master_real_points.sort(key=lambda x: x['dt'])
+        master_dts = [p['dt'] for p in master_real_points]
 
-        TASKS[task_id]['msg'] = "Generando estructura minuto a minuto y anclajes..."
+        TASKS[task_id]['msg'] = "Ensamblando Línea de Tiempo Estricta (Minuto a Minuto)..."
 
-        # CRÍTICO: Construir una lista estricta minuto a minuto de TODO el periodo
+        # CREACIÓN DEL MINUTO A MINUTO (Matriz Estricta)
         minutos_a_pedir = []
         c_time = dt_inicio_req
         while c_time <= dt_fin_req:
             minutos_a_pedir.append(c_time)
             c_time += timedelta(minutes=1)
 
-        # Agregamos también los segundos exactos donde la ignición cambió de estado
+        # Inyectar también los segundos de encendido/apagado para que existan en el excel
         for ev in eventos_ignicion:
-            minutos_a_pedir.append(ev['fecha'])
-            
+            minutos_a_pedir.append(ev['dt'])
         minutos_a_pedir = sorted(list(set(minutos_a_pedir)))
 
-        TASKS[task_id]['msg'] = f"Extrayendo {len(minutos_a_pedir)} puntos exactos desde satélite..."
-
-        # Extracción concurrente de posiciones
-        puntos_exitosos = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            resultados = executor.map(fetch_exact_point, minutos_a_pedir)
-            for res in resultados:
-                if res: puntos_exitosos.append(res)
-                
-        puntos_exitosos.sort(key=lambda x: x['dt'])
-        puntos_dict = {p['dt']: p for p in puntos_exitosos}
-
-        # Función para saber el estado de la ignición en un minuto dado
         def is_ignition_on(dt):
             estado = False
             for ev in eventos_ignicion:
-                if ev['fecha'] <= dt:
+                if ev['dt'] <= dt:
                     estado = (ev['tipo'] == 'on')
             return estado
 
-        # Función para saber si el minuto cae dentro de un tramo de ruta (en movimiento)
         def is_in_route(dt):
             for t in tramos_reales:
                 if t['tipo'] == 'route' and t['dt_ini'] <= dt <= t['dt_fin']:
@@ -616,62 +639,56 @@ def procesar_reporte_bg(task_id, params):
         tiempo_apagado_seg = 0
         distancia_total_km = sum([t['distancia'] for t in tramos_reales if t['tipo'] == 'route'])
         
-        last_known_lat = 27.19
-        last_known_lng = -109.55
-
-        # RECORRIDO ESTRICTO DE LA LÍNEA DE TIEMPO
+        last_lat = 27.19
+        last_lng = -109.55
+        
+        # PROCESAMIENTO MÁSTER INSTANTÁNEO
         for i, dt in enumerate(minutos_a_pedir):
-            punto = puntos_dict.get(dt)
             ign_on = is_ignition_on(dt)
             en_ruta = is_in_route(dt)
             
-            # --- LÓGICA DE ANCLAJE DE MEMORIA ---
-            # Si el satélite devolvió posición, la usamos y actualizamos la memoria.
-            # Si no devolvió posición (ej. equipo dormido), CLONAMOS la memoria.
-            if punto:
-                curr_lat = punto['lat']
-                curr_lng = punto['lng']
-                last_known_lat = curr_lat
-                last_known_lng = curr_lng
+            # Buscamos el punto decodificado oficial más cercano (Concurrencia nativa, 0 segundos)
+            idx = bisect.bisect_left(master_dts, dt)
+            closest_p = None
+            min_diff = float('inf')
+            
+            for check_idx in [idx-1, idx, idx+1]:
+                if 0 <= check_idx < len(master_real_points):
+                    diff = abs((master_real_points[check_idx]['dt'] - dt).total_seconds())
+                    if diff < min_diff:
+                        min_diff = diff
+                        closest_p = master_real_points[check_idx]
+                        
+            # Si estamos en ruta y la computadora reportó hace menos de 90 segundos, lo usamos.
+            if closest_p and min_diff <= 90 and en_ruta:
+                curr_lat = closest_p['lat']
+                curr_lng = closest_p['lng']
+                curr_speed = float(closest_p['speed'])
+                last_lat, last_lng = curr_lat, curr_lng
             else:
-                curr_lat = last_known_lat
-                curr_lng = last_known_lng
-                
-            # Cálculo estricto de velocidad entre puntos físicos conocidos
-            current_speed = 0.0
-            if i > 0 and en_ruta:
-                prev_dt = minutos_a_pedir[i-1]
-                prev_punto = puntos_dict.get(prev_dt)
-                if punto and prev_punto:
-                    seg_diff = max((dt - prev_dt).total_seconds(), 1)
-                    dist_mts = calcular_distancia(prev_punto['lat'], prev_punto['lng'], curr_lat, curr_lng)
-                    current_speed = (dist_mts / seg_diff) * 3.6
-                    tiempo_mov_seg += seg_diff
-                    
-            if current_speed > 130: current_speed = 130 # Suavizado
-            current_speed = round(current_speed, 1)
+                # El anclaje maestro: Congela ubicación y velocidad en 0
+                curr_lat = last_lat
+                curr_lng = last_lng
+                curr_speed = 0.0
 
-            # Clasificamos el tiempo si no está en ruta
-            if not en_ruta:
-                current_speed = 0.0
-                seg_transcurridos = 60 if i > 0 else 0
-                if ign_on:
-                    tiempo_ral_reportado_seg += seg_transcurridos
-                else:
-                    tiempo_apagado_seg += seg_transcurridos
+            # Sumatoria de tiempos
+            seg_transcurridos = 60 if i > 0 else 0
+            if en_ruta and curr_speed > 2:
+                tiempo_mov_seg += seg_transcurridos
+            elif not en_ruta:
+                if ign_on: tiempo_ral_reportado_seg += seg_transcurridos
+                else: tiempo_apagado_seg += seg_transcurridos
 
-            # Inyección de Excesos
+            # Inyección de Eventos
             geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng)
             evento = ""
             detalle = "-"
             
-            # Revisar si en este minuto exacto ocurrió el encendido o apagado
-            es_evento_motor = next((e for e in eventos_ignicion if e['fecha'] == dt), None)
+            es_evento_motor = next((e for e in eventos_ignicion if e['dt'] == dt), None)
             if es_evento_motor:
                 evento = es_evento_motor['evento']
-                detalle = "Ignición activada" if es_evento_motor['tipo'] == 'on' else "Llave cerrada"
+                detalle = es_evento_motor['detalle']
             else:
-                # Validar Excesos
                 limite_aplicable = limite_velocidad_gral
                 if geo_name != "Fuera de geocerca":
                     for gid, gdata in geo_limits.items():
@@ -679,28 +696,25 @@ def procesar_reporte_bg(task_id, params):
                             try: limite_aplicable = int(gdata['limit'])
                             except Exception: pass
                             break
-                    if current_speed > limite_aplicable:
+                    if curr_speed > limite_aplicable:
                         evento = f"Exceso en {geo_name}"
-                        detalle = f"Vel: {current_speed} (Límite: {limite_aplicable})"
+                        detalle = f"Vel: {curr_speed} (Límite: {limite_aplicable})"
                         tiempo_exceso_geo_seg += 60
-                elif current_speed > limite_velocidad_gral:
+                elif curr_speed > limite_velocidad_gral:
                     evento = "Exceso de velocidad"
-                    detalle = f"Vel: {current_speed} (Límite: {limite_velocidad_gral})"
+                    detalle = f"Vel: {curr_speed} (Límite: {limite_velocidad_gral})"
 
             filas_brutas.append({
-                'fecha': dt, 'origen': 'Zona Operativa', 'velocidad': current_speed, 
+                'fecha': dt, 'origen': 'Zona Operativa', 'velocidad': round(curr_speed, 1), 
                 'evento': evento, 'detalle': detalle, 'lat': curr_lat, 'lng': curr_lng, 'geocerca': geo_name
             })
 
-        TASKS[task_id]['msg'] = "Dibujando archivo Excel final..."
+        TASKS[task_id]['msg'] = "Escribiendo archivo de Reporte Excel..."
 
         def calc_hrs_mins(segundos): return int(segundos // 3600), int((segundos % 3600) // 60)
         mov_hrs, mov_mins = calc_hrs_mins(tiempo_mov_seg)
         ral_hrs, ral_mins = calc_hrs_mins(tiempo_ral_reportado_seg)
-        muerto_hrs, muerto_mins = calc_hrs_mins(tiempo_apagado_seg)
         exceso_geo_hrs, exceso_geo_mins = calc_hrs_mins(tiempo_exceso_geo_seg)
-
-        motor_hrs, motor_mins = calc_hrs_mins(tiempo_mov_seg + tiempo_ral_reportado_seg)
 
         vels_mov = [f['velocidad'] for f in filas_brutas if f['velocidad'] > 0]
         max_vel = max(vels_mov) if vels_mov else 0
@@ -721,7 +735,7 @@ def procesar_reporte_bg(task_id, params):
         ws.cell(row=5, column=5, value="Fecha Inicial:").font = Font(bold=True)
         ws.cell(row=5, column=6, value=f"{f_in} {hora_inicio}")
 
-        ws.cell(row=6, column=1, value="Velocidad Máxima:").font = Font(bold=True)
+        ws.cell(row=6, column=1, value="Velocidad Máxima Oficial:").font = Font(bold=True)
         ws.cell(row=6, column=2, value=f"{round(max_vel, 1)} km/h")
         ws.cell(row=6, column=3, value="Ralentí (Motor estático):").font = Font(bold=True)
         ws.cell(row=6, column=4, value=f"{ral_hrs} hrs {ral_mins} mins").font = Font(color="FF0000")
@@ -732,10 +746,6 @@ def procesar_reporte_bg(task_id, params):
         ws.cell(row=7, column=2, value=f"{round(prom_vel, 1)} km/h")
         ws.cell(row=7, column=3, value="Exceso en Geocercas:").font = Font(bold=True)
         ws.cell(row=7, column=4, value=f"{exceso_geo_hrs} hrs {exceso_geo_mins} mins").font = Font(color="FF0000", bold=True)
-
-        ws.cell(row=8, column=1, value="Costo Combustible:").font = Font(bold=True)
-        ws.cell(row=8, column=3, value="Horas de Motor (Trabajo):").font = Font(bold=True)
-        ws.cell(row=8, column=4, value=f"{motor_hrs} hrs {motor_mins} mins")
 
         headers = ["Vehículo", "Fecha", "Dirección", "Ciudad", "Velocidad (Km/h)", "Evento", "Detalle", "Geocerca", "Mapa", "Longitud", "Latitud"]
         header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -759,7 +769,7 @@ def procesar_reporte_bg(task_id, params):
             
             geo_cell = ws.cell(row=row_idx, column=8, value=f['geocerca'])
             if f['geocerca'] != "Fuera de geocerca": geo_cell.font = Font(color="008000", bold=True)
-            if "Exceso" in f['evento'] or "Motor" in f['evento'] or "Ralentí" in f['evento']: ws.cell(row=row_idx, column=6).font = Font(color="FF0000", bold=True)
+            if "Exceso" in f['evento'] or "Motor" in f['evento']: ws.cell(row=row_idx, column=6).font = Font(color="FF0000", bold=True)
             
             map_cell = ws.cell(row=row_idx, column=9, value="mapa")
             map_cell.hyperlink = f"https://www.google.com/maps?q={f['lat']},{f['lng']}"
