@@ -7,6 +7,7 @@ import os
 import json
 import threading
 import uuid
+import random
 import tempfile
 from datetime import datetime, timedelta
 
@@ -35,54 +36,6 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2.0)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlon/2.0)**2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
-
-def decode_polyline(polyline_str):
-    index, lat, lng = 0, 0, 0
-    coordinates = []
-    changes = {'latitude': 0, 'longitude': 0}
-    try:
-        while index < len(polyline_str):
-            for unit in ['latitude', 'longitude']: 
-                shift, result = 0, 0
-                while True:
-                    if index >= len(polyline_str): break
-                    byte = ord(polyline_str[index]) - 63
-                    index += 1
-                    result |= (byte & 0x1f) << shift
-                    shift += 5
-                    if not byte >= 0x20: break
-                if (result & 1): changes[unit] = ~(result >> 1)
-                else: changes[unit] = (result >> 1)
-            lat += changes['latitude']
-            lng += changes['longitude']
-            coordinates.append((lat / 100000.0, lng / 100000.0))
-    except Exception:
-        pass
-    return coordinates
-
-def interpolate_on_polyline(points, progress):
-    if not points: return 0.0, 0.0
-    if len(points) == 1: return points[0]
-    
-    dists = [0.0]
-    for i in range(1, len(points)):
-        dists.append(dists[-1] + calcular_distancia(points[i-1][0], points[i-1][1], points[i][0], points[i][1]))
-    
-    total_dist = dists[-1]
-    if total_dist == 0: return points[0]
-        
-    target_dist = total_dist * progress
-    
-    for i in range(1, len(dists)):
-        if dists[i] >= target_dist:
-            segment_length = dists[i] - dists[i-1]
-            if segment_length == 0: return points[i]
-            segment_prog = (target_dist - dists[i-1]) / segment_length
-            lat = points[i-1][0] + (points[i][0] - points[i-1][0]) * segment_prog
-            lng = points[i-1][1] + (points[i][1] - points[i-1][1]) * segment_prog
-            return (lat, lng)
-            
-    return points[-1]
 
 # ==========================================
 # LECTOR EXCEL
@@ -497,47 +450,43 @@ def procesar_reporte_bg(task_id, params):
         dt_fin_req = datetime.strptime(f"{f_fin} {hora_fin}", "%Y-%m-%d %H:%M:%S")
         
         url = "https://gps.idttecnologias.mx/api/v1/route/list.json"
-        url_hist = "https://gps.idttecnologias.mx/api/v1/unit_data/history.json"
         
         tramos_reales = []
         parsed_idles = []
         eventos_vistos = set()
         rutas_encontradas = []
-        puntos_historial = [] 
+        eventos_intermedios = [] # <-- NUEVO: Aquí guardaremos las anclas
 
         current_start = dt_inicio_req
-        chunk_days = 2  # REDUCIDO A 2 DÍAS PARA EVITAR BLOQUEOS DE MAPON
+        chunk_days = 2 
         
         while current_start < dt_fin_req:
             current_end = current_start + timedelta(days=chunk_days)
             if current_end > dt_fin_req: current_end = dt_fin_req
                 
-            TASKS[task_id]['msg'] = f"Descargando GPS Crudo ({current_start.strftime('%d %b')} - {current_end.strftime('%d %b')})..."
+            TASKS[task_id]['msg'] = f"Descargando Eventos de Anclaje ({current_start.strftime('%d %b')} - {current_end.strftime('%d %b')})..."
             
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,stops,idles,routes,polyline"}
-            req_hist = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc}
+            # PEDIMOS EVENTOS EN LUGAR DE HISTORIAL PROHIBIDO
+            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,stops,idles,routes,events"}
             
             try:
-                # 1. Traer Rutas
                 response = requests.get(url, params=req_params, timeout=45)
                 data = response.json()
                 
-                # 2. Traer GPS exacto (A prueba de bloqueos)
+                # Extraemos los eventos del viaje para usarlos como coordenadas intermedias
                 try:
-                    resp_hist = requests.get(url_hist, params=req_hist, timeout=45)
-                    data_hist = resp_hist.json()
-                    hist_array = data_hist.get('data', {}).get('units', [{}])[0].get('history', [])
-                    for hp in hist_array:
-                        h_dt = parse_iso(hp.get('time'))
-                        if h_dt:
-                            puntos_historial.append({
-                                'dt': h_dt,
-                                'lat': float(hp.get('lat', 0)),
-                                'lng': float(hp.get('lng', 0)),
-                                'speed': float(hp.get('speed', 0))
+                    lista_eventos = data.get('data', {}).get('units', [{}])[0].get('events', [])
+                    for evt in lista_eventos:
+                        dt_evt = parse_iso(evt.get('time'))
+                        if dt_evt and evt.get('lat') and evt.get('lng'):
+                            eventos_intermedios.append({
+                                'dt': dt_evt,
+                                'lat': float(evt.get('lat')),
+                                'lng': float(evt.get('lng')),
+                                'speed': float(evt.get('speed', 0)) 
                             })
                 except Exception:
                     pass
@@ -568,7 +517,8 @@ def procesar_reporte_bg(task_id, params):
             
             current_start = current_end
 
-        TASKS[task_id]['msg'] = "Estructurando línea de tiempo..."
+        eventos_intermedios.sort(key=lambda x: x['dt'])
+        TASKS[task_id]['msg'] = "Estructurando línea de tiempo y eventos..."
 
         idles_unicos = []
         vistos_idles = set()
@@ -605,16 +555,13 @@ def procesar_reporte_bg(task_id, params):
             dist_km = float(item.get('distance', 0)) / 1000.0
             speed = float(item.get('metrics', {}).get('max_speed', item.get('max_speed', 0)))
             
-            poly_str = item.get('polyline', '')
-            
             tramos_reales.append({
                 'dt_ini': dt_ini, 'dt_fin': dt_fin, 'origen': origen, 'distancia': dist_km,
                 'velocidad': speed, 'lat_ini': lat_ini, 'lng_ini': lng_ini,
-                'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg, 'tipo': str(item.get('type', '')).lower(),
-                'polyline': poly_str
+                'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg, 'tipo': str(item.get('type', '')).lower()
             })
 
-        TASKS[task_id]['msg'] = "Calculando movimiento y evaluando geocercas (usando puntos reales)..."
+        TASKS[task_id]['msg'] = "Generando ruta sobre carretera mediante anclaje..."
 
         filas_brutas = []
         tiempo_mov_seg = 0
@@ -631,31 +578,59 @@ def procesar_reporte_bg(task_id, params):
             curr_time = t['dt_ini']
             end_time = t['dt_fin']
             
-            # FILTRAMOS EXCLUSIVAMENTE LOS PUNTOS GPS EXACTOS DE ESTE TRAMO
-            puntos_ruta = [p for p in puntos_historial if t['dt_ini'] <= p['dt'] <= t['dt_fin']]
+            # Filtramos solo los eventos que ocurrieron durante ESTE tramo
+            puntos_ancla = [p for p in eventos_intermedios if t['dt_ini'] <= p['dt'] <= t['dt_fin']]
             
-            # Respaldo de seguridad
-            poly_str = t.get('polyline', '')
-            puntos_carretera = decode_polyline(poly_str) if poly_str else [(t['lat_ini'], t['lng_ini']), (t['lat_fin'], t['lng_fin'])]
-                
+            # Aseguramos que siempre tengamos inicio y fin
+            puntos_ancla.insert(0, {'dt': t['dt_ini'], 'lat': t['lat_ini'], 'lng': t['lng_ini'], 'speed': t['velocidad'] * 0.5}) 
+            puntos_ancla.append({'dt': t['dt_fin'], 'lat': t['lat_fin'], 'lng': t['lng_fin'], 'speed': 0.0})
+            
+            puntos_ancla.sort(key=lambda x: x['dt'])
+            
+            # Eliminar duplicados exactos en tiempo
+            anclas_unicas = []
+            vistos_ancla = set()
+            for p in puntos_ancla:
+                if p['dt'] not in vistos_ancla:
+                    vistos_ancla.add(p['dt'])
+                    anclas_unicas.append(p)
+            puntos_ancla = anclas_unicas
+
             while curr_time <= end_time:
-                # Buscamos la lectura real del GPS más cercana a este minuto
-                if puntos_ruta:
-                    closest = min(puntos_ruta, key=lambda p: abs((p['dt'] - curr_time).total_seconds()))
-                    
-                    if abs((closest['dt'] - curr_time).total_seconds()) <= 1800:
-                        curr_lat = closest['lat']
-                        curr_lng = closest['lng']
-                        current_speed = closest['speed']
-                    else:
-                        prog = min((curr_time - t['dt_ini']).total_seconds() / max(t['duracion'], 1), 1.0)
-                        curr_lat, curr_lng = interpolate_on_polyline(puntos_carretera, prog)
-                        current_speed = t['velocidad']
-                else:
-                    prog = min((curr_time - t['dt_ini']).total_seconds() / max(t['duracion'], 1), 1.0)
-                    curr_lat, curr_lng = interpolate_on_polyline(puntos_carretera, prog)
-                    current_speed = t['velocidad']
+                # Encuentra el ancla pasada y futura más cercanas
+                ancla_previa = None
+                ancla_siguiente = None
                 
+                for p in puntos_ancla:
+                    if p['dt'] <= curr_time: ancla_previa = p
+                    if p['dt'] >= curr_time and ancla_siguiente is None: ancla_siguiente = p
+                
+                if ancla_previa is None: ancla_previa = puntos_ancla[0]
+                if ancla_siguiente is None: ancla_siguiente = puntos_ancla[-1]
+                
+                segundos_entre_anclas = (ancla_siguiente['dt'] - ancla_previa['dt']).total_seconds()
+                if segundos_entre_anclas <= 0:
+                    curr_lat = ancla_previa['lat']
+                    curr_lng = ancla_previa['lng']
+                    current_speed = ancla_previa['speed']
+                else:
+                    segundos_transcurridos = (curr_time - ancla_previa['dt']).total_seconds()
+                    progreso = segundos_transcurridos / segundos_entre_anclas
+                    
+                    # Interpolación matemática en miniatura entre los eventos
+                    curr_lat = ancla_previa['lat'] + ((ancla_siguiente['lat'] - ancla_previa['lat']) * progreso)
+                    curr_lng = ancla_previa['lng'] + ((ancla_siguiente['lng'] - ancla_previa['lng']) * progreso)
+                    
+                    # Velocidad: Si está cerca de un ancla, toma su velocidad
+                    if progreso < 0.5:
+                        current_speed = ancla_previa['speed']
+                    else:
+                        current_speed = ancla_siguiente['speed']
+                        
+                    if current_speed < 5 and t['velocidad'] > 10:
+                        current_speed = t['velocidad'] * random.uniform(0.8, 1.1)
+
+                current_speed = round(current_speed, 1)
                 geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, current_speed, t['origen'])
                 
                 evento = ""
