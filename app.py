@@ -7,6 +7,7 @@ import os
 import json
 import threading
 import uuid
+import random
 import tempfile
 import concurrent.futures
 from datetime import datetime, timedelta
@@ -421,7 +422,6 @@ def procesar_reporte_bg(task_id, params):
                 try: return datetime.strptime(str(iso_str).replace('Z', '').split('.')[0], '%Y-%m-%dT%H:%M:%S') + timedelta(hours=TIMEZONE_OFFSET)
                 except Exception: return None
 
-        # Función para solicitar la coordenada real en un minuto específico
         def fetch_exact_point(dt):
             utc_str = (dt - timedelta(hours=TIMEZONE_OFFSET)).strftime('%Y-%m-%dT%H:%M:%SZ')
             url = f"{BASE_URL}/unit_data/history_point.json?key={API_KEY}&unit_id={unit_id}&datetime={utc_str}&include[]=position"
@@ -445,7 +445,6 @@ def procesar_reporte_bg(task_id, params):
         tramos_reales = []
         parsed_idles = []
         eventos_vistos = set()
-        
         eventos_hardware_ignicion = []
 
         current_start = dt_inicio_req
@@ -464,16 +463,13 @@ def procesar_reporte_bg(task_id, params):
             req_dig_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include[]": "label"}
             
             try:
-                # 1. Extraemos las rutas
                 response = requests.get(url_route, params=req_params, timeout=45)
                 data = response.json()
                 
-                # 2. Extraemos Entradas Digitales (IGNICIÓN EXACTA)
                 try:
                     res_dig = requests.get(url_dig, params=req_dig_params, timeout=45).json()
                     dig_inputs = res_dig.get('data', {}).get('units', [{}])[0].get('digital_inputs', [])
                     for di in dig_inputs:
-                        # Usualmente el input 1 es ignición. Validamos también por nombre.
                         if di.get('input_id') == 1 or 'ign' in str(di.get('label', '')).lower() or 'motor' in str(di.get('label', '')).lower():
                             for state in di.get('states', []):
                                 on_dt = parse_iso(state.get('gmt_on'))
@@ -482,14 +478,14 @@ def procesar_reporte_bg(task_id, params):
                                 if on_dt and dt_inicio_req <= on_dt <= dt_fin_req:
                                     eventos_hardware_ignicion.append({
                                         'fecha': on_dt, 'evento': 'Motor encendido', 'detalle': 'Ignición detectada', 
-                                        'lat': state.get('lat_on', 0), 'lng': state.get('lng_on', 0)
+                                        'lat': float(state.get('lat_on', 0)), 'lng': float(state.get('lng_on', 0))
                                     })
                                 if off_dt and dt_inicio_req <= off_dt <= dt_fin_req:
                                     eventos_hardware_ignicion.append({
                                         'fecha': off_dt, 'evento': 'Motor apagado', 'detalle': 'Llave cerrada', 
-                                        'lat': state.get('lat_off', 0), 'lng': state.get('lng_off', 0)
+                                        'lat': float(state.get('lat_off', 0)), 'lng': float(state.get('lng_off', 0))
                                     })
-                except Exception as e:
+                except Exception:
                     pass
 
                 rutas_encontradas = []
@@ -550,7 +546,6 @@ def procesar_reporte_bg(task_id, params):
             
             current_start = current_end
 
-
         TASKS[task_id]['msg'] = "Estructurando línea de tiempo..."
 
         tiempo_ral_reportado_seg = 0
@@ -576,7 +571,6 @@ def procesar_reporte_bg(task_id, params):
         list_routes = [t for t in tramos_reales if t['tipo'] == 'route']
         list_stops = [t for t in tramos_reales if t['tipo'] in ['stop', 'idle']]
 
-        # Juntar TODOS los minutos de movimiento que necesitamos descargar de Mapon
         minutos_a_pedir = []
         for t in list_routes:
             c_time = t['dt_ini']
@@ -586,7 +580,6 @@ def procesar_reporte_bg(task_id, params):
             if minutos_a_pedir and minutos_a_pedir[-1] != t['dt_fin']:
                 minutos_a_pedir.append(t['dt_fin'])
                 
-        # También pedir la coordenada de los eventos de ralentí (los de ignición ya traen coordenada de la API)
         for ev in eventos_ralenti:
             minutos_a_pedir.append(ev['dt'])
             
@@ -594,7 +587,6 @@ def procesar_reporte_bg(task_id, params):
 
         TASKS[task_id]['msg'] = "Descargando coordenadas exactas... (Tomará unos segundos)"
 
-        # --- EXTRACCIÓN MASIVA PUNTO A PUNTO (10 HILOS) ---
         puntos_exitosos = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             resultados = executor.map(fetch_exact_point, minutos_a_pedir)
@@ -604,7 +596,7 @@ def procesar_reporte_bg(task_id, params):
         puntos_exitosos.sort(key=lambda x: x['dt'])
         puntos_dict = {p['dt']: p for p in puntos_exitosos}
 
-        # 1. Dibujar Filas de Rutas (Movimiento). El Evento se deja vacío si no hay exceso.
+        # 1. Dibujar Filas de Movimiento (Eventos vacíos a menos que haya exceso de velocidad)
         for t in list_routes:
             puntos_ruta = [p for p in puntos_exitosos if t['dt_ini'] <= p['dt'] <= t['dt_fin']]
             
@@ -633,7 +625,7 @@ def procesar_reporte_bg(task_id, params):
                 
                 geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng)
                 
-                evento = "" # <--- AQUÍ SE QUEDA VACÍO COMO QUERÍAS
+                evento = "" 
                 detalle = "-"
                 limite_aplicable = limite_velocidad_gral
                 
@@ -659,7 +651,7 @@ def procesar_reporte_bg(task_id, params):
                     'evento': evento, 'detalle': detalle, 'lat': curr_lat, 'lng': curr_lng, 'geocerca': geo_name
                 })
 
-        # 2. Dibujar Filas de Ignición Reales y Ralentí
+        # 2. Dibujar Encendidos/Apagados del Hardware (Digital Inputs Extended)
         for ev in eventos_hardware_ignicion:
             geo_id, geo_name = obtener_geocerca(ev['lat'], ev['lng'])
             filas_brutas.append({
@@ -668,6 +660,7 @@ def procesar_reporte_bg(task_id, params):
                 'lat': ev['lat'], 'lng': ev['lng'], 'geocerca': geo_name
             })
             
+        # 3. Dibujar Ralentís
         for ev in eventos_ralenti:
             pt = puntos_dict.get(ev['dt'])
             if pt:
@@ -682,23 +675,13 @@ def procesar_reporte_bg(task_id, params):
 
         filas_brutas.sort(key=lambda x: x['fecha'])
         
-        # Eliminar duplicados en el mismo segundo
         vistos = set()
         filas_finales = []
         for f in filas_brutas:
-            # Si en un mismo minuto hay un evento real y uno en blanco, conservamos el real.
-            key = f['fecha'].strftime('%Y-%m-%d %H:%M:%S')
+            key = f['fecha'].strftime('%Y-%m-%d %H:%M:%S') + f['evento']
             if key not in vistos:
                 vistos.add(key)
                 filas_finales.append(f)
-            else:
-                # Si ya existe pero el nuevo tiene un evento importante, actualizamos
-                if f['evento']:
-                    # Buscamos el existente y lo reemplazamos si el otro estaba vacío
-                    for idx, fil in enumerate(filas_finales):
-                        if fil['fecha'].strftime('%Y-%m-%d %H:%M:%S') == key and not fil['evento']:
-                            filas_finales[idx] = f
-                            break
 
         tiempo_mov_seg = sum([t['duracion'] for t in list_routes])
         total_segundos = (dt_fin_req - dt_inicio_req).total_seconds()
