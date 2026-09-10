@@ -198,7 +198,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <p>Módulo V5 (Extra-Rápido y Velocidad Nativa)</p>
+                <p>Módulo V5.1 (Polilíneas y Anclaje Estricto)</p>
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -364,7 +364,7 @@ HTML_INTERFACE = """
                         btn.disabled = false;
                         alert("Error en el reporte: " + sData.msg);
                     }
-                }, 1500); // Revisión más rápida ya que el script vuela
+                }, 1500); 
 
             } catch (e) {
                 overlay.style.display = 'none';
@@ -499,7 +499,7 @@ def procesar_reporte_bg(task_id, params):
         tramos_reales = []
         parsed_idles = []
         eventos_ignicion = []
-        master_real_points = [] # Almacena todas las coordenadas y velocidades verdaderas
+        master_real_points = []
 
         current_start = dt_inicio_req
         chunk_days = 2 
@@ -513,7 +513,6 @@ def procesar_reporte_bg(task_id, params):
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            # EL SECRETO REVELADO: Se pide todo encodificado en 1 solo request.
             req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,idles,routes,polyline,speed,time"}
             req_ign_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc}
             
@@ -526,9 +525,9 @@ def procesar_reporte_bg(task_id, params):
                         on_dt = parse_iso(ign.get('on'))
                         off_dt = parse_iso(ign.get('off'))
                         if on_dt and dt_inicio_req <= on_dt <= dt_fin_req:
-                            eventos_ignicion.append({'dt': on_dt, 'evento': 'Motor encendido', 'tipo': 'on'})
+                            eventos_ignicion.append({'dt': on_dt, 'evento': 'Motor encendido', 'tipo': 'on', 'detalle': 'Ignición activada'})
                         if off_dt and dt_inicio_req <= off_dt <= dt_fin_req:
-                            eventos_ignicion.append({'dt': off_dt, 'evento': 'Motor apagado', 'tipo': 'off'})
+                            eventos_ignicion.append({'dt': off_dt, 'evento': 'Motor apagado', 'tipo': 'off', 'detalle': 'Llave cerrada'})
                 except Exception: pass
 
                 # 2. Rutas y Telemetría Nativa (Extra-Rápido)
@@ -566,7 +565,6 @@ def procesar_reporte_bg(task_id, params):
                         'dt_ini': dt_ini, 'dt_fin': dt_fin, 'distancia': dist_km, 'tipo': tipo_tramo
                     })
                     
-                    # MAGIA PURA: Extraemos la telemetría encriptada si es un viaje
                     if tipo_tramo == 'route':
                         poly_str = item.get('polyline', '')
                         speed_str = item.get('speed', '')
@@ -574,18 +572,15 @@ def procesar_reporte_bg(task_id, params):
                         
                         if poly_str:
                             coords = decode_polyline_2d(poly_str)
-                            # Fallback nativo: Si no devuelve string de velocidad, usamos promedio. Si lo devuelve, decodificamos el real.
                             speeds = decode_polyline_1d(speed_str) if speed_str else [float(item.get('metrics', {}).get('avg_speed', 0))] * len(coords)
                             times_offsets = decode_polyline_1d(time_str) if time_str else []
                             
                             num_pts = len(coords)
-                            # Relleno de offsets de tiempo proporcional si falla la decodificación
                             if len(times_offsets) != num_pts:
                                 dur = (dt_fin - dt_ini).total_seconds()
                                 step = dur / num_pts if num_pts > 0 else 0
                                 times_offsets = [int(step * x) for x in range(num_pts)]
                                 
-                            # Relleno de velocidades
                             if len(speeds) != num_pts:
                                 speeds = [float(item.get('metrics', {}).get('avg_speed', 0))] * num_pts
                                 
@@ -595,7 +590,7 @@ def procesar_reporte_bg(task_id, params):
                                     'dt': pt_time,
                                     'lat': coords[idx][0],
                                     'lng': coords[idx][1],
-                                    'speed': speeds[idx] # ESTA ES LA VELOCIDAD OFICIAL INCORRUPTIBLE
+                                    'speed': speeds[idx]
                                 })
 
             except Exception: pass 
@@ -614,9 +609,29 @@ def procesar_reporte_bg(task_id, params):
             minutos_a_pedir.append(c_time)
             c_time += timedelta(minutes=1)
 
-        # Inyectar también los segundos de encendido/apagado para que existan en el excel
         for ev in eventos_ignicion:
             minutos_a_pedir.append(ev['dt'])
+            
+        # Lógica de Ralentís
+        tiempo_ral_reportado_seg = 0
+        eventos_ralenti = []
+        idles_unicos = []
+        vistos_idles = set()
+        for idl in parsed_idles:
+            sig = f"{idl['dt_ini']}_{idl['dt_fin']}"
+            if sig not in vistos_idles:
+                vistos_idles.add(sig)
+                idles_unicos.append(idl)
+                
+        for idl in idles_unicos:
+            dur = (idl['dt_fin'] - idl['dt_ini']).total_seconds()
+            if dur >= min_ralenti * 60:
+                tiempo_ral_reportado_seg += dur
+                detalle_ral = f"Detenido por: {int(dur//60)} mins"
+                ral_dt = idl['dt_ini'] + timedelta(seconds=1)
+                eventos_ralenti.append({'dt': ral_dt, 'evento': 'Ralentí', 'detalle': detalle_ral})
+                minutos_a_pedir.append(ral_dt)
+
         minutos_a_pedir = sorted(list(set(minutos_a_pedir)))
 
         def is_ignition_on(dt):
@@ -635,7 +650,6 @@ def procesar_reporte_bg(task_id, params):
         filas_brutas = []
         tiempo_mov_seg = 0
         tiempo_exceso_geo_seg = 0
-        tiempo_ral_reportado_seg = 0
         tiempo_apagado_seg = 0
         distancia_total_km = sum([t['distancia'] for t in tramos_reales if t['tipo'] == 'route'])
         
@@ -647,7 +661,6 @@ def procesar_reporte_bg(task_id, params):
             ign_on = is_ignition_on(dt)
             en_ruta = is_in_route(dt)
             
-            # Buscamos el punto decodificado oficial más cercano (Concurrencia nativa, 0 segundos)
             idx = bisect.bisect_left(master_dts, dt)
             closest_p = None
             min_diff = float('inf')
@@ -659,35 +672,36 @@ def procesar_reporte_bg(task_id, params):
                         min_diff = diff
                         closest_p = master_real_points[check_idx]
                         
-            # Si estamos en ruta y la computadora reportó hace menos de 90 segundos, lo usamos.
             if closest_p and min_diff <= 90 and en_ruta:
                 curr_lat = closest_p['lat']
                 curr_lng = closest_p['lng']
                 curr_speed = float(closest_p['speed'])
                 last_lat, last_lng = curr_lat, curr_lng
             else:
-                # El anclaje maestro: Congela ubicación y velocidad en 0
                 curr_lat = last_lat
                 curr_lng = last_lng
                 curr_speed = 0.0
 
-            # Sumatoria de tiempos
             seg_transcurridos = 60 if i > 0 else 0
             if en_ruta and curr_speed > 2:
                 tiempo_mov_seg += seg_transcurridos
             elif not en_ruta:
-                if ign_on: tiempo_ral_reportado_seg += seg_transcurridos
-                else: tiempo_apagado_seg += seg_transcurridos
+                if not ign_on:
+                    tiempo_apagado_seg += seg_transcurridos
 
-            # Inyección de Eventos
             geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng)
             evento = ""
             detalle = "-"
             
             es_evento_motor = next((e for e in eventos_ignicion if e['dt'] == dt), None)
+            es_evento_ralenti = next((e for e in eventos_ralenti if e['dt'] == dt), None)
+            
             if es_evento_motor:
                 evento = es_evento_motor['evento']
                 detalle = es_evento_motor['detalle']
+            elif es_evento_ralenti:
+                evento = es_evento_ralenti['evento']
+                detalle = es_evento_ralenti['detalle']
             else:
                 limite_aplicable = limite_velocidad_gral
                 if geo_name != "Fuera de geocerca":
@@ -769,7 +783,7 @@ def procesar_reporte_bg(task_id, params):
             
             geo_cell = ws.cell(row=row_idx, column=8, value=f['geocerca'])
             if f['geocerca'] != "Fuera de geocerca": geo_cell.font = Font(color="008000", bold=True)
-            if "Exceso" in f['evento'] or "Motor" in f['evento']: ws.cell(row=row_idx, column=6).font = Font(color="FF0000", bold=True)
+            if "Exceso" in f['evento'] or "Motor" in f['evento'] or "Ralentí" in f['evento']: ws.cell(row=row_idx, column=6).font = Font(color="FF0000", bold=True)
             
             map_cell = ws.cell(row=row_idx, column=9, value="mapa")
             map_cell.hyperlink = f"https://www.google.com/maps?q={f['lat']},{f['lng']}"
