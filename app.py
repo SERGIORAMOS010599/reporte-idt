@@ -7,9 +7,9 @@ import os
 import json
 import threading
 import uuid
-import random
 import tempfile
 import concurrent.futures
+import random
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
@@ -23,9 +23,11 @@ COMPANY_ID = "87534"
 TIMEZONE_OFFSET = -7
 
 TASKS = {}
+# Caché en memoria para las geocercas descargadas de la API
+CACHE_GEOCERCAS = []
 
 # ==========================================
-# FÓRMULA HAVERSINE
+# FÓRMULA HAVERSINE (PARA WKT)
 # ==========================================
 def calcular_distancia(lat1, lon1, lat2, lon2):
     R = 6371000 
@@ -37,49 +39,46 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
     return R * c
 
 # ==========================================
-# LECTOR EXCEL DE GEOCERCAS
+# DESCARGA DE GEOCERCAS DESDE LA API
 # ==========================================
-def cargar_geocercas_excel():
+def cargar_geocercas_api():
     geocercas = []
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    posibles_archivos = ['kowi_principales.xlsx', 'kowi principales.xlsx']
-    ruta_final = None
-    for archivo in posibles_archivos:
-        ruta_temp = os.path.join(base_dir, archivo)
-        if os.path.exists(ruta_temp):
-            ruta_final = ruta_temp
-            break
-    if not ruta_final: return [{'error': 'file_not_found', 'msg': 'No se encontró el archivo .xlsx en Render'}]
     try:
-        wb = openpyxl.load_workbook(ruta_final, data_only=True)
-        ws = wb.active
-        headers = [str(cell.value).lower().strip() if cell.value else '' for cell in ws[1]]
-        idx_nom = next((i for i, h in enumerate(headers) if 'nombre' in h or 'zona' in h), -1)
-        idx_lat = next((i for i, h in enumerate(headers) if 'lat' in h), -1)
-        idx_lon = next((i for i, h in enumerate(headers) if 'lon' in h or 'lng' in h), -1)
-        idx_area = next((i for i, h in enumerate(headers) if 'rea' in h or 'area' in h), -1)
+        # Descargar Geocercas (Geometries)
+        url = f"{BASE_URL}/customlayers_geometries/list.json"
+        params = {"key": API_KEY, "limit": 250}
+        res = requests.get(url, params=params, timeout=10)
+        data = res.json()
         
-        if idx_nom == -1 or idx_lat == -1 or idx_lon == -1: return [{'error': 'parsing_failed', 'msg': 'Columnas no detectadas.'}]
-            
-        for i, row in enumerate(ws.iter_rows(min_row=2, values_only=True)):
-            if not row[idx_nom] or not row[idx_lat] or not row[idx_lon]: continue
-            nombre = str(row[idx_nom]).strip()
-            lat_str = str(row[idx_lat]).strip()
-            lng_str = str(row[idx_lon]).strip()
-            area_str = str(row[idx_area]).strip() if idx_area != -1 and row[idx_area] else ''
-            radio_m = 200 
-            try:
-                area_limpia = float(str(area_str).lower().replace('km2', '').replace('m2', '').replace(',', '').strip())
-                area_m2 = area_limpia * 1000000 if 'km2' in str(area_str).lower() else area_limpia
-                radio_calculado = math.sqrt(area_m2 / math.pi)
-                if radio_calculado > 0: radio_m = min(radio_calculado, 1500) 
-            except Exception:
-                pass
-            geocercas.append({'id': f"LOCAL_{i}", 'name': nombre, 'lat': float(lat_str), 'lng': float(lng_str), 'radius': radio_m})
-        return geocercas
-    except Exception as e: return [{'error': 'exception', 'msg': str(e)}]
-
-GEOCERCAS_MAESTRAS = cargar_geocercas_excel()
+        if 'data' in data and 'geometries' in data['data']:
+            geometries = data['data']['geometries']
+            for geo in geometries:
+                nombre = geo.get('name', f"Geocerca_{geo.get('id')}")
+                wkt = geo.get('wkt', '')
+                
+                # Parsear WKT básico (Ej. POINT(-109.55 27.19))
+                if 'POINT' in wkt:
+                    try:
+                        coords_str = wkt.replace('POINT(', '').replace('POINT (', '').replace(')', '')
+                        lng_str, lat_str = coords_str.strip().split(' ')
+                        lat = float(lat_str)
+                        lng = float(lng_str)
+                        # Radio por defecto para puntos
+                        radio_m = 300 
+                        geocercas.append({'id': str(geo.get('id')), 'name': nombre, 'lat': lat, 'lng': lng, 'radius': radio_m})
+                    except Exception: pass
+                # Si es un polígono, usamos el primer punto como centroide aprox.
+                elif 'POLYGON' in wkt:
+                    try:
+                        coords_str = wkt.split('((')[1].split(',')[0]
+                        lng_str, lat_str = coords_str.strip().split(' ')
+                        lat = float(lat_str)
+                        lng = float(lng_str)
+                        geocercas.append({'id': str(geo.get('id')), 'name': nombre, 'lat': lat, 'lng': lng, 'radius': 800})
+                    except Exception: pass
+    except Exception as e:
+        print(f"Error descargando geocercas: {e}")
+    return geocercas
 
 HTML_INTERFACE = """
 <!DOCTYPE html>
@@ -87,7 +86,7 @@ HTML_INTERFACE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Histórico De Rutas Minuto a Minuto - IDT</title>
+    <title>Histórico De Rutas Minuto a Minuto - Kowi</title>
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
     <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
@@ -145,7 +144,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <p>Extracción de Puntos Vía Coordenadas Exactas</p>
+                <p>Módulo de Precisión Absoluta (API Sync)</p>
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -165,7 +164,7 @@ HTML_INTERFACE = """
 
             <div class="form-content">
                 <div class="form-group">
-                    <label>Buscar / Seleccionar Unidad: <span class="retry-btn" onclick="cargarCatalogos()">🔄 Reintentar carga</span></label>
+                    <label>Buscar / Seleccionar Unidad: <span class="retry-btn" onclick="cargarCatalogos()">🔄 Recargar Nube</span></label>
                     <select id="unit_select" style="width: 100%;">
                         <option value="">⏳ Cargando catálogo...</option>
                     </select>
@@ -205,9 +204,9 @@ HTML_INTERFACE = """
                 </div>
 
                 <div class="form-group">
-                    <label>Geocercas (Leídas de Excel):</label>
+                    <label>Geocercas (Sincronizadas desde Mapon):</label>
                     <select id="geofence_select" multiple="multiple" style="width: 100%;">
-                        <option value="">⏳ Cargando geocercas locales...</option>
+                        <option value="">⏳ Descargando API...</option>
                     </select>
                 </div>
                 <div class="form-group" id="speed_limits_container"></div>
@@ -221,7 +220,7 @@ HTML_INTERFACE = """
     <script>
         async function cargarCatalogos() {
             try {
-                const [resUnits, resGeos] = await Promise.all([fetch('/api_unidades'), fetch('/api_geocercas_locales')]);
+                const [resUnits, resGeos] = await Promise.all([fetch('/api_unidades'), fetch('/api_geocercas_nube')]);
                 const units = await resUnits.json();
                 const geos = await resGeos.json();
 
@@ -233,16 +232,11 @@ HTML_INTERFACE = """
                 const selectGeo = $('#geofence_select');
                 selectGeo.empty();
                 
-                if (geos.length > 0 && geos[0].error) {
-                    $('#status_msg').html("⚠️ Error en archivo Excel: " + geos[0].msg);
-                    $('#btn_submit').prop('disabled', true);
-                } else {
-                    geos.forEach(g => { selectGeo.append(new Option(g.name, g.geofence_id)); });
-                    selectGeo.select2({ placeholder: "Buscar geocerca para límite personalizado...", width: '100%' });
-                    $('#btn_submit').prop('disabled', false);
-                    $('#status_msg').html(`✅ Excel cargado correctamente (<b>${geos.length} geocercas activas</b>).`);
-                }
-            } catch (e) { $('#status_msg').text("Error cargando catálogos."); }
+                geos.forEach(g => { selectGeo.append(new Option(g.name, g.id)); });
+                selectGeo.select2({ placeholder: "Buscar geocerca para límite personalizado...", width: '100%' });
+                $('#btn_submit').prop('disabled', false);
+                $('#status_msg').html(`✅ Sincronizado: <b>${geos.length} geocercas</b> cargadas de la nube.`);
+            } catch (e) { $('#status_msg').text("Error cargando catálogos de la API."); }
         }
 
         $('#geofence_select').on('change', function() {
@@ -273,7 +267,7 @@ HTML_INTERFACE = """
             
             btn.disabled = true;
             overlay.style.display = 'flex';
-            overlayStatus.innerText = "⏳ Iniciando conexión segura con satélites...";
+            overlayStatus.innerText = "⏳ Conectando con API Tracker...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -356,8 +350,9 @@ HTML_INTERFACE = """
 
 @app.route('/')
 def index():
-    global GEOCERCAS_MAESTRAS
-    GEOCERCAS_MAESTRAS = cargar_geocercas_excel()
+    global CACHE_GEOCERCAS
+    if not CACHE_GEOCERCAS:
+        CACHE_GEOCERCAS = cargar_geocercas_api()
     return render_template_string(HTML_INTERFACE)
 
 @app.route('/api_unidades')
@@ -371,17 +366,20 @@ def api_unidades():
     except Exception:
         return jsonify([]), 500
 
-@app.route('/api_geocercas_locales')
-def api_geocercas_locales():
-    if len(GEOCERCAS_MAESTRAS) > 0 and 'error' in GEOCERCAS_MAESTRAS[0]: return jsonify(GEOCERCAS_MAESTRAS)
-    menu_items = [{'geofence_id': g['id'], 'name': g['name']} for g in GEOCERCAS_MAESTRAS]
-    menu_items.sort(key=lambda x: x['name'])
-    return jsonify(menu_items)
+@app.route('/api_geocercas_nube')
+def api_geocercas_nube():
+    global CACHE_GEOCERCAS
+    if not CACHE_GEOCERCAS:
+        CACHE_GEOCERCAS = cargar_geocercas_api()
+    
+    # Ordenar alfabéticamente
+    lista_ordenada = sorted(CACHE_GEOCERCAS, key=lambda x: x['name'].lower())
+    return jsonify(lista_ordenada)
 
 @app.route('/iniciar_reporte')
 def iniciar_reporte():
     task_id = str(uuid.uuid4())
-    TASKS[task_id] = {'status': 'procesando', 'msg': 'Iniciando hilo de trabajo...'}
+    TASKS[task_id] = {'status': 'procesando', 'msg': 'Iniciando conexión con API...'}
     
     params = request.args.to_dict()
     thread = threading.Thread(target=procesar_reporte_bg, args=(task_id, params))
@@ -419,22 +417,21 @@ def procesar_reporte_bg(task_id, params):
         f_fin = params.get('fecha_fin', f_in)
         hora_inicio = normalizar_hora(params.get('hora_inicio', '00:00:00'))
         hora_fin = normalizar_hora(params.get('hora_fin', '23:59:59'), True)
-        limite_velocidad = int(params.get('limite_velocidad', 80))
+        limite_velocidad_gral = int(params.get('limite_velocidad', 80))
         min_ralenti = int(params.get('min_ralenti', 2))
         try: 
             geo_limits = json.loads(params.get('geos', '{}'))
         except Exception: 
             geo_limits = {}
 
-        geos_validas = [g for g in GEOCERCAS_MAESTRAS if 'error' not in g]
+        global CACHE_GEOCERCAS
+        if not CACHE_GEOCERCAS:
+            CACHE_GEOCERCAS = cargar_geocercas_api()
 
-        def obtener_geocerca(lat, lng, velocidad_actual, address=""):
-            if velocidad_actual > 50: return None, "Fuera de geocerca"
-            for g in geos_validas:
+        def obtener_geocerca(lat, lng):
+            for g in CACHE_GEOCERCAS:
                 if calcular_distancia(lat, lng, g['lat'], g['lng']) <= g['radius']:
                     return g['id'], g['name']
-            if address and "+" not in address and "," not in address and "Zona Operativa" not in address:
-                return "GEO_API", address.strip()
             return None, "Fuera de geocerca"
 
         def parse_iso(iso_str):
@@ -442,15 +439,18 @@ def procesar_reporte_bg(task_id, params):
             try: return datetime.strptime(str(iso_str).replace('Z', '').split('.')[0], '%Y-%m-%dT%H:%M:%S') + timedelta(hours=TIMEZONE_OFFSET)
             except Exception: return None
 
-        # FUNCIÓN MAESTRA QUE SACA EL PUNTO EXACTO DE LA API EN PARALELO
+        # FUNCIÓN MAESTRA: EXTRACTOR DE PUNTOS EXACTOS EN PARALELO
         def fetch_exact_point(dt):
             utc_str = (dt - timedelta(hours=TIMEZONE_OFFSET)).strftime('%Y-%m-%dT%H:%M:%SZ')
             url = f"{BASE_URL}/unit_data/history_point.json?key={API_KEY}&unit_id={unit_id}&datetime={utc_str}&include[]=position"
             try:
-                r = requests.get(url, timeout=6)
-                pos = r.json().get('data', {}).get('units', [{}])[0].get('position', {}).get('value', {})
-                if pos and 'lat' in pos and 'lng' in pos:
-                    return {'dt': dt, 'lat': float(pos['lat']), 'lng': float(pos['lng'])}
+                r = requests.get(url, timeout=5)
+                data = r.json()
+                units = data.get('data', {}).get('units', [])
+                if units:
+                    pos = units[0].get('position', {}).get('value', {})
+                    if pos and 'lat' in pos and 'lng' in pos:
+                        return {'dt': dt, 'lat': float(pos['lat']), 'lng': float(pos['lng'])}
             except Exception:
                 pass
             return None
@@ -459,6 +459,7 @@ def procesar_reporte_bg(task_id, params):
         dt_fin_req = datetime.strptime(f"{f_fin} {hora_fin}", "%Y-%m-%d %H:%M:%S")
         
         url_route = "https://gps.idttecnologias.mx/api/v1/route/list.json"
+        
         tramos_reales = []
         parsed_idles = []
         eventos_vistos = set()
@@ -523,10 +524,8 @@ def procesar_reporte_bg(task_id, params):
             dt_ini = parse_iso(item.get('start', {}).get('time', item.get('start_time', '')))
             dt_fin = parse_iso(item.get('end', {}).get('time', item.get('end_time', '')))
             dur_raw = item.get('duration', item.get('time', 0))
-            try: 
-                duracion_seg = float(dur_raw)
-            except Exception: 
-                duracion_seg = 0.0
+            try: duracion_seg = float(dur_raw)
+            except Exception: duracion_seg = 0.0
             
             if dt_ini and dt_fin:
                 calc_dur = (dt_fin - dt_ini).total_seconds()
@@ -547,11 +546,11 @@ def procesar_reporte_bg(task_id, params):
             
             tramos_reales.append({
                 'dt_ini': dt_ini, 'dt_fin': dt_fin, 'origen': origen, 'distancia': dist_km,
-                'velocidad': speed, 'lat_ini': lat_ini, 'lng_ini': lng_ini,
+                'velocidad_max': speed, 'lat_ini': lat_ini, 'lng_ini': lng_ini,
                 'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg, 'tipo': str(item.get('type', '')).lower()
             })
 
-        TASKS[task_id]['msg'] = "Extrayendo puntos satelitales exactos... (Esto puede tomar un par de minutos)"
+        TASKS[task_id]['msg'] = "Extrayendo posiciones exactas desde el satélite... (Tomará unos segundos)"
 
         filas_brutas = []
         tiempo_mov_seg = 0
@@ -563,76 +562,57 @@ def procesar_reporte_bg(task_id, params):
         list_routes = [t for t in tramos_reales if t['tipo'] == 'route']
         list_stops = [t for t in tramos_reales if t['tipo'] in ['stop', 'idle']]
 
-        for t in list_routes:
+        # --- EXTRACCIÓN MASIVA PUNTO A PUNTO (CONCURRENCIA) ---
+        for tramo_idx, t in enumerate(list_routes):
             tiempo_mov_seg += t['duracion']
-            curr_time = t['dt_ini']
-            end_time = t['dt_fin']
             
-            # Dinámico: Si el tramo es corto pedimos cada 1 minuto, si es larguísimo cada 2 mins para no bloquear
-            paso_minutos = 1 if t['duracion'] <= 7200 else 2
-            
+            # Pedimos la coordenada exacta de cada minuto transcurrido
             minutos_a_pedir = []
-            c_time = curr_time
-            while c_time <= end_time:
-                minutos_a_pedir.append(c_time)
-                c_time += timedelta(minutes=paso_minutos)
+            c_time = t['dt_ini']
             
-            if not minutos_a_pedir or minutos_a_pedir[-1] != end_time:
-                minutos_a_pedir.append(end_time)
+            # Para no asfixiar la API si es un viaje de muchas horas, pedimos cada 1 minuto
+            while c_time <= t['dt_fin']:
+                minutos_a_pedir.append(c_time)
+                c_time += timedelta(minutes=1)
+                
+            if not minutos_a_pedir or minutos_a_pedir[-1] != t['dt_fin']:
+                minutos_a_pedir.append(t['dt_fin'])
 
-            # Extraemos coordenadas MASIVAMENTE usando Hilos para hacerlo veloz
-            puntos_ancla = []
+            TASKS[task_id]['msg'] = f"Extrayendo puntos exactos del Viaje {tramo_idx + 1} de {len(list_routes)}..."
+            
+            puntos_reales = []
+            # Disparamos hilos paralelos para extraer 10 coordenadas al mismo tiempo
             with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                 resultados = executor.map(fetch_exact_point, minutos_a_pedir)
                 for res in resultados:
-                    if res: puntos_ancla.append(res)
+                    if res: puntos_reales.append(res)
             
-            puntos_ancla.sort(key=lambda x: x['dt'])
+            puntos_reales.sort(key=lambda x: x['dt'])
             
-            # Si por alguna razón la red falló, volvemos a inicio y fin
-            if len(puntos_ancla) < 2:
-                puntos_ancla = [
-                    {'dt': t['dt_ini'], 'lat': t['lat_ini'], 'lng': t['lng_ini']},
-                    {'dt': t['dt_fin'], 'lat': t['lat_fin'], 'lng': t['lng_fin']}
-                ]
-
-            while curr_time <= end_time:
-                ancla_previa = None
-                ancla_siguiente = None
+            # Generamos las filas del Excel usando LAS COORDENADAS FÍSICAS puras
+            for i, p in enumerate(puntos_reales):
+                curr_time = p['dt']
+                curr_lat = p['lat']
+                curr_lng = p['lng']
                 
-                for p in puntos_ancla:
-                    if p['dt'] <= curr_time: ancla_previa = p
-                    if p['dt'] >= curr_time and ancla_siguiente is None: ancla_siguiente = p
+                # Velocidad real calculada vs el punto anterior
+                current_speed = 0.0
+                if i > 0:
+                    prev_p = puntos_reales[i-1]
+                    seg_diff = max((curr_time - prev_p['dt']).total_seconds(), 1)
+                    dist_mts = calcular_distancia(prev_p['lat'], prev_p['lng'], curr_lat, curr_lng)
+                    current_speed = (dist_mts / seg_diff) * 3.6
                 
-                if ancla_previa is None: ancla_previa = puntos_ancla[0]
-                if ancla_siguiente is None: ancla_siguiente = puntos_ancla[-1]
-                
-                seg_entre_anclas = (ancla_siguiente['dt'] - ancla_previa['dt']).total_seconds()
-                
-                if seg_entre_anclas <= 0:
-                    curr_lat = ancla_previa['lat']
-                    curr_lng = ancla_previa['lng']
-                    current_speed = t['velocidad'] * random.uniform(0.85, 1.0)
-                else:
-                    seg_transcurridos = (curr_time - ancla_previa['dt']).total_seconds()
-                    progreso = seg_transcurridos / seg_entre_anclas
-                    curr_lat = ancla_previa['lat'] + ((ancla_siguiente['lat'] - ancla_previa['lat']) * progreso)
-                    curr_lng = ancla_previa['lng'] + ((ancla_siguiente['lng'] - ancla_previa['lng']) * progreso)
-                    
-                    # Calculamos velocidad física exacta (Metros por segundo a Km/h)
-                    distancia_mts = calcular_distancia(ancla_previa['lat'], ancla_previa['lng'], ancla_siguiente['lat'], ancla_siguiente['lng'])
-                    current_speed = (distancia_mts / seg_entre_anclas) * 3.6
-                    
-                    # Limpiamos picos matemáticos de red
-                    if current_speed > t['velocidad'] * 1.3: current_speed = t['velocidad']
-                    if current_speed < 10 and t['velocidad'] > 30: current_speed = t['velocidad'] * random.uniform(0.7, 0.9)
+                # Suavizado de velocidad para no rebasar el límite físico registrado en el tramo
+                if current_speed > (t['velocidad_max'] * 1.2):
+                    current_speed = t['velocidad_max']
 
                 current_speed = round(current_speed, 1)
-                geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, current_speed, t['origen'])
+                geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng)
                 
                 evento = ""
                 detalle = "-"
-                limite_aplicable = limite_velocidad
+                limite_aplicable = limite_velocidad_gral
                 
                 if geo_name != "Fuera de geocerca":
                     matched_limit = False
@@ -647,13 +627,14 @@ def procesar_reporte_bg(task_id, params):
                         evento = f"Exceso en {geo_name}"
                         detalle = f"Vel: {current_speed} (Límite: {limite_aplicable})"
                         tiempo_exceso_geo_seg += 60
-                elif current_speed > limite_velocidad:
+                elif current_speed > limite_velocidad_gral:
                     evento = "Exceso de velocidad"
-                    detalle = f"Vel: {current_speed} (Límite: {limite_velocidad})"
+                    detalle = f"Vel: {current_speed} (Límite: {limite_velocidad_gral})"
 
-                filas_brutas.append({'fecha': curr_time, 'origen': t['origen'], 'velocidad': current_speed, 'evento': evento, 'detalle': detalle, 'lat': curr_lat, 'lng': curr_lng, 'geocerca': geo_name})
-                
-                curr_time += timedelta(minutes=1)
+                filas_brutas.append({
+                    'fecha': curr_time, 'origen': t['origen'], 'velocidad': current_speed, 
+                    'evento': evento, 'detalle': detalle, 'lat': curr_lat, 'lng': curr_lng, 'geocerca': geo_name
+                })
 
         TASKS[task_id]['msg'] = "Analizando descansos y tiempo de ralentí..."
 
@@ -668,7 +649,7 @@ def procesar_reporte_bg(task_id, params):
                 
             curr_time = stop['dt_ini']
             idles_in_stop.sort(key=lambda x: x[0])
-            geo_id, geo_name = obtener_geocerca(stop['lat_ini'], stop['lng_ini'], 0, stop['origen'])
+            geo_id, geo_name = obtener_geocerca(stop['lat_ini'], stop['lng_ini'])
             
             umbral_segundos = min_ralenti * 60
             events = []
@@ -734,8 +715,8 @@ def procesar_reporte_bg(task_id, params):
 
         rutas_unicas = {t['dt_ini'].strftime('%Y%m%d%H%M%S'): t['distancia'] for t in list_routes if t['distancia'] > 0}
         total_dist = sum(rutas_unicas.values())
-        max_vel = max([t['velocidad'] for t in list_routes]) if list_routes else 0
-        vels_mov = [t['velocidad'] for t in list_routes if t['velocidad'] > 0]
+        vels_mov = [f['velocidad'] for f in filas_finales if f['velocidad'] > 0]
+        max_vel = max(vels_mov) if vels_mov else 0
         prom_vel = sum(vels_mov) / len(vels_mov) if vels_mov else 0
 
         wb = openpyxl.Workbook()
