@@ -97,7 +97,6 @@ def cargar_geocercas_api():
     except Exception as e:
         print(f"Fallo carga Geocercas Nube: {e}")
         
-    # Respaldo automático: Si Mapon falla, se usa el Excel local
     if not geocercas:
         geocercas = cargar_geocercas_excel()
     return geocercas
@@ -460,7 +459,6 @@ def procesar_reporte_bg(task_id, params):
             try: return datetime.strptime(str(iso_str).replace('Z', '').split('.')[0], '%Y-%m-%dT%H:%M:%S') + timedelta(hours=TIMEZONE_OFFSET)
             except Exception: return None
 
-        # PARSER PARA IGNITION DATES (EJ. "2016-09-08 10:54:47")
         def parse_ign_date(date_str):
             if not date_str: return None
             try:
@@ -468,7 +466,6 @@ def procesar_reporte_bg(task_id, params):
                 return dt + timedelta(hours=TIMEZONE_OFFSET)
             except Exception: return None
 
-        # FUNCIÓN MAESTRA: EXTRACTOR DE PUNTOS EXACTOS EN PARALELO
         def fetch_exact_point(dt):
             utc_str = (dt - timedelta(hours=TIMEZONE_OFFSET)).strftime('%Y-%m-%dT%H:%M:%SZ')
             url = f"{BASE_URL}/unit_data/history_point.json?key={API_KEY}&unit_id={unit_id}&datetime={utc_str}&include[]=position"
@@ -482,6 +479,16 @@ def procesar_reporte_bg(task_id, params):
                         return {'dt': dt, 'lat': float(pos['lat']), 'lng': float(pos['lng'])}
             except Exception: pass
             return None
+
+        def is_engine_on(dt, ign_list):
+            """ Evalúa si el motor está encendido en un minuto exacto """
+            for ign in ign_list:
+                on_dt = parse_ign_date(ign.get('on'))
+                off_dt = parse_ign_date(ign.get('off'))
+                if on_dt and dt >= on_dt:
+                    if not off_dt or dt <= off_dt:
+                        return True
+            return False
 
         dt_inicio_req = datetime.strptime(f"{f_in} {hora_inicio}", "%Y-%m-%d %H:%M:%S")
         dt_fin_req = datetime.strptime(f"{f_fin} {hora_fin}", "%Y-%m-%d %H:%M:%S")
@@ -501,20 +508,18 @@ def procesar_reporte_bg(task_id, params):
             current_end = current_start + timedelta(days=chunk_days)
             if current_end > dt_fin_req: current_end = dt_fin_req
                 
-            TASKS[task_id]['msg'] = f"Sincronizando encendidos y rutas ({current_start.strftime('%d %b')} - {current_end.strftime('%d %b')})..."
+            TASKS[task_id]['msg'] = f"Sincronizando viajes y eventos ({current_start.strftime('%d %b')} - {current_end.strftime('%d %b')})..."
             
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,idles,routes"}
+            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,stops,idles,routes"}
             req_ign_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc}
             
             try:
-                # 1. Obtener Viajes e Idles (Sin adivinar encendidos/apagados)
                 response = requests.get(url_route, params=req_params, timeout=45)
                 data = response.json()
                 
-                # 2. Obtener la verdad absoluta sobre los Encendidos y Apagados
                 try:
                     res_ign = requests.get(url_ign, params=req_ign_params, timeout=45).json()
                     ign_list = res_ign.get('data', {}).get('units', [{}])[0].get('ignitions', [])
@@ -539,7 +544,6 @@ def procesar_reporte_bg(task_id, params):
 
                 extraer_tramos(data)
                 
-                # Cargar Idles y Rutas
                 unit_data = data.get('data', {}).get('units', [])[0] if data.get('data', {}).get('units') else {}
                 for idl in unit_data.get('idles', []):
                     s_dt = parse_iso(idl.get('start', {}).get('time'))
@@ -573,35 +577,22 @@ def procesar_reporte_bg(task_id, params):
                     tramos_reales.append({
                         'dt_ini': dt_ini, 'dt_fin': dt_fin, 'origen': origen, 'distancia': dist_km,
                         'velocidad_max': speed, 'lat_ini': lat_ini, 'lng_ini': lng_ini,
-                        'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg
+                        'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg, 'tipo': str(item.get('type', '')).lower()
                     })
             except Exception:
                 pass 
             
             current_start = current_end
 
-        TASKS[task_id]['msg'] = "Procesando métricas exactas del Motor..."
+        TASKS[task_id]['msg'] = "Procesando métricas de Telemetría..."
 
         total_segundos = (dt_fin_req - dt_inicio_req).total_seconds()
         motor_on_seg = 0
-        eventos_motor = []
-        vistos_motor = set()
         
-        # PROCESAR IGNITIONS (Verdad Absoluta de Mapon)
+        # Calcular horas de motor en este periodo
         for ign in ignitions_raw_list:
             on_dt = parse_ign_date(ign.get('on'))
             off_dt = parse_ign_date(ign.get('off'))
-            
-            sig = f"{on_dt}_{off_dt}"
-            if sig in vistos_motor: continue
-            vistos_motor.add(sig)
-            
-            if on_dt and dt_inicio_req <= on_dt <= dt_fin_req:
-                eventos_motor.append({'dt': on_dt, 'evento': 'Motor encendido', 'detalle': '-'})
-            if off_dt and dt_inicio_req <= off_dt <= dt_fin_req:
-                eventos_motor.append({'dt': off_dt, 'evento': 'Motor apagado', 'detalle': 'Llave cerrada'})
-                
-            # Calcular horas de motor en este periodo
             if not off_dt: off_dt = dt_fin_req
             if on_dt and on_dt < dt_fin_req and off_dt > dt_inicio_req:
                 start_m = max(on_dt, dt_inicio_req)
@@ -611,9 +602,7 @@ def procesar_reporte_bg(task_id, params):
         tiempo_apagado_seg = total_segundos - motor_on_seg
         if tiempo_apagado_seg < 0: tiempo_apagado_seg = 0
 
-        # PROCESAR RALENTÍS
         tiempo_ral_reportado_seg = 0
-        eventos_ralenti = []
         idles_unicos = []
         vistos_idles = set()
         for idl in parsed_idles:
@@ -626,20 +615,21 @@ def procesar_reporte_bg(task_id, params):
             dur = (idl['dt_fin'] - idl['dt_ini']).total_seconds()
             if dur >= min_ralenti * 60:
                 tiempo_ral_reportado_seg += dur
-                detalle = f"Detenido por: {int(dur//60)} mins"
-                eventos_ralenti.append({'dt': idl['dt_ini'] + timedelta(seconds=1), 'evento': 'Ralentí', 'detalle': detalle})
 
         tiempo_mov_seg = motor_on_seg - tiempo_ral_reportado_seg
         if tiempo_mov_seg < 0: tiempo_mov_seg = 0
 
-        TASKS[task_id]['msg'] = "Extrayendo Puntos Geográficos Certificados desde Satélite (Puede tomar un momento)..."
+        TASKS[task_id]['msg'] = "Extrayendo Puntos Satelitales Exactos... (Tomará unos segundos)"
 
         filas_brutas = []
         tiempo_exceso_geo_seg = 0
         
-        # Juntar TODOS los minutos que necesitamos descargar de Mapon
+        list_routes = [t for t in tramos_reales if t['tipo'] == 'route']
+        list_stops = [t for t in tramos_reales if t['tipo'] in ['stop', 'idle']]
+
+        # Mapeamos minutos
         minutos_a_pedir = []
-        for t in tramos_reales:
+        for t in list_routes:
             c_time = t['dt_ini']
             while c_time <= t['dt_fin']:
                 minutos_a_pedir.append(c_time)
@@ -647,14 +637,8 @@ def procesar_reporte_bg(task_id, params):
             if minutos_a_pedir and minutos_a_pedir[-1] != t['dt_fin']:
                 minutos_a_pedir.append(t['dt_fin'])
                 
-        # Agregar los eventos de motor y ralentí
-        for ev in eventos_motor + eventos_ralenti:
-            minutos_a_pedir.append(ev['dt'])
-            
-        # Remover duplicados y ordenar
         minutos_a_pedir = sorted(list(set(minutos_a_pedir)))
 
-        # --- EXTRACCIÓN MASIVA PUNTO A PUNTO (10 HILOS) ---
         puntos_exitosos = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             resultados = executor.map(fetch_exact_point, minutos_a_pedir)
@@ -664,11 +648,9 @@ def procesar_reporte_bg(task_id, params):
         puntos_exitosos.sort(key=lambda x: x['dt'])
         puntos_dict = {p['dt']: p for p in puntos_exitosos}
 
-        # 1. Dibujar Filas de Rutas (Movimiento)
-        for t in tramos_reales:
+        for t in list_routes:
             puntos_ruta = [p for p in puntos_exitosos if t['dt_ini'] <= p['dt'] <= t['dt_fin']]
             
-            # Respaldo si no hubo puntos en la red
             if len(puntos_ruta) < 2:
                 puntos_ruta = [
                     {'dt': t['dt_ini'], 'lat': t['lat_ini'], 'lng': t['lng_ini']},
@@ -709,27 +691,75 @@ def procesar_reporte_bg(task_id, params):
                                 
                     if current_speed > limite_aplicable:
                         evento = f"Exceso en {geo_name}"
-                        detalle = f"Vel: {current_speed} (Límite: {limite_aplicable})"
+                        detalle = f"Límite: {limite_aplicable} km/h"
                         tiempo_exceso_geo_seg += 60
                 elif current_speed > limite_velocidad_gral:
                     evento = "Exceso de velocidad"
-                    detalle = f"Vel: {current_speed} (Límite: {limite_velocidad_gral})"
+                    detalle = f"Límite: {limite_velocidad_gral} km/h"
+
+                # ASIGNACIÓN INTELIGENTE DE EVENTOS PARA NO DEJAR VACÍOS
+                if not evento:
+                    motor_encendido = is_engine_on(curr_time, ignitions_raw_list)
+                    if current_speed > 3:
+                        evento = "En movimiento"
+                    elif motor_encendido:
+                        evento = "Ralentí (Motor encendido)"
+                    else:
+                        evento = "Motor apagado"
 
                 filas_brutas.append({
                     'fecha': curr_time, 'origen': t['origen'], 'velocidad': current_speed, 
                     'evento': evento, 'detalle': detalle, 'lat': curr_lat, 'lng': curr_lng, 'geocerca': geo_name
                 })
 
-        # 2. Dibujar Filas de Motor y Ralentí
-        for ev in eventos_motor + eventos_ralenti:
-            pt = puntos_dict.get(ev['dt'])
-            if pt:
-                geo_id, geo_name = obtener_geocerca(pt['lat'], pt['lng'])
-                filas_brutas.append({
-                    'fecha': ev['dt'], 'origen': '-', 'velocidad': 0, 
-                    'evento': ev['evento'], 'detalle': ev['detalle'], 
-                    'lat': pt['lat'], 'lng': pt['lng'], 'geocerca': geo_name
-                })
+        TASKS[task_id]['msg'] = "Estructurando paradas y descansos..."
+
+        for stop in list_stops:
+            idles_in_stop = []
+            for idl in idles_unicos:
+                overlap_start = max(stop['dt_ini'], idl['dt_ini'])
+                overlap_end = min(stop['dt_fin'], idl['dt_fin'])
+                if overlap_end > overlap_start: idles_in_stop.append((overlap_start, overlap_end))
+            
+            if stop['tipo'] == 'idle' and not idles_in_stop: idles_in_stop.append((stop['dt_ini'], stop['dt_fin']))
+                
+            curr_time = stop['dt_ini']
+            idles_in_stop.sort(key=lambda x: x[0])
+            geo_id, geo_name = obtener_geocerca(stop['lat_ini'], stop['lng_ini'])
+            
+            umbral_segundos = min_ralenti * 60
+            events = []
+            
+            if not idles_in_stop:
+                dur_stop = stop['duracion']
+                if dur_stop >= umbral_segundos and dur_stop < (4 * 3600):
+                    events.append({'time': stop['dt_ini'], 'event': 'Motor encendido', 'dur': 0})
+                    events.append({'time': stop['dt_ini'] + timedelta(seconds=1), 'event': 'Ralentí', 'dur': dur_stop})
+                else:
+                    events.append({'time': stop['dt_ini'], 'event': 'Motor apagado', 'dur': dur_stop})
+            else:
+                for i_start, i_end in idles_in_stop:
+                    if i_start > curr_time:
+                        dur_off = (i_start - curr_time).total_seconds()
+                        events.append({'time': curr_time, 'event': 'Motor apagado', 'dur': dur_off})
+                    
+                    dur_on = (i_end - i_start).total_seconds()
+                    if dur_on >= umbral_segundos:
+                        events.append({'time': i_start + timedelta(seconds=1), 'event': 'Ralentí', 'dur': dur_on})
+                    curr_time = i_end
+                    
+                if curr_time < stop['dt_fin']:
+                    dur_off = (stop['dt_fin'] - curr_time).total_seconds()
+                    events.append({'time': curr_time, 'event': 'Motor apagado', 'dur': dur_off})
+                
+            for ev in events:
+                detalle = "-"
+                if ev['event'] == 'Motor apagado':
+                    detalle = f"Llave cerrada: {int(ev['dur']//60)} mins" if ev['dur'] >= 60 else "Apagado (Pausa corta)"
+                elif ev['event'] == 'Ralentí':
+                    detalle = f"Detenido por: {int(ev['dur']//60)} mins"
+                    
+                filas_brutas.append({'fecha': ev['time'], 'origen': stop['origen'], 'velocidad': 0, 'evento': ev['event'], 'detalle': detalle, 'lat': stop['lat_ini'], 'lng': stop['lng_ini'], 'geocerca': geo_name})
 
         TASKS[task_id]['msg'] = "Dibujando archivo Excel final..."
 
