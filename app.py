@@ -21,21 +21,80 @@ BASE_URL = "https://gps.idttecnologias.mx/api/v1"
 COMPANY_ID = "87534"
 TIMEZONE_OFFSET = -7
 
-# DICCIONARIO GLOBAL PARA GUARDAR EL ESTADO DE LAS TAREAS
 TASKS = {}
 
 # ==========================================
-# FÓRMULA HAVERSINE Y RUTAS
+# FÓRMULA HAVERSINE Y OSRM (OPEN STREET MAP)
 # ==========================================
 def calcular_distancia(lat1, lon1, lat2, lon2):
     R = 6371000 
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
     a = math.sin(dphi/2.0)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlon/2.0)**2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
+
+def decode_polyline(polyline_str):
+    index, lat, lng = 0, 0, 0
+    coordinates = []
+    changes = {'latitude': 0, 'longitude': 0}
+    try:
+        while index < len(polyline_str):
+            for unit in ['latitude', 'longitude']: 
+                shift, result = 0, 0
+                while True:
+                    if index >= len(polyline_str): break
+                    byte = ord(polyline_str[index]) - 63
+                    index += 1
+                    result |= (byte & 0x1f) << shift
+                    shift += 5
+                    if not byte >= 0x20: break
+                if (result & 1): changes[unit] = ~(result >> 1)
+                else: changes[unit] = (result >> 1)
+            lat += changes['latitude']
+            lng += changes['longitude']
+            coordinates.append((lat / 100000.0, lng / 100000.0))
+    except Exception:
+        pass
+    return coordinates
+
+def obtener_ruta_carretera(lat1, lng1, lat2, lng2):
+    """ ¡MAGIA! Si Mapon no da la ruta, OSRM calcula la carretera real """
+    try:
+        url = f"http://router.project-osrm.org/route/v1/driving/{lng1},{lat1};{lng2},{lat2}?overview=full&geometries=geojson"
+        r = requests.get(url, timeout=10)
+        data = r.json()
+        if data.get('code') == 'Ok':
+            # OSRM devuelve [longitud, latitud], lo invertimos
+            return [(p[1], p[0]) for p in data['routes'][0]['geometry']['coordinates']]
+    except Exception:
+        pass
+    return [(lat1, lng1), (lat2, lng2)]
+
+def interpolate_on_polyline(points, progress):
+    if not points: return 0.0, 0.0
+    if len(points) == 1: return points[0]
+    
+    dists = [0.0]
+    for i in range(1, len(points)):
+        dists.append(dists[-1] + calcular_distancia(points[i-1][0], points[i-1][1], points[i][0], points[i][1]))
+    
+    total_dist = dists[-1]
+    if total_dist == 0: return points[0]
+        
+    target_dist = total_dist * progress
+    
+    for i in range(1, len(dists)):
+        if dists[i] >= target_dist:
+            segment_length = dists[i] - dists[i-1]
+            if segment_length == 0: return points[i]
+            segment_prog = (target_dist - dists[i-1]) / segment_length
+            lat = points[i-1][0] + (points[i][0] - points[i-1][0]) * segment_prog
+            lng = points[i-1][1] + (points[i][1] - points[i-1][1]) * segment_prog
+            return (lat, lng)
+            
+    return points[-1]
 
 # ==========================================
 # LECTOR EXCEL
@@ -379,9 +438,6 @@ def api_geocercas_locales():
     menu_items.sort(key=lambda x: x['name'])
     return jsonify(menu_items)
 
-# ==========================================
-# MOTOR ASÍNCRONO DE REPORTES
-# ==========================================
 @app.route('/iniciar_reporte')
 def iniciar_reporte():
     task_id = str(uuid.uuid4())
@@ -455,7 +511,7 @@ def procesar_reporte_bg(task_id, params):
         parsed_idles = []
         eventos_vistos = set()
         rutas_encontradas = []
-        eventos_intermedios = [] # <-- NUEVO: Aquí guardaremos las anclas
+        eventos_intermedios = []
 
         current_start = dt_inicio_req
         chunk_days = 2 
@@ -464,19 +520,17 @@ def procesar_reporte_bg(task_id, params):
             current_end = current_start + timedelta(days=chunk_days)
             if current_end > dt_fin_req: current_end = dt_fin_req
                 
-            TASKS[task_id]['msg'] = f"Descargando Eventos de Anclaje ({current_start.strftime('%d %b')} - {current_end.strftime('%d %b')})..."
+            TASKS[task_id]['msg'] = f"Sincronizando viajes y eventos ({current_start.strftime('%d %b')} - {current_end.strftime('%d %b')})..."
             
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            # PEDIMOS EVENTOS EN LUGAR DE HISTORIAL PROHIBIDO
             req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,stops,idles,routes,events"}
             
             try:
                 response = requests.get(url, params=req_params, timeout=45)
                 data = response.json()
                 
-                # Extraemos los eventos del viaje para usarlos como coordenadas intermedias
                 try:
                     lista_eventos = data.get('data', {}).get('units', [{}])[0].get('events', [])
                     for evt in lista_eventos:
@@ -518,7 +572,7 @@ def procesar_reporte_bg(task_id, params):
             current_start = current_end
 
         eventos_intermedios.sort(key=lambda x: x['dt'])
-        TASKS[task_id]['msg'] = "Estructurando línea de tiempo y eventos..."
+        TASKS[task_id]['msg'] = "Estructurando línea de tiempo y ruteo Inteligente..."
 
         idles_unicos = []
         vistos_idles = set()
@@ -558,10 +612,11 @@ def procesar_reporte_bg(task_id, params):
             tramos_reales.append({
                 'dt_ini': dt_ini, 'dt_fin': dt_fin, 'origen': origen, 'distancia': dist_km,
                 'velocidad': speed, 'lat_ini': lat_ini, 'lng_ini': lng_ini,
-                'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg, 'tipo': str(item.get('type', '')).lower()
+                'lat_fin': lat_fin, 'lng_fin': lng_fin, 'duracion': duracion_seg, 'tipo': str(item.get('type', '')).lower(),
+                'polyline': item.get('polyline', '')
             })
 
-        TASKS[task_id]['msg'] = "Generando ruta sobre carretera mediante anclaje..."
+        TASKS[task_id]['msg'] = "Procesando minutos sobre la carretera (OSRM Routing)..."
 
         filas_brutas = []
         tiempo_mov_seg = 0
@@ -578,16 +633,12 @@ def procesar_reporte_bg(task_id, params):
             curr_time = t['dt_ini']
             end_time = t['dt_fin']
             
-            # Filtramos solo los eventos que ocurrieron durante ESTE tramo
             puntos_ancla = [p for p in eventos_intermedios if t['dt_ini'] <= p['dt'] <= t['dt_fin']]
-            
-            # Aseguramos que siempre tengamos inicio y fin
             puntos_ancla.insert(0, {'dt': t['dt_ini'], 'lat': t['lat_ini'], 'lng': t['lng_ini'], 'speed': t['velocidad'] * 0.5}) 
             puntos_ancla.append({'dt': t['dt_fin'], 'lat': t['lat_fin'], 'lng': t['lng_fin'], 'speed': 0.0})
             
             puntos_ancla.sort(key=lambda x: x['dt'])
             
-            # Eliminar duplicados exactos en tiempo
             anclas_unicas = []
             vistos_ancla = set()
             for p in puntos_ancla:
@@ -596,8 +647,14 @@ def procesar_reporte_bg(task_id, params):
                     anclas_unicas.append(p)
             puntos_ancla = anclas_unicas
 
+            # ¡RUTEO INTELIGENTE OSRM!
+            if t['polyline']:
+                puntos_carretera = decode_polyline(t['polyline'])
+            else:
+                puntos_carretera = obtener_ruta_carretera(t['lat_ini'], t['lng_ini'], t['lat_fin'], t['lng_fin'])
+
             while curr_time <= end_time:
-                # Encuentra el ancla pasada y futura más cercanas
+                # Calculo de velocidad usando anclas (eventos)
                 ancla_previa = None
                 ancla_siguiente = None
                 
@@ -610,25 +667,21 @@ def procesar_reporte_bg(task_id, params):
                 
                 segundos_entre_anclas = (ancla_siguiente['dt'] - ancla_previa['dt']).total_seconds()
                 if segundos_entre_anclas <= 0:
-                    curr_lat = ancla_previa['lat']
-                    curr_lng = ancla_previa['lng']
                     current_speed = ancla_previa['speed']
                 else:
                     segundos_transcurridos = (curr_time - ancla_previa['dt']).total_seconds()
-                    progreso = segundos_transcurridos / segundos_entre_anclas
-                    
-                    # Interpolación matemática en miniatura entre los eventos
-                    curr_lat = ancla_previa['lat'] + ((ancla_siguiente['lat'] - ancla_previa['lat']) * progreso)
-                    curr_lng = ancla_previa['lng'] + ((ancla_siguiente['lng'] - ancla_previa['lng']) * progreso)
-                    
-                    # Velocidad: Si está cerca de un ancla, toma su velocidad
-                    if progreso < 0.5:
+                    prog_velocidad = segundos_transcurridos / segundos_entre_anclas
+                    if prog_velocidad < 0.5:
                         current_speed = ancla_previa['speed']
                     else:
                         current_speed = ancla_siguiente['speed']
                         
                     if current_speed < 5 and t['velocidad'] > 10:
                         current_speed = t['velocidad'] * random.uniform(0.8, 1.1)
+
+                # Calculo de Coordenada forzando la CARRETERA (OSRM o Polyline)
+                prog_ruta = min((curr_time - t['dt_ini']).total_seconds() / max(t['duracion'], 1), 1.0)
+                curr_lat, curr_lng = interpolate_on_polyline(puntos_carretera, prog_ruta)
 
                 current_speed = round(current_speed, 1)
                 geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng, current_speed, t['origen'])
