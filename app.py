@@ -26,49 +26,7 @@ TASKS = {}
 CACHE_GEOCERCAS = []
 
 # ==========================================
-# DECODIFICADORES OFICIALES MAPON
-# ==========================================
-def decode_polyline_2d(encoded):
-    points = []
-    index, lat, lng, length = 0, 0, 0, len(encoded)
-    while index < length:
-        shift, result = 0, 0
-        while True:
-            if index >= length: break
-            b = ord(encoded[index]) - 63
-            index += 1
-            result |= (b & 0x1f) << shift
-            shift += 5
-            if b < 0x20: break
-        lat += ~(result >> 1) if (result & 1) else (result >> 1)
-        
-        shift, result = 0, 0
-        while True:
-            if index >= length: break
-            b = ord(encoded[index]) - 63
-            index += 1
-            result |= (b & 0x1f) << shift
-            shift += 5
-            if b < 0x20: break
-        lng += ~(result >> 1) if (result & 1) else (result >> 1)
-        points.append({'lat': lat / 100000.0, 'lng': lng / 100000.0})
-    return points
-
-def decode_mapon_speed_string(encoded_str):
-    chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.'
-    points_count = len(encoded_str) // 4
-    data = []
-    for i in range(points_count):
-        pos = i * 4
-        try:
-            offset = chars.index(encoded_str[pos]) * 64 + chars.index(encoded_str[pos + 1])
-            speed = chars.index(encoded_str[pos + 2]) * 64 + chars.index(encoded_str[pos + 3])
-            data.append((offset, speed))
-        except Exception: pass
-    return data
-
-# ==========================================
-# UTILIDADES Y GEOCERCAS
+# FÓRMULA HAVERSINE (PARA GEOCERCAS)
 # ==========================================
 def calcular_distancia(lat1, lon1, lat2, lon2):
     R = 6371000 
@@ -189,7 +147,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <p>Módulo CAN Bus + Filtro Nativo de Ralentí (V11)</p>
+                <p>V12 (Gobernador Mapon y Ralentí Matemático)</p>
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -502,7 +460,7 @@ def procesar_reporte_bg(task_id, params):
         utc_end_str = (dt_fin_req - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
         
         # ==============================================================
-        # 1. EXTRACCIÓN DE DATOS CAN BUS (can_point.json + temperature.json)
+        # 1. EXTRACCIÓN DE DATOS CAN BUS Y GPS
         # ==============================================================
         TASKS[task_id]['msg'] = "Extrayendo métricas de Computadora (CAN Bus)..."
         can_data = {
@@ -543,15 +501,11 @@ def procesar_reporte_bg(task_id, params):
             can_data["max_temp"] = max_t
         except Exception: pass
 
-        # ==============================================================
-        # 2. EXTRACCIÓN DE RUTAS, POLILÍNEAS Y VELOCIDAD DE HARDWARE
-        # ==============================================================
         url_route = f"{BASE_URL}/route/list.json"
         url_ign = f"{BASE_URL}/unit_data/ignitions.json"
         
         tramos_reales = []
         eventos_ignicion = []
-        puntos_maestros_reales = []
 
         current_start = dt_inicio_req
         chunk_days = 2 
@@ -565,8 +519,7 @@ def procesar_reporte_bg(task_id, params):
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            # Limpiamos la petición de "idles" y "can" para evitar sobrecarga y lentitud
-            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,routes,polyline,speed"}
+            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "routes"}
             req_ign_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc}
             
             try:
@@ -603,33 +556,19 @@ def procesar_reporte_bg(task_id, params):
                     if not dt_ini or not dt_fin: continue
                         
                     dist_km = float(item.get('distance', 0)) / 1000.0
-                    poly_str = item.get('polyline', '')
-                    speed_str = item.get('speed', '')
                     
-                    if poly_str and speed_str:
-                        coords = decode_polyline_2d(poly_str)
-                        vel_offsets = decode_mapon_speed_string(speed_str)
-                        min_len = min(len(coords), len(vel_offsets))
-                        for idx in range(min_len):
-                            offset_seg, real_speed = vel_offsets[idx]
-                            pt_time = dt_ini + timedelta(seconds=offset_seg)
-                            puntos_maestros_reales.append({
-                                'dt': pt_time,
-                                'lat': coords[idx]['lat'],
-                                'lng': coords[idx]['lng'],
-                                'speed': float(real_speed) 
-                            })
+                    # EL GRAN DESCUBRIMIENTO: Extraer la velocidad máxima física del nodo raíz del tramo
+                    max_speed = float(item.get('max_speed', 110))
+                    if max_speed <= 0: max_speed = 110
 
                     tramos_reales.append({
                         'dt_ini': dt_ini, 'dt_fin': dt_fin, 'distancia': dist_km, 'tipo': 'route',
-                        'max_speed': float(item.get('metrics', {}).get('max_speed', 110))
+                        'max_speed': max_speed
                     })
             except Exception: pass 
             current_start = current_end
 
         eventos_ignicion.sort(key=lambda x: x['dt'])
-        puntos_maestros_reales.sort(key=lambda x: x['dt'])
-        maestro_dts = [p['dt'] for p in puntos_maestros_reales]
 
         # ==============================================================
         # 3. CONSTRUCCIÓN DE CUADRÍCULA ESTRICTA MINUTO A MINUTO
@@ -660,7 +599,7 @@ def procesar_reporte_bg(task_id, params):
         for ev in eventos_ignicion: minutos_a_descargar.append(ev['dt'])
         minutos_a_descargar = sorted(list(set(minutos_a_descargar)))
 
-        TASKS[task_id]['msg'] = f"Sincronizando puntos satelitales faltantes..."
+        TASKS[task_id]['msg'] = f"Sincronizando puntos satelitales..."
 
         puntos_exitosos = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
@@ -683,7 +622,7 @@ def procesar_reporte_bg(task_id, params):
         if puntos_exitosos: last_lat, last_lng = puntos_exitosos[0]['lat'], puntos_exitosos[0]['lng']
         last_dt_punto = None
 
-        # PASO 1: Calcular velocidades, ubicaciones y tiempos generales (excepto ralentí estricto)
+        # PASO A: Llenado de Filas y Cálculo Matemático Topado por el Gobernador
         for i, dt in enumerate(cuadricula_maestra):
             ign_on = is_ignition_on(dt)
             en_ruta, tramo_actual = is_in_route(dt)
@@ -697,34 +636,14 @@ def procesar_reporte_bg(task_id, params):
             current_speed = 0.0
             seg_transcurridos = 60 if i > 0 else 0
 
-            # FILTRO ANTI-PICOS Y GOBERNADOR
+            # FILTRO ANTI-PICOS Y GOBERNADOR (Con la max_speed oficial de Mapon)
             if en_ruta and punto and ign_on:
-                if len(puntos_maestros_reales) > 0:
-                    idx = bisect.bisect_left(maestro_dts, dt)
-                    closest_p = None
-                    min_diff = float('inf')
-                    for check_idx in [idx-1, idx, idx+1]:
-                        if 0 <= check_idx < len(puntos_maestros_reales):
-                            diff = abs((puntos_maestros_reales[check_idx]['dt'] - dt).total_seconds())
-                            if diff < min_diff:
-                                min_diff = diff
-                                closest_p = puntos_maestros_reales[check_idx]
-                    
-                    if closest_p and min_diff <= 90:
-                        current_speed = float(closest_p['speed'])
-                    elif last_dt_punto is not None:
-                        dist_mts = calcular_distancia(last_lat, last_lng, curr_lat, curr_lng)
-                        seg_diff = max((dt - last_dt_punto).total_seconds(), 1)
-                        raw_speed = (dist_mts / seg_diff) * 3.6
-                        max_oficial = float(tramo_actual.get('max_speed', 110)) if tramo_actual else 110
-                        if max_oficial <= 0: max_oficial = 110
-                        current_speed = min(raw_speed, max_oficial)
-                elif last_dt_punto is not None:
+                if last_dt_punto is not None:
                     dist_mts = calcular_distancia(last_lat, last_lng, curr_lat, curr_lng)
                     seg_diff = max((dt - last_dt_punto).total_seconds(), 1)
                     raw_speed = (dist_mts / seg_diff) * 3.6
+                    
                     max_oficial = float(tramo_actual.get('max_speed', 110)) if tramo_actual else 110
-                    if max_oficial <= 0: max_oficial = 110
                     current_speed = min(raw_speed, max_oficial)
 
             if current_speed < 3 or not ign_on: 
@@ -773,9 +692,9 @@ def procesar_reporte_bg(task_id, params):
             })
 
         # ==============================================================
-        # 4. MOTOR NATIVO DE RALENTÍ (Se calcula directamente de la tabla final)
+        # 4. MOTOR NATIVO DE RALENTÍ MATEMÁTICO
         # ==============================================================
-        TASKS[task_id]['msg'] = "Calculando tiempos de Ralentí..."
+        TASKS[task_id]['msg'] = "Aplicando Filtro de Ralentí Personalizado..."
         
         tiempo_ral_reportado_seg = 0
         consecutive_idles = 0
@@ -788,19 +707,21 @@ def procesar_reporte_bg(task_id, params):
                 consecutive_idles += 1
             else:
                 if consecutive_idles >= min_ralenti:
-                    if not filas_brutas[idle_start_idx]['evento'] or filas_brutas[idle_start_idx]['evento'] == 'Motor encendido':
-                        target_idx = idle_start_idx + 1 if filas_brutas[idle_start_idx]['evento'] == 'Motor encendido' and idle_start_idx + 1 < len(filas_brutas) else idle_start_idx
-                        filas_brutas[target_idx]['evento'] = 'Ralentí'
-                        filas_brutas[target_idx]['detalle'] = f"Detenido por: {consecutive_idles} mins"
+                    target_idx = idle_start_idx
+                    if filas_brutas[target_idx]['evento'] == 'Motor encendido' and target_idx + 1 < idx:
+                        target_idx += 1
+                    filas_brutas[target_idx]['evento'] = 'Ralentí'
+                    filas_brutas[target_idx]['detalle'] = f"Detenido por: {consecutive_idles} mins"
                     tiempo_ral_reportado_seg += (consecutive_idles * 60)
                 consecutive_idles = 0
                 
-        # Checar si cerró en ralentí
+        # Si termina el día en ralentí
         if consecutive_idles >= min_ralenti:
-            if not filas_brutas[idle_start_idx]['evento'] or filas_brutas[idle_start_idx]['evento'] == 'Motor encendido':
-                target_idx = idle_start_idx + 1 if filas_brutas[idle_start_idx]['evento'] == 'Motor encendido' and idle_start_idx + 1 < len(filas_brutas) else idle_start_idx
-                filas_brutas[target_idx]['evento'] = 'Ralentí'
-                filas_brutas[target_idx]['detalle'] = f"Detenido por: {consecutive_idles} mins"
+            target_idx = idle_start_idx
+            if filas_brutas[target_idx]['evento'] == 'Motor encendido' and target_idx + 1 < len(filas_brutas):
+                target_idx += 1
+            filas_brutas[target_idx]['evento'] = 'Ralentí'
+            filas_brutas[target_idx]['detalle'] = f"Detenido por: {consecutive_idles} mins"
             tiempo_ral_reportado_seg += (consecutive_idles * 60)
 
         # ==============================================================
