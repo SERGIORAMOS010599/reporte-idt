@@ -85,6 +85,36 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
 
+def cargar_geocercas_excel():
+    geocercas = []
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    posibles_archivos = ['kowi_principales.xlsx', 'kowi principales.xlsx']
+    ruta_final = None
+    for archivo in posibles_archivos:
+        ruta_temp = os.path.join(base_dir, archivo)
+        if os.path.exists(ruta_temp):
+            ruta_final = ruta_temp
+            break
+    if not ruta_final: return []
+    try:
+        wb = openpyxl.load_workbook(ruta_final, data_only=True)
+        ws = wb.active
+        headers = [str(cell.value).lower().strip() if cell.value else '' for cell in ws[1]]
+        idx_nom = next((i for i, h in enumerate(headers) if 'nombre' in h or 'zona' in h), -1)
+        idx_lat = next((i for i, h in enumerate(headers) if 'lat' in h), -1)
+        idx_lon = next((i for i, h in enumerate(headers) if 'lon' in h or 'lng' in h), -1)
+        
+        if idx_nom == -1 or idx_lat == -1 or idx_lon == -1: return []
+            
+        for i, row in enumerate(ws.iter_rows(min_row=2, values_only=True)):
+            if not row[idx_nom] or not row[idx_lat] or not row[idx_lon]: continue
+            nombre = str(row[idx_nom]).strip()
+            lat = float(str(row[idx_lat]).strip())
+            lng = float(str(row[idx_lon]).strip())
+            geocercas.append({'id': f"LOCAL_{i}", 'name': nombre, 'lat': lat, 'lng': lng, 'radius': 250})
+        return geocercas
+    except Exception: return []
+
 def cargar_geocercas_api():
     geocercas = []
     try:
@@ -107,6 +137,8 @@ def cargar_geocercas_api():
                     geocercas.append({'id': str(geo.get('id')), 'name': nombre, 'lat': float(lat_str), 'lng': float(lng_str), 'radius': 800})
                 except Exception: pass
     except Exception: pass
+    if not geocercas:
+        geocercas = cargar_geocercas_excel()
     return geocercas
 
 HTML_INTERFACE = """
@@ -173,7 +205,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <p>Módulo Híbrido V8 (Fusión Satelital y CAN Bus)</p>
+                <p>Módulo de Sincronización Estricta y CAN Bus (V9)</p>
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -339,7 +371,7 @@ HTML_INTERFACE = """
                         btn.disabled = false;
                         alert("Error en el reporte: " + sData.msg);
                     }
-                }, 1500); 
+                }, 3000); 
 
             } catch (e) {
                 overlay.style.display = 'none';
@@ -500,9 +532,7 @@ def procesar_reporte_bg(task_id, params):
         url_can_point = f"{BASE_URL}/unit_data/can_point.json"
         
         try:
-            # Punto Inicial CAN
             res_ini = requests.get(url_can_point, params={"key": API_KEY, "unit_id": unit_id, "datetime": utc_start_str}, timeout=10).json()
-            # Punto Final CAN
             res_fin = requests.get(url_can_point, params={"key": API_KEY, "unit_id": unit_id, "datetime": utc_end_str}, timeout=10).json()
             
             ini_unit = res_ini.get('data', {}).get('units', [{}])[0]
@@ -510,19 +540,14 @@ def procesar_reporte_bg(task_id, params):
             
             if fin_unit and 'total_distance' in fin_unit:
                 can_data["has_can"] = True
-                
                 can_data["dist_inicial"] = float(ini_unit.get('total_distance', {}).get('value', 0))
                 can_data["dist_final"] = float(fin_unit.get('total_distance', {}).get('value', 0))
-                
                 can_data["fuel_inicial"] = float(ini_unit.get('total_fuel', {}).get('value', 0))
                 can_data["fuel_final"] = float(fin_unit.get('total_fuel', {}).get('value', 0))
-                
                 can_data["engine_hrs_inicial"] = float(ini_unit.get('total_engine_hours', {}).get('value', 0))
                 can_data["engine_hrs_final"] = float(fin_unit.get('total_engine_hours', {}).get('value', 0))
-                
         except Exception: pass
         
-        # Buscar temperatura máxima del motor (generalmente de temperature.json)
         try:
             url_temp = f"{BASE_URL}/unit_data/temperature.json"
             res_temp = requests.get(url_temp, params={"key": API_KEY, "unit_id": unit_id, "from": utc_start_str, "till": utc_end_str}, timeout=15).json()
@@ -562,7 +587,6 @@ def procesar_reporte_bg(task_id, params):
             req_ign_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc}
             
             try:
-                # Igniciones Reales
                 try:
                     res_ign = requests.get(url_ign, params=req_ign_params, timeout=45).json()
                     ign_list = res_ign.get('data', {}).get('units', [{}])[0].get('ignitions', [])
@@ -575,7 +599,6 @@ def procesar_reporte_bg(task_id, params):
                             eventos_ignicion.append({'dt': off_dt, 'evento': 'Motor apagado', 'tipo': 'off', 'detalle': 'Llave cerrada'})
                 except Exception: pass
 
-                # Rutas y Polilíneas
                 response = requests.get(url_route, params=req_params, timeout=45)
                 data = response.json()
                 
@@ -610,7 +633,6 @@ def procesar_reporte_bg(task_id, params):
                     if poly_str and speed_str:
                         coords = decode_polyline_2d(poly_str)
                         vel_offsets = decode_mapon_speed_string(speed_str)
-                        
                         min_len = min(len(coords), len(vel_offsets))
                         for idx in range(min_len):
                             offset_seg, real_speed = vel_offsets[idx]
@@ -644,6 +666,8 @@ def procesar_reporte_bg(task_id, params):
             
         tiempo_ral_reportado_seg = 0
         eventos_ralenti = []
+        
+        # Filtro Inteligente de Ralentí
         for idl in parsed_idles:
             dur = (idl['dt_fin'] - idl['dt_ini']).total_seconds()
             if dur >= min_ralenti * 60:
@@ -665,12 +689,17 @@ def procesar_reporte_bg(task_id, params):
                 if t['dt_ini'] <= dt <= t['dt_fin']: return True, t
             return False, None
 
+        def is_in_idle(dt):
+            for i in parsed_idles:
+                if i['dt_ini'] <= dt <= i['dt_fin']: return True
+            return False
+
         minutos_a_descargar = [dt for dt in cuadricula_maestra if is_ignition_on(dt) or is_in_route(dt)[0]]
         for ev in eventos_ignicion: minutos_a_descargar.append(ev['dt'])
         for ev in eventos_ralenti: minutos_a_descargar.append(ev['dt'])
         minutos_a_descargar = sorted(list(set(minutos_a_descargar)))
 
-        TASKS[task_id]['msg'] = f"Sincronizando puntos satelitales (Gobernador)..."
+        TASKS[task_id]['msg'] = f"Sincronizando puntos satelitales..."
 
         puntos_exitosos = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
@@ -706,7 +735,6 @@ def procesar_reporte_bg(task_id, params):
             current_speed = 0.0
             seg_transcurridos = 60 if i > 0 else 0
 
-            # FILTRO ANTI-PICOS CON GOBERNADOR
             if en_ruta and punto and ign_on:
                 if len(puntos_maestros_reales) > 0:
                     idx = bisect.bisect_left(maestro_dts, dt)
@@ -736,7 +764,7 @@ def procesar_reporte_bg(task_id, params):
                     if max_oficial <= 0: max_oficial = 110
                     current_speed = min(raw_speed, max_oficial)
 
-            if current_speed < 3 or not ign_on: 
+            if not ign_on or is_in_idle(dt):
                 current_speed = 0.0
 
             current_speed = round(current_speed, 1)
@@ -748,7 +776,7 @@ def procesar_reporte_bg(task_id, params):
             if current_speed > 0:
                 tiempo_mov_seg += seg_transcurridos
             else:
-                if ign_on: pass # El ralenti ya esta contabilizado por idles_oficiales
+                if ign_on: pass 
                 else: tiempo_apagado_seg += seg_transcurridos
 
             geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng)
@@ -815,15 +843,12 @@ def procesar_reporte_bg(task_id, params):
         ws = wb.active
         ws.title = "Histórico Ejecutivo"
 
-        # Título
         ws.cell(row=1, column=4, value="Reporte Analítico Minuto a Minuto").font = Font(bold=True, size=15)
         ws.cell(row=3, column=3, value="Vehículo:").font = Font(bold=True)
         ws.cell(row=3, column=4, value=str(unit_name))
 
-        # Color de las cajas
         fill_gps = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")
         fill_can = PatternFill(start_color="EBF1DE", end_color="EBF1DE", fill_type="solid")
-        thick_border = Border(left=Side(style='medium'), right=Side(style='medium'), top=Side(style='medium'), bottom=Side(style='medium'))
 
         # ================= SECCIÓN GPS (Izquierda) =================
         ws.cell(row=5, column=1, value="INFORMACIÓN GPS").font = Font(bold=True, color="1F497D")
@@ -836,7 +861,7 @@ def procesar_reporte_bg(task_id, params):
 
         ws.cell(row=7, column=1, value="Velocidad Máxima Oficial:").font = Font(bold=True)
         ws.cell(row=7, column=2, value=f"{round(max_vel, 1)} km/h")
-        ws.cell(row=7, column=3, value="Ralentí (Motor estático):").font = Font(bold=True)
+        ws.cell(row=7, column=3, value="Ralentí (Filtro >{}m):".format(min_ralenti)).font = Font(bold=True)
         ws.cell(row=7, column=4, value=f"{ral_hrs} hrs {ral_mins} mins").font = Font(color="FF0000")
 
         ws.cell(row=8, column=1, value="Velocidad Promedio:").font = Font(bold=True)
