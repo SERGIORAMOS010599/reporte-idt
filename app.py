@@ -27,48 +27,6 @@ TASKS = {}
 CACHE_GEOCERCAS = []
 
 # ==========================================
-# DECODIFICADORES OFICIALES MAPON
-# ==========================================
-def decode_polyline_2d(encoded):
-    points = []
-    index, lat, lng, length = 0, 0, 0, len(encoded)
-    while index < length:
-        shift, result = 0, 0
-        while True:
-            if index >= length: break
-            b = ord(encoded[index]) - 63
-            index += 1
-            result |= (b & 0x1f) << shift
-            shift += 5
-            if b < 0x20: break
-        lat += ~(result >> 1) if (result & 1) else (result >> 1)
-        
-        shift, result = 0, 0
-        while True:
-            if index >= length: break
-            b = ord(encoded[index]) - 63
-            index += 1
-            result |= (b & 0x1f) << shift
-            shift += 5
-            if b < 0x20: break
-        lng += ~(result >> 1) if (result & 1) else (result >> 1)
-        points.append({'lat': lat / 100000.0, 'lng': lng / 100000.0})
-    return points
-
-def decode_mapon_speed_string(encoded_str):
-    chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.'
-    points_count = len(encoded_str) // 4
-    data = []
-    for i in range(points_count):
-        pos = i * 4
-        try:
-            offset = chars.index(encoded_str[pos]) * 64 + chars.index(encoded_str[pos + 1])
-            speed = chars.index(encoded_str[pos + 2]) * 64 + chars.index(encoded_str[pos + 3])
-            data.append((offset, speed))
-        except Exception: pass
-    return data
-
-# ==========================================
 # UTILIDADES Y GEOCERCAS
 # ==========================================
 def calcular_distancia(lat1, lon1, lat2, lon2):
@@ -182,7 +140,7 @@ HTML_INTERFACE = """
             <source src="{{ url_for('static', filename='video_kowi.mp4') }}" type="video/mp4">
         </video>
         <div class="loading-text">Generando Reporte Minuto a Minuto</div>
-        <div class="loading-subtext" id="overlay_status">Conectando con servidores...</div>
+        <div class="loading-subtext" id="overlay_status">⏳ Generando reporte en Excel. Por favor, espere...</div>
     </div>
 
     <div class="card">
@@ -190,7 +148,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <!-- <p>Módulo GPS + Integración Inteligente CAN Bus (V13)</p> -->
+                <!-- <p>Módulo GPS + Integración Inteligente CAN Bus (V14 - Optimizado)</p> -->
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -305,7 +263,6 @@ HTML_INTERFACE = """
             const btn = document.getElementById('btn_submit');
             const status = document.getElementById('status_msg');
             const overlay = document.getElementById('loading_overlay');
-            const overlayStatus = document.getElementById('overlay_status');
             
             const unitId = $('#unit_select').val();
             const unitText = $('#unit_select option:selected').text();
@@ -313,7 +270,6 @@ HTML_INTERFACE = """
             
             btn.disabled = true;
             overlay.style.display = 'flex';
-            overlayStatus.innerText = "⏳ Generando reporte en Excel. Por favor, espere...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -341,10 +297,7 @@ HTML_INTERFACE = """
                     const sRes = await fetch(`/estado_reporte?task_id=${taskId}`);
                     const sData = await sRes.json();
 
-                    if (sData.status === 'procesando') {
-                        // Mantenemos el texto estático para no confundir al usuario
-                        overlayStatus.innerText = "⏳ Generando reporte en Excel. Por favor, espere...";
-                    } else if (sData.status === 'completado') {
+                    if (sData.status === 'completado') {
                         clearInterval(interval);
                         overlay.style.display = 'none';
                         status.innerText = "¡Listo! Descargando reporte...";
@@ -357,7 +310,7 @@ HTML_INTERFACE = """
                         btn.disabled = false;
                         alert("Error en el reporte: " + sData.msg);
                     }
-                }, 3000); 
+                }, 2000); 
 
             } catch (e) {
                 overlay.style.display = 'none';
@@ -424,7 +377,7 @@ def api_geocercas_nube():
 @app.route('/iniciar_reporte')
 def iniciar_reporte():
     task_id = str(uuid.uuid4())
-    TASKS[task_id] = {'status': 'procesando', 'msg': 'Generando reporte en Excel. Por favor, espere...'}
+    TASKS[task_id] = {'status': 'procesando'}
     params = request.args.to_dict()
     thread = threading.Thread(target=procesar_reporte_bg, args=(task_id, params))
     thread.daemon = True
@@ -538,7 +491,6 @@ def procesar_reporte_bg(task_id, params):
             sensors = res_temp.get('data', {}).get('units', [{}])[0].get('sensors', [])
             max_t = 0
             for sensor in sensors:
-                # Nos aseguramos que sea el sensor número 1 (Temperatura del Motor según configuración)
                 if str(sensor.get('no', '')) == '1':
                     for t in sensor.get('temperatures', []):
                         val = float(t.get('value', 0))
@@ -640,8 +592,9 @@ def procesar_reporte_bg(task_id, params):
         for ev in eventos_ignicion: minutos_a_descargar.append(ev['dt'])
         minutos_a_descargar = sorted(list(set(minutos_a_descargar)))
 
+        # ACELERADOR: 40 Hilos para descargar ultra rápido
         puntos_exitosos = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=40) as executor:
             resultados = executor.map(fetch_exact_point, minutos_a_descargar)
             for res in resultados:
                 if res: puntos_exitosos.append(res)
@@ -791,16 +744,17 @@ def procesar_reporte_bg(task_id, params):
         ws = wb.active
         ws.title = "Histórico Ejecutivo"
 
-        # Inserción de Logo Kowi
+        # Inserción de Logo Kowi con control de errores
         try:
             logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'logo_kowi.png')
             if os.path.exists(logo_path):
                 img = ExcelImage(logo_path)
-                img.width = 160
-                img.height = 60
+                img.width = 140
+                img.height = 55
                 ws.add_image(img, 'A1')
-        except Exception:
-            pass
+                ws.row_dimensions[1].height = 45 # Asegura espacio vertical
+        except Exception as e:
+            print("No se pudo insertar el logo (Posible falta de Pillow):", e)
 
         ws.cell(row=1, column=4, value="Reporte Analítico Minuto a Minuto").font = Font(bold=True, size=15)
         ws.cell(row=3, column=3, value="Vehículo:").font = Font(bold=True)
@@ -918,8 +872,8 @@ def procesar_reporte_bg(task_id, params):
         with os.fdopen(fd, 'wb') as f:
             wb.save(f)
             
-        TASKS[task_id]['file'] = path
         TASKS[task_id]['status'] = 'completado'
+        TASKS[task_id]['file'] = path
         
     except Exception as e:
         import traceback
