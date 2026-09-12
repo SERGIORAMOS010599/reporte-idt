@@ -27,6 +27,48 @@ TASKS = {}
 CACHE_GEOCERCAS = []
 
 # ==========================================
+# DECODIFICADORES OFICIALES MAPON
+# ==========================================
+def decode_polyline_2d(encoded):
+    points = []
+    index, lat, lng, length = 0, 0, 0, len(encoded)
+    while index < length:
+        shift, result = 0, 0
+        while True:
+            if index >= length: break
+            b = ord(encoded[index]) - 63
+            index += 1
+            result |= (b & 0x1f) << shift
+            shift += 5
+            if b < 0x20: break
+        lat += ~(result >> 1) if (result & 1) else (result >> 1)
+        
+        shift, result = 0, 0
+        while True:
+            if index >= length: break
+            b = ord(encoded[index]) - 63
+            index += 1
+            result |= (b & 0x1f) << shift
+            shift += 5
+            if b < 0x20: break
+        lng += ~(result >> 1) if (result & 1) else (result >> 1)
+        points.append({'lat': lat / 100000.0, 'lng': lng / 100000.0})
+    return points
+
+def decode_mapon_speed_string(encoded_str):
+    chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.'
+    points_count = len(encoded_str) // 4
+    data = []
+    for i in range(points_count):
+        pos = i * 4
+        try:
+            offset = chars.index(encoded_str[pos]) * 64 + chars.index(encoded_str[pos + 1])
+            speed = chars.index(encoded_str[pos + 2]) * 64 + chars.index(encoded_str[pos + 3])
+            data.append((offset, speed))
+        except Exception: pass
+    return data
+
+# ==========================================
 # UTILIDADES Y GEOCERCAS
 # ==========================================
 def calcular_distancia(lat1, lon1, lat2, lon2):
@@ -140,7 +182,7 @@ HTML_INTERFACE = """
             <source src="{{ url_for('static', filename='video_kowi.mp4') }}" type="video/mp4">
         </video>
         <div class="loading-text">Generando Reporte Minuto a Minuto</div>
-        <div class="loading-subtext" id="overlay_status">⏳ Generando reporte en Excel. Por favor, espere...</div>
+        <div class="loading-subtext" id="overlay_status">Conectando con servidores...</div>
     </div>
 
     <div class="card">
@@ -148,7 +190,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <!-- <p>Módulo de Sincronización Estricta y CAN Bus</p> -->
+                <!-- <p>Módulo GPS + Integración Inteligente CAN Bus (V13)</p> -->
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -300,6 +342,7 @@ HTML_INTERFACE = """
                     const sData = await sRes.json();
 
                     if (sData.status === 'procesando') {
+                        // Mantenemos el texto estático para no confundir al usuario
                         overlayStatus.innerText = "⏳ Generando reporte en Excel. Por favor, espere...";
                     } else if (sData.status === 'completado') {
                         clearInterval(interval);
@@ -314,7 +357,7 @@ HTML_INTERFACE = """
                         btn.disabled = false;
                         alert("Error en el reporte: " + sData.msg);
                     }
-                }, 2000); 
+                }, 3000); 
 
             } catch (e) {
                 overlay.style.display = 'none';
@@ -381,7 +424,7 @@ def api_geocercas_nube():
 @app.route('/iniciar_reporte')
 def iniciar_reporte():
     task_id = str(uuid.uuid4())
-    TASKS[task_id] = {'status': 'procesando'}
+    TASKS[task_id] = {'status': 'procesando', 'msg': 'Generando reporte en Excel. Por favor, espere...'}
     params = request.args.to_dict()
     thread = threading.Thread(target=procesar_reporte_bg, args=(task_id, params))
     thread.daemon = True
@@ -461,7 +504,7 @@ def procesar_reporte_bg(task_id, params):
         utc_end_str = (dt_fin_req - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
         
         # ==============================================================
-        # 1. EXTRACCIÓN DE DATOS CAN BUS Y TEMPERATURA
+        # 1. EXTRACCIÓN DE DATOS CAN BUS Y GPS
         # ==============================================================
         can_data = {
             "has_can": False,
@@ -495,16 +538,14 @@ def procesar_reporte_bg(task_id, params):
             sensors = res_temp.get('data', {}).get('units', [{}])[0].get('sensors', [])
             max_t = 0
             for sensor in sensors:
-                if str(sensor.get('no', '')) == '1': # Filtro exacto para Sensor 1 (Temperatura Motor)
+                # Nos aseguramos que sea el sensor número 1 (Temperatura del Motor según configuración)
+                if str(sensor.get('no', '')) == '1':
                     for t in sensor.get('temperatures', []):
                         val = float(t.get('value', 0))
                         if val > max_t: max_t = val
             can_data["max_temp"] = max_t
         except Exception: pass
 
-        # ==============================================================
-        # 2. RUTAS, IGNICIONES Y PUNTOS SATELITALES
-        # ==============================================================
         url_route = f"{BASE_URL}/route/list.json"
         url_ign = f"{BASE_URL}/unit_data/ignitions.json"
         
@@ -521,7 +562,7 @@ def procesar_reporte_bg(task_id, params):
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,routes"}
+            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,routes,polyline,speed"}
             req_ign_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc}
             
             try:
@@ -570,6 +611,9 @@ def procesar_reporte_bg(task_id, params):
 
         eventos_ignicion.sort(key=lambda x: x['dt'])
 
+        # ==============================================================
+        # 3. CONSTRUCCIÓN DE CUADRÍCULA ESTRICTA MINUTO A MINUTO
+        # ==============================================================
         cuadricula_maestra = []
         c_time = dt_inicio_req
         while c_time <= dt_fin_req:
@@ -596,9 +640,8 @@ def procesar_reporte_bg(task_id, params):
         for ev in eventos_ignicion: minutos_a_descargar.append(ev['dt'])
         minutos_a_descargar = sorted(list(set(minutos_a_descargar)))
 
-        # ACELERADOR SEGURO: 25 Hilos
         puntos_exitosos = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
             resultados = executor.map(fetch_exact_point, minutos_a_descargar)
             for res in resultados:
                 if res: puntos_exitosos.append(res)
@@ -616,7 +659,7 @@ def procesar_reporte_bg(task_id, params):
         if puntos_exitosos: last_lat, last_lng = puntos_exitosos[0]['lat'], puntos_exitosos[0]['lng']
         last_dt_punto = None
 
-        # PASO A: Llenado de Filas y Gobernador de Velocidad
+        # PASO A: Llenado de Filas y Cálculo Matemático Topado por el Gobernador
         for i, dt in enumerate(cuadricula_maestra):
             ign_on = is_ignition_on(dt)
             en_ruta, tramo_actual = is_in_route(dt)
@@ -630,7 +673,7 @@ def procesar_reporte_bg(task_id, params):
             current_speed = 0.0
             seg_transcurridos = 60 if i > 0 else 0
 
-            # FILTRO ANTI-PICOS CON GOBERNADOR
+            # FILTRO ANTI-PICOS Y GOBERNADOR
             if en_ruta and punto and ign_on:
                 if last_dt_punto is not None:
                     dist_mts = calcular_distancia(last_lat, last_lng, curr_lat, curr_lng)
@@ -748,15 +791,14 @@ def procesar_reporte_bg(task_id, params):
         ws = wb.active
         ws.title = "Histórico Ejecutivo"
 
-        # Inserción de Logo Kowi con control de errores
+        # Inserción de Logo Kowi
         try:
             logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'logo_kowi.png')
             if os.path.exists(logo_path):
                 img = ExcelImage(logo_path)
-                img.width = 140
-                img.height = 55
+                img.width = 160
+                img.height = 60
                 ws.add_image(img, 'A1')
-                ws.row_dimensions[1].height = 45 
         except Exception:
             pass
 
@@ -876,10 +918,11 @@ def procesar_reporte_bg(task_id, params):
         with os.fdopen(fd, 'wb') as f:
             wb.save(f)
             
-        TASKS[task_id]['status'] = 'completado'
         TASKS[task_id]['file'] = path
+        TASKS[task_id]['status'] = 'completado'
         
     except Exception as e:
+        import traceback
         TASKS[task_id]['status'] = 'error'
         TASKS[task_id]['msg'] = f"Falló el procesamiento interno: {str(e)}"
 
