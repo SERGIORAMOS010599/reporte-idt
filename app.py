@@ -2,14 +2,12 @@ from flask import Flask, render_template_string, request, send_file, jsonify
 import requests
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-from openpyxl.drawing.image import Image as ExcelImage
 import math
 import os
 import json
 import threading
 import uuid
 import tempfile
-import concurrent.futures
 import bisect
 from datetime import datetime, timedelta
 
@@ -25,6 +23,35 @@ TIMEZONE_OFFSET = -7
 
 TASKS = {}
 CACHE_GEOCERCAS = []
+
+# ==========================================
+# DECODIFICADORES OFICIALES MAPON
+# ==========================================
+def decode_polyline_2d(encoded):
+    points = []
+    index, lat, lng, length = 0, 0, 0, len(encoded)
+    while index < length:
+        shift, result = 0, 0
+        while True:
+            if index >= length: break
+            b = ord(encoded[index]) - 63
+            index += 1
+            result |= (b & 0x1f) << shift
+            shift += 5
+            if b < 0x20: break
+        lat += ~(result >> 1) if (result & 1) else (result >> 1)
+        
+        shift, result = 0, 0
+        while True:
+            if index >= length: break
+            b = ord(encoded[index]) - 63
+            index += 1
+            result |= (b & 0x1f) << shift
+            shift += 5
+            if b < 0x20: break
+        lng += ~(result >> 1) if (result & 1) else (result >> 1)
+        points.append({'lat': lat / 100000.0, 'lng': lng / 100000.0})
+    return points
 
 # ==========================================
 # UTILIDADES Y GEOCERCAS
@@ -145,12 +172,14 @@ HTML_INTERFACE = """
 
     <div class="card">
         <div class="header">
-            <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
+            <!-- Espacio para el logo -->
+            <div></div>
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <!-- <p>Módulo GPS + Integración Inteligente CAN Bus (V14 - Optimizado)</p> -->
+                <!-- <p>Módulo GPS + Integración Inteligente CAN Bus (V15 - Ultra Rápido)</p> -->
             </div>
-            <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
+            <!-- Espacio para el logo IDT -->
+            <div></div>
         </div>
         
         <div class="main-container">
@@ -263,6 +292,7 @@ HTML_INTERFACE = """
             const btn = document.getElementById('btn_submit');
             const status = document.getElementById('status_msg');
             const overlay = document.getElementById('loading_overlay');
+            const overlayStatus = document.getElementById('overlay_status');
             
             const unitId = $('#unit_select').val();
             const unitText = $('#unit_select option:selected').text();
@@ -270,6 +300,7 @@ HTML_INTERFACE = """
             
             btn.disabled = true;
             overlay.style.display = 'flex';
+            overlayStatus.innerText = "⏳ Generando reporte en Excel. Por favor, espere...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -310,7 +341,7 @@ HTML_INTERFACE = """
                         btn.disabled = false;
                         alert("Error en el reporte: " + sData.msg);
                     }
-                }, 2000); 
+                }, 1500); 
 
             } catch (e) {
                 overlay.style.display = 'none';
@@ -436,20 +467,6 @@ def procesar_reporte_bg(task_id, params):
                 try: return datetime.strptime(str(iso_str).replace('Z', '').split('.')[0], '%Y-%m-%dT%H:%M:%S') + timedelta(hours=TIMEZONE_OFFSET)
                 except Exception: return None
 
-        def fetch_exact_point(dt):
-            utc_str = (dt - timedelta(hours=TIMEZONE_OFFSET)).strftime('%Y-%m-%dT%H:%M:%SZ')
-            url = f"{BASE_URL}/unit_data/history_point.json?key={API_KEY}&unit_id={unit_id}&datetime={utc_str}&include[]=position"
-            try:
-                r = requests.get(url, timeout=6)
-                data = r.json()
-                units = data.get('data', {}).get('units', [])
-                if units:
-                    pos = units[0].get('position', {}).get('value', {})
-                    if pos and 'lat' in pos and 'lng' in pos:
-                        return {'dt': dt, 'lat': float(pos['lat']), 'lng': float(pos['lng'])}
-            except Exception: pass
-            return None
-
         dt_inicio_req = datetime.strptime(f"{f_in} {hora_inicio}", "%Y-%m-%d %H:%M:%S")
         dt_fin_req = datetime.strptime(f"{f_fin} {hora_fin}", "%Y-%m-%d %H:%M:%S")
         
@@ -503,6 +520,7 @@ def procesar_reporte_bg(task_id, params):
         
         tramos_reales = []
         eventos_ignicion = []
+        puntos_maestros_reales = []
 
         current_start = dt_inicio_req
         chunk_days = 2 
@@ -514,7 +532,7 @@ def procesar_reporte_bg(task_id, params):
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,routes,polyline,speed"}
+            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,routes,polyline"}
             req_ign_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc}
             
             try:
@@ -558,10 +576,26 @@ def procesar_reporte_bg(task_id, params):
                         'dt_ini': dt_ini, 'dt_fin': dt_fin, 'distancia': dist_km, 'tipo': 'route',
                         'max_speed': max_speed
                     })
+
+                    # MEGA-OPTIMIZACIÓN: Interpolación Lineal de la Polilínea (Cero llamadas a la API)
+                    poly_str = item.get('polyline', '')
+                    if poly_str:
+                        coords = decode_polyline_2d(poly_str)
+                        if len(coords) == 1:
+                            puntos_maestros_reales.append({'dt': dt_ini, 'lat': coords[0]['lat'], 'lng': coords[0]['lng']})
+                        elif len(coords) > 1:
+                            dur_sec = (dt_fin - dt_ini).total_seconds()
+                            step = dur_sec / (len(coords) - 1)
+                            for idx, c in enumerate(coords):
+                                pt_time = dt_ini + timedelta(seconds=idx*step)
+                                puntos_maestros_reales.append({'dt': pt_time, 'lat': c['lat'], 'lng': c['lng']})
+
             except Exception: pass 
             current_start = current_end
 
         eventos_ignicion.sort(key=lambda x: x['dt'])
+        puntos_maestros_reales.sort(key=lambda x: x['dt'])
+        maestro_dts = [p['dt'] for p in puntos_maestros_reales]
 
         # ==============================================================
         # 3. CONSTRUCCIÓN DE CUADRÍCULA ESTRICTA MINUTO A MINUTO
@@ -588,20 +622,6 @@ def procesar_reporte_bg(task_id, params):
                 if t['dt_ini'] <= dt <= t['dt_fin']: return True, t
             return False, None
 
-        minutos_a_descargar = [dt for dt in cuadricula_maestra if is_ignition_on(dt) or is_in_route(dt)[0]]
-        for ev in eventos_ignicion: minutos_a_descargar.append(ev['dt'])
-        minutos_a_descargar = sorted(list(set(minutos_a_descargar)))
-
-        # ACELERADOR: 40 Hilos para descargar ultra rápido
-        puntos_exitosos = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=40) as executor:
-            resultados = executor.map(fetch_exact_point, minutos_a_descargar)
-            for res in resultados:
-                if res: puntos_exitosos.append(res)
-                
-        puntos_exitosos.sort(key=lambda x: x['dt'])
-        puntos_dict = {p['dt']: p for p in puntos_exitosos}
-
         filas_brutas = []
         tiempo_mov_seg = 0
         tiempo_exceso_geo_seg = 0
@@ -609,7 +629,8 @@ def procesar_reporte_bg(task_id, params):
         distancia_total_gps_km = sum([t['distancia'] for t in tramos_reales if t['tipo'] == 'route'])
         
         last_lat, last_lng = 27.19, -109.55
-        if puntos_exitosos: last_lat, last_lng = puntos_exitosos[0]['lat'], puntos_exitosos[0]['lng']
+        if puntos_maestros_reales:
+            last_lat, last_lng = puntos_maestros_reales[0]['lat'], puntos_maestros_reales[0]['lng']
         last_dt_punto = None
 
         # PASO A: Llenado de Filas y Cálculo Matemático Topado por el Gobernador
@@ -617,11 +638,31 @@ def procesar_reporte_bg(task_id, params):
             ign_on = is_ignition_on(dt)
             en_ruta, tramo_actual = is_in_route(dt)
             
-            punto = puntos_dict.get(dt)
-            if punto:
-                curr_lat, curr_lng = punto['lat'], punto['lng']
-            else:
-                curr_lat, curr_lng = last_lat, last_lng
+            # Interpolación exacta del minuto sobre la polilínea
+            punto = False
+            curr_lat, curr_lng = last_lat, last_lng
+            
+            if en_ruta and puntos_maestros_reales:
+                idx = bisect.bisect_left(maestro_dts, dt)
+                if idx == 0:
+                    curr_lat, curr_lng = puntos_maestros_reales[0]['lat'], puntos_maestros_reales[0]['lng']
+                    punto = True
+                elif idx == len(puntos_maestros_reales):
+                    curr_lat, curr_lng = puntos_maestros_reales[-1]['lat'], puntos_maestros_reales[-1]['lng']
+                    punto = True
+                else:
+                    p1 = puntos_maestros_reales[idx-1]
+                    p2 = puntos_maestros_reales[idx]
+                    t1 = p1['dt']
+                    t2 = p2['dt']
+                    tot_sec = (t2 - t1).total_seconds()
+                    if tot_sec > 0:
+                        ratio = (dt - t1).total_seconds() / tot_sec
+                        curr_lat = p1['lat'] + (p2['lat'] - p1['lat']) * ratio
+                        curr_lng = p1['lng'] + (p2['lng'] - p1['lng']) * ratio
+                    else:
+                        curr_lat, curr_lng = p1['lat'], p1['lng']
+                    punto = True
 
             current_speed = 0.0
             seg_transcurridos = 60 if i > 0 else 0
@@ -743,18 +784,6 @@ def procesar_reporte_bg(task_id, params):
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Histórico Ejecutivo"
-
-        # Inserción de Logo Kowi con control de errores
-        try:
-            logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'logo_kowi.png')
-            if os.path.exists(logo_path):
-                img = ExcelImage(logo_path)
-                img.width = 140
-                img.height = 55
-                ws.add_image(img, 'A1')
-                ws.row_dimensions[1].height = 45 # Asegura espacio vertical
-        except Exception as e:
-            print("No se pudo insertar el logo (Posible falta de Pillow):", e)
 
         ws.cell(row=1, column=4, value="Reporte Analítico Minuto a Minuto").font = Font(bold=True, size=15)
         ws.cell(row=3, column=3, value="Vehículo:").font = Font(bold=True)
