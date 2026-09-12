@@ -189,7 +189,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <p>Módulo GPS + Integración Inteligente CAN Bus (V10)</p>
+                <p>Módulo CAN Bus + Filtro Nativo de Ralentí (V11)</p>
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -244,7 +244,7 @@ HTML_INTERFACE = """
                     </div>
                     <div class="form-group">
                         <label>Filtro de Ralentí (mins):</label>
-                        <input type="number" id="min_ralenti" value="2" min="1" max="60" required>
+                        <input type="number" id="min_ralenti" value="5" min="1" max="60" required>
                     </div>
                 </div>
 
@@ -457,7 +457,7 @@ def procesar_reporte_bg(task_id, params):
         hora_inicio = normalizar_hora(params.get('hora_inicio', '00:00:00'))
         hora_fin = normalizar_hora(params.get('hora_fin', '23:59:59'), True)
         limite_velocidad_gral = int(params.get('limite_velocidad', 80))
-        min_ralenti = int(params.get('min_ralenti', 2))
+        min_ralenti = int(params.get('min_ralenti', 5))
         try: 
             geo_limits = json.loads(params.get('geos', '{}'))
         except Exception: 
@@ -502,16 +502,34 @@ def procesar_reporte_bg(task_id, params):
         utc_end_str = (dt_fin_req - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
         
         # ==============================================================
-        # 1. EXTRACCIÓN DE DATOS CAN BUS (Temperaturas Extra)
+        # 1. EXTRACCIÓN DE DATOS CAN BUS (can_point.json + temperature.json)
         # ==============================================================
-        TASKS[task_id]['msg'] = "Extrayendo métricas de CAN Bus y GPS..."
+        TASKS[task_id]['msg'] = "Extrayendo métricas de Computadora (CAN Bus)..."
         can_data = {
             "has_can": False,
-            "dist_inicial": None, "dist_final": None,
-            "fuel_inicial": None, "fuel_final": None,
-            "engine_hrs_inicial": None, "engine_hrs_final": None,
+            "dist_inicial": 0, "dist_final": 0,
+            "fuel_inicial": 0, "fuel_final": 0,
+            "engine_hrs_inicial": 0, "engine_hrs_final": 0,
             "max_temp": 0
         }
+        
+        try:
+            url_can_point = f"{BASE_URL}/unit_data/can_point.json"
+            res_ini = requests.get(url_can_point, params={"key": API_KEY, "unit_id": unit_id, "datetime": utc_start_str}, timeout=15).json()
+            res_fin = requests.get(url_can_point, params={"key": API_KEY, "unit_id": unit_id, "datetime": utc_end_str}, timeout=15).json()
+            
+            ini_unit = res_ini.get('data', {}).get('units', [{}])[0]
+            fin_unit = res_fin.get('data', {}).get('units', [{}])[0]
+            
+            if fin_unit and 'total_distance' in fin_unit:
+                can_data["has_can"] = True
+                can_data["dist_inicial"] = float(ini_unit.get('total_distance', {}).get('value', 0))
+                can_data["dist_final"] = float(fin_unit.get('total_distance', {}).get('value', 0))
+                can_data["fuel_inicial"] = float(ini_unit.get('total_fuel', {}).get('value', 0))
+                can_data["fuel_final"] = float(fin_unit.get('total_fuel', {}).get('value', 0))
+                can_data["engine_hrs_inicial"] = float(ini_unit.get('total_engine_hours', {}).get('value', 0))
+                can_data["engine_hrs_final"] = float(fin_unit.get('total_engine_hours', {}).get('value', 0))
+        except Exception: pass
         
         try:
             url_temp = f"{BASE_URL}/unit_data/temperature.json"
@@ -526,13 +544,12 @@ def procesar_reporte_bg(task_id, params):
         except Exception: pass
 
         # ==============================================================
-        # 2. EXTRACCIÓN DE RUTAS, IGNICIONES Y CAN EN 1 SOLA LLAMADA
+        # 2. EXTRACCIÓN DE RUTAS, POLILÍNEAS Y VELOCIDAD DE HARDWARE
         # ==============================================================
         url_route = f"{BASE_URL}/route/list.json"
         url_ign = f"{BASE_URL}/unit_data/ignitions.json"
         
         tramos_reales = []
-        parsed_idles = []
         eventos_ignicion = []
         puntos_maestros_reales = []
 
@@ -543,13 +560,13 @@ def procesar_reporte_bg(task_id, params):
             current_end = current_start + timedelta(days=chunk_days)
             if current_end > dt_fin_req: current_end = dt_fin_req
                 
-            TASKS[task_id]['msg'] = f"Analizando Encendidos y Movimiento GPS ({current_start.strftime('%d %b')} - {current_end.strftime('%d %b')})..."
+            TASKS[task_id]['msg'] = f"Analizando Rutas y Coordenadas ({current_start.strftime('%d %b')} - {current_end.strftime('%d %b')})..."
             
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            # EL SECRETO: include=can para extraer todo del tablero sin llamadas extra.
-            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,idles,routes,polyline,speed,can"}
+            # Limpiamos la petición de "idles" y "can" para evitar sobrecarga y lentitud
+            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,routes,polyline,speed"}
             req_ign_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc}
             
             try:
@@ -567,13 +584,6 @@ def procesar_reporte_bg(task_id, params):
 
                 response = requests.get(url_route, params=req_params, timeout=45)
                 data = response.json()
-                
-                unit_data = data.get('data', {}).get('units', [])[0] if data.get('data', {}).get('units') else {}
-                
-                for idl in unit_data.get('idles', []):
-                    s_dt = parse_iso(idl.get('start', {}).get('time'))
-                    e_dt = parse_iso(idl.get('end', {}).get('time'))
-                    if s_dt and e_dt: parsed_idles.append({'dt_ini': s_dt, 'dt_fin': e_dt})
 
                 rutas_encontradas = []
                 def extraer_tramos(obj):
@@ -592,21 +602,6 @@ def procesar_reporte_bg(task_id, params):
                     dt_fin = parse_iso(item.get('end', {}).get('time', ''))
                     if not dt_ini or not dt_fin: continue
                         
-                    # Extracción de CAN directamente de la ruta
-                    can_start = item.get('start', {}).get('can', {})
-                    can_end = item.get('end', {}).get('can', {})
-                    if can_start and can_end:
-                        can_data["has_can"] = True
-                        if can_data["dist_inicial"] is None:
-                            can_data["dist_inicial"] = float(can_start.get('total_distance', 0))
-                            can_data["fuel_inicial"] = float(can_start.get('total_fuel', 0))
-                            can_data["engine_hrs_inicial"] = float(can_start.get('total_engine_hours', 0))
-                            
-                        # Se actualiza en cada iteración para que el último tramo tenga el valor final
-                        can_data["dist_final"] = float(can_end.get('total_distance', 0))
-                        can_data["fuel_final"] = float(can_end.get('total_fuel', 0))
-                        can_data["engine_hrs_final"] = float(can_end.get('total_engine_hours', 0))
-
                     dist_km = float(item.get('distance', 0)) / 1000.0
                     poly_str = item.get('polyline', '')
                     speed_str = item.get('speed', '')
@@ -636,6 +631,9 @@ def procesar_reporte_bg(task_id, params):
         puntos_maestros_reales.sort(key=lambda x: x['dt'])
         maestro_dts = [p['dt'] for p in puntos_maestros_reales]
 
+        # ==============================================================
+        # 3. CONSTRUCCIÓN DE CUADRÍCULA ESTRICTA MINUTO A MINUTO
+        # ==============================================================
         cuadricula_maestra = []
         c_time = dt_inicio_req
         while c_time <= dt_fin_req:
@@ -645,18 +643,6 @@ def procesar_reporte_bg(task_id, params):
         for ev in eventos_ignicion:
             cuadricula_maestra.append(ev['dt'])
             
-        tiempo_ral_reportado_seg = 0
-        eventos_ralenti = []
-        
-        # Filtro Inteligente de Ralentí
-        for idl in parsed_idles:
-            dur = (idl['dt_fin'] - idl['dt_ini']).total_seconds()
-            if dur >= min_ralenti * 60:
-                tiempo_ral_reportado_seg += dur
-                ral_dt = idl['dt_ini'] + timedelta(seconds=1)
-                eventos_ralenti.append({'dt': ral_dt, 'evento': 'Ralentí', 'detalle': f"Detenido por: {int(dur//60)} mins"})
-                cuadricula_maestra.append(ral_dt)
-
         cuadricula_maestra = sorted(list(set(cuadricula_maestra)))
 
         def is_ignition_on(dt):
@@ -670,17 +656,11 @@ def procesar_reporte_bg(task_id, params):
                 if t['dt_ini'] <= dt <= t['dt_fin']: return True, t
             return False, None
 
-        def is_in_idle(dt):
-            for i in parsed_idles:
-                if i['dt_ini'] <= dt <= i['dt_fin']: return True
-            return False
-
         minutos_a_descargar = [dt for dt in cuadricula_maestra if is_ignition_on(dt) or is_in_route(dt)[0]]
         for ev in eventos_ignicion: minutos_a_descargar.append(ev['dt'])
-        for ev in eventos_ralenti: minutos_a_descargar.append(ev['dt'])
         minutos_a_descargar = sorted(list(set(minutos_a_descargar)))
 
-        TASKS[task_id]['msg'] = f"Sincronizando puntos satelitales (Gobernador)..."
+        TASKS[task_id]['msg'] = f"Sincronizando puntos satelitales faltantes..."
 
         puntos_exitosos = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
@@ -703,6 +683,7 @@ def procesar_reporte_bg(task_id, params):
         if puntos_exitosos: last_lat, last_lng = puntos_exitosos[0]['lat'], puntos_exitosos[0]['lng']
         last_dt_punto = None
 
+        # PASO 1: Calcular velocidades, ubicaciones y tiempos generales (excepto ralentí estricto)
         for i, dt in enumerate(cuadricula_maestra):
             ign_on = is_ignition_on(dt)
             en_ruta, tramo_actual = is_in_route(dt)
@@ -716,7 +697,7 @@ def procesar_reporte_bg(task_id, params):
             current_speed = 0.0
             seg_transcurridos = 60 if i > 0 else 0
 
-            # FILTRO ANTI-PICOS CON GOBERNADOR
+            # FILTRO ANTI-PICOS Y GOBERNADOR
             if en_ruta and punto and ign_on:
                 if len(puntos_maestros_reales) > 0:
                     idx = bisect.bisect_left(maestro_dts, dt)
@@ -757,23 +738,18 @@ def procesar_reporte_bg(task_id, params):
 
             if current_speed > 0:
                 tiempo_mov_seg += seg_transcurridos
-            else:
-                if ign_on: pass 
-                else: tiempo_apagado_seg += seg_transcurridos
+            elif not ign_on:
+                tiempo_apagado_seg += seg_transcurridos
 
             geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng)
             evento = ""
             detalle = "-"
             
             es_evento_motor = next((e for e in eventos_ignicion if e['dt'] == dt), None)
-            es_evento_ralenti = next((e for e in eventos_ralenti if e['dt'] == dt), None)
             
             if es_evento_motor:
                 evento = es_evento_motor['evento']
                 detalle = es_evento_motor['detalle']
-            elif es_evento_ralenti:
-                evento = es_evento_ralenti['evento']
-                detalle = es_evento_ralenti['detalle']
             elif current_speed > 0:
                 limite_aplicable = limite_velocidad_gral
                 if geo_name != "Fuera de geocerca":
@@ -792,9 +768,44 @@ def procesar_reporte_bg(task_id, params):
 
             filas_brutas.append({
                 'fecha': dt, 'origen': 'Zona Operativa', 'velocidad': current_speed, 
-                'evento': evento, 'detalle': detalle, 'lat': curr_lat, 'lng': curr_lng, 'geocerca': geo_name
+                'evento': evento, 'detalle': detalle, 'lat': curr_lat, 'lng': curr_lng, 'geocerca': geo_name,
+                'ign_on': ign_on 
             })
 
+        # ==============================================================
+        # 4. MOTOR NATIVO DE RALENTÍ (Se calcula directamente de la tabla final)
+        # ==============================================================
+        TASKS[task_id]['msg'] = "Calculando tiempos de Ralentí..."
+        
+        tiempo_ral_reportado_seg = 0
+        consecutive_idles = 0
+        idle_start_idx = -1
+        
+        for idx, f in enumerate(filas_brutas):
+            if f['velocidad'] == 0 and f['ign_on']:
+                if consecutive_idles == 0:
+                    idle_start_idx = idx
+                consecutive_idles += 1
+            else:
+                if consecutive_idles >= min_ralenti:
+                    if not filas_brutas[idle_start_idx]['evento'] or filas_brutas[idle_start_idx]['evento'] == 'Motor encendido':
+                        target_idx = idle_start_idx + 1 if filas_brutas[idle_start_idx]['evento'] == 'Motor encendido' and idle_start_idx + 1 < len(filas_brutas) else idle_start_idx
+                        filas_brutas[target_idx]['evento'] = 'Ralentí'
+                        filas_brutas[target_idx]['detalle'] = f"Detenido por: {consecutive_idles} mins"
+                    tiempo_ral_reportado_seg += (consecutive_idles * 60)
+                consecutive_idles = 0
+                
+        # Checar si cerró en ralentí
+        if consecutive_idles >= min_ralenti:
+            if not filas_brutas[idle_start_idx]['evento'] or filas_brutas[idle_start_idx]['evento'] == 'Motor encendido':
+                target_idx = idle_start_idx + 1 if filas_brutas[idle_start_idx]['evento'] == 'Motor encendido' and idle_start_idx + 1 < len(filas_brutas) else idle_start_idx
+                filas_brutas[target_idx]['evento'] = 'Ralentí'
+                filas_brutas[target_idx]['detalle'] = f"Detenido por: {consecutive_idles} mins"
+            tiempo_ral_reportado_seg += (consecutive_idles * 60)
+
+        # ==============================================================
+        # 5. DIBUJADO DEL EXCEL
+        # ==============================================================
         TASKS[task_id]['msg'] = "Estructurando reporte Ejecutivo (Excel)..."
 
         def calc_hrs_mins(segundos): return int(segundos // 3600), int((segundos % 3600) // 60)
@@ -824,9 +835,6 @@ def procesar_reporte_bg(task_id, params):
             can_mins = int((can_horas_motor_dec - can_horas) * 60)
             rendimiento_can = (can_dist_total / can_fuel_total) if can_fuel_total > 0 else 0
 
-        # ==============================================================
-        # DIBUJADO DEL EXCEL (DISEÑO DOBLE ENCABEZADO)
-        # ==============================================================
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Histórico Ejecutivo"
@@ -901,7 +909,6 @@ def procesar_reporte_bg(task_id, params):
         ws.cell(row=4, column=6, value="Fecha Final:").font = Font(bold=True)
         ws.cell(row=4, column=7, value=f"{f_in} {hora_fin}")
 
-        # Aplicar bordes al cuadro
         for r in range(5, 11):
             for c in range(1, 5): ws.cell(row=r, column=c).border = border_all
             for c in range(6, 8): ws.cell(row=r, column=c).border = border_all
