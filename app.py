@@ -2,6 +2,7 @@ from flask import Flask, render_template_string, request, send_file, jsonify
 import requests
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.drawing.image import Image as ExcelImage
 import math
 import os
 import json
@@ -180,7 +181,7 @@ HTML_INTERFACE = """
         <video autoplay loop muted playsinline>
             <source src="{{ url_for('static', filename='video_kowi.mp4') }}" type="video/mp4">
         </video>
-        <div class="loading-text">Generando Reporte Ejecutivo...</div>
+        <div class="loading-text">Generando Reporte Minuto a Minuto</div>
         <div class="loading-subtext" id="overlay_status">Conectando con servidores...</div>
     </div>
 
@@ -189,7 +190,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <p>Módulo GPS + Integración Inteligente CAN Bus (V12)</p>
+                <!-- <p>Módulo GPS + Integración Inteligente CAN Bus (V13)</p> -->
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -312,7 +313,7 @@ HTML_INTERFACE = """
             
             btn.disabled = true;
             overlay.style.display = 'flex';
-            overlayStatus.innerText = "⏳ Extrayendo Telemetría GPS y CAN Bus...";
+            overlayStatus.innerText = "⏳ Generando reporte en Excel. Por favor, espere...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -341,7 +342,8 @@ HTML_INTERFACE = """
                     const sData = await sRes.json();
 
                     if (sData.status === 'procesando') {
-                        overlayStatus.innerText = `⏳ ${sData.msg}`;
+                        // Mantenemos el texto estático para no confundir al usuario
+                        overlayStatus.innerText = "⏳ Generando reporte en Excel. Por favor, espere...";
                     } else if (sData.status === 'completado') {
                         clearInterval(interval);
                         overlay.style.display = 'none';
@@ -355,7 +357,7 @@ HTML_INTERFACE = """
                         btn.disabled = false;
                         alert("Error en el reporte: " + sData.msg);
                     }
-                }, 1500); 
+                }, 3000); 
 
             } catch (e) {
                 overlay.style.display = 'none';
@@ -422,7 +424,7 @@ def api_geocercas_nube():
 @app.route('/iniciar_reporte')
 def iniciar_reporte():
     task_id = str(uuid.uuid4())
-    TASKS[task_id] = {'status': 'procesando', 'msg': 'Iniciando Extracción CAN y GPS...'}
+    TASKS[task_id] = {'status': 'procesando', 'msg': 'Generando reporte en Excel. Por favor, espere...'}
     params = request.args.to_dict()
     thread = threading.Thread(target=procesar_reporte_bg, args=(task_id, params))
     thread.daemon = True
@@ -504,7 +506,6 @@ def procesar_reporte_bg(task_id, params):
         # ==============================================================
         # 1. EXTRACCIÓN DE DATOS CAN BUS Y GPS
         # ==============================================================
-        TASKS[task_id]['msg'] = "Extrayendo métricas de Computadora (CAN Bus)..."
         can_data = {
             "has_can": False,
             "dist_inicial": 0, "dist_final": 0,
@@ -537,6 +538,7 @@ def procesar_reporte_bg(task_id, params):
             sensors = res_temp.get('data', {}).get('units', [{}])[0].get('sensors', [])
             max_t = 0
             for sensor in sensors:
+                # Nos aseguramos que sea el sensor número 1 (Temperatura del Motor según configuración)
                 if str(sensor.get('no', '')) == '1':
                     for t in sensor.get('temperatures', []):
                         val = float(t.get('value', 0))
@@ -549,7 +551,6 @@ def procesar_reporte_bg(task_id, params):
         
         tramos_reales = []
         eventos_ignicion = []
-        puntos_maestros_reales = []
 
         current_start = dt_inicio_req
         chunk_days = 2 
@@ -558,8 +559,6 @@ def procesar_reporte_bg(task_id, params):
             current_end = current_start + timedelta(days=chunk_days)
             if current_end > dt_fin_req: current_end = dt_fin_req
                 
-            TASKS[task_id]['msg'] = f"Analizando Rutas y Coordenadas ({current_start.strftime('%d %b')} - {current_end.strftime('%d %b')})..."
-            
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
@@ -641,8 +640,6 @@ def procesar_reporte_bg(task_id, params):
         for ev in eventos_ignicion: minutos_a_descargar.append(ev['dt'])
         minutos_a_descargar = sorted(list(set(minutos_a_descargar)))
 
-        TASKS[task_id]['msg'] = f"Sincronizando puntos satelitales (Gobernador)..."
-
         puntos_exitosos = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
             resultados = executor.map(fetch_exact_point, minutos_a_descargar)
@@ -651,8 +648,6 @@ def procesar_reporte_bg(task_id, params):
                 
         puntos_exitosos.sort(key=lambda x: x['dt'])
         puntos_dict = {p['dt']: p for p in puntos_exitosos}
-
-        TASKS[task_id]['msg'] = "Procesando matriz de reporte y filtrando excesos..."
 
         filas_brutas = []
         tiempo_mov_seg = 0
@@ -685,7 +680,6 @@ def procesar_reporte_bg(task_id, params):
                     seg_diff = max((dt - last_dt_punto).total_seconds(), 1)
                     raw_speed = (dist_mts / seg_diff) * 3.6
                     max_oficial = float(tramo_actual.get('max_speed', 110)) if tramo_actual else 110
-                    if max_oficial <= 0: max_oficial = 110
                     current_speed = min(raw_speed, max_oficial)
 
             if current_speed < 3 or not ign_on: 
@@ -736,8 +730,6 @@ def procesar_reporte_bg(task_id, params):
         # ==============================================================
         # 4. MOTOR NATIVO DE RALENTÍ MATEMÁTICO
         # ==============================================================
-        TASKS[task_id]['msg'] = "Aplicando Filtro de Ralentí Personalizado..."
-        
         tiempo_ral_reportado_seg = 0
         consecutive_idles = 0
         idle_start_idx = -1
@@ -768,8 +760,6 @@ def procesar_reporte_bg(task_id, params):
         # ==============================================================
         # 5. DIBUJADO DEL EXCEL
         # ==============================================================
-        TASKS[task_id]['msg'] = "Estructurando reporte Ejecutivo (Excel)..."
-
         def calc_hrs_mins(segundos): return int(segundos // 3600), int((segundos % 3600) // 60)
         mov_hrs, mov_mins = calc_hrs_mins(tiempo_mov_seg)
         ral_hrs, ral_mins = calc_hrs_mins(tiempo_ral_reportado_seg)
@@ -801,6 +791,17 @@ def procesar_reporte_bg(task_id, params):
         ws = wb.active
         ws.title = "Histórico Ejecutivo"
 
+        # Inserción de Logo Kowi
+        try:
+            logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'logo_kowi.png')
+            if os.path.exists(logo_path):
+                img = ExcelImage(logo_path)
+                img.width = 160
+                img.height = 60
+                ws.add_image(img, 'A1')
+        except Exception:
+            pass
+
         ws.cell(row=1, column=4, value="Reporte Analítico Minuto a Minuto").font = Font(bold=True, size=15)
         ws.cell(row=3, column=3, value="Vehículo:").font = Font(bold=True)
         ws.cell(row=3, column=4, value=str(unit_name))
@@ -817,12 +818,12 @@ def procesar_reporte_bg(task_id, params):
         gps_title.fill = fill_gps
         for col in range(1, 5): ws.cell(row=5, column=col).fill = fill_gps
         
-        ws.cell(row=6, column=1, value="Recorrido Aprox:").font = Font(bold=True)
+        ws.cell(row=6, column=1, value="Kilómetros Recorridos:").font = Font(bold=True)
         ws.cell(row=6, column=2, value=f"{round(distancia_total_gps_km, 2)} km")
         ws.cell(row=6, column=3, value="Tiempo en Movimiento:").font = Font(bold=True)
         ws.cell(row=6, column=4, value=f"{mov_hrs} hrs {mov_mins} mins")
 
-        ws.cell(row=7, column=1, value="Velocidad Máxima Oficial:").font = Font(bold=True)
+        ws.cell(row=7, column=1, value="Velocidad Máxima:").font = Font(bold=True)
         ws.cell(row=7, column=2, value=f"{round(max_vel, 1)} km/h")
         ws.cell(row=7, column=3, value="Ralentí (Filtro >{}m):".format(min_ralenti)).font = Font(bold=True)
         ws.cell(row=7, column=4, value=f"{ral_hrs} hrs {ral_mins} mins").font = Font(color="FF0000")
@@ -832,7 +833,7 @@ def procesar_reporte_bg(task_id, params):
         ws.cell(row=8, column=3, value="Exceso en Geocercas:").font = Font(bold=True)
         ws.cell(row=8, column=4, value=f"{exceso_geo_hrs} hrs {exceso_geo_mins} mins").font = Font(color="FF0000", bold=True)
 
-        ws.cell(row=9, column=1, value="Horas Motor (Aprox GPS):").font = Font(bold=True)
+        ws.cell(row=9, column=1, value="Horas Motor GPS:").font = Font(bold=True)
         ws.cell(row=9, column=2, value=f"{motor_hrs_gps} hrs {motor_mins_gps} mins")
         ws.cell(row=9, column=3, value="Motor Apagado (Sin GPS):").font = Font(bold=True)
         ws.cell(row=9, column=4, value=f"{muerto_hrs} hrs {muerto_mins} mins")
@@ -844,24 +845,24 @@ def procesar_reporte_bg(task_id, params):
         for col in range(6, 8): ws.cell(row=5, column=col).fill = fill_can
         
         if can_data["has_can"]:
-            ws.cell(row=6, column=6, value="Recorrido Tablero (Odo):").font = Font(bold=True)
+            ws.cell(row=6, column=6, value="Odómetro Unidad:").font = Font(bold=True)
             ws.cell(row=6, column=7, value=f"{round(can_dist_total, 2)} km")
-            ws.cell(row=7, column=6, value="Combustible Quemado:").font = Font(bold=True)
+            ws.cell(row=7, column=6, value="Combustible Consumido:").font = Font(bold=True)
             ws.cell(row=7, column=7, value=f"{round(can_fuel_total, 2)} L").font = Font(color="FF0000", bold=True)
             ws.cell(row=8, column=6, value="Rendimiento del Viaje:").font = Font(bold=True)
             ws.cell(row=8, column=7, value=f"{round(rendimiento_can, 2)} km/L").font = Font(color="008000", bold=True)
-            ws.cell(row=9, column=6, value="Horómetro Interno:").font = Font(bold=True)
+            ws.cell(row=9, column=6, value="Horómetro Unidad:").font = Font(bold=True)
             ws.cell(row=9, column=7, value=f"{can_horas} hrs {can_mins} mins")
             ws.cell(row=10, column=6, value="Temperatura Motor Máxima:").font = Font(bold=True)
             ws.cell(row=10, column=7, value=f"{can_data['max_temp']} °C")
         else:
-            ws.cell(row=6, column=6, value="Recorrido Tablero (Odo):").font = Font(bold=True)
+            ws.cell(row=6, column=6, value="Odómetro Unidad:").font = Font(bold=True)
             ws.cell(row=6, column=7, value="0 km (Sin CAN)")
-            ws.cell(row=7, column=6, value="Combustible Quemado:").font = Font(bold=True)
+            ws.cell(row=7, column=6, value="Combustible Consumido:").font = Font(bold=True)
             ws.cell(row=7, column=7, value="0 L (Sin CAN)")
             ws.cell(row=8, column=6, value="Rendimiento del Viaje:").font = Font(bold=True)
             ws.cell(row=8, column=7, value="0 km/L (Sin CAN)")
-            ws.cell(row=9, column=6, value="Horómetro Interno:").font = Font(bold=True)
+            ws.cell(row=9, column=6, value="Horómetro Unidad:").font = Font(bold=True)
             ws.cell(row=9, column=7, value="0 hrs 0 mins (Sin CAN)")
             ws.cell(row=10, column=6, value="Temperatura Motor Máxima:").font = Font(bold=True)
             ws.cell(row=10, column=7, value="0 °C (Sin CAN)")
