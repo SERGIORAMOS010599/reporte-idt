@@ -26,7 +26,49 @@ TASKS = {}
 CACHE_GEOCERCAS = []
 
 # ==========================================
-# FÓRMULA HAVERSINE (PARA GEOCERCAS)
+# DECODIFICADORES OFICIALES MAPON
+# ==========================================
+def decode_polyline_2d(encoded):
+    points = []
+    index, lat, lng, length = 0, 0, 0, len(encoded)
+    while index < length:
+        shift, result = 0, 0
+        while True:
+            if index >= length: break
+            b = ord(encoded[index]) - 63
+            index += 1
+            result |= (b & 0x1f) << shift
+            shift += 5
+            if b < 0x20: break
+        lat += ~(result >> 1) if (result & 1) else (result >> 1)
+        
+        shift, result = 0, 0
+        while True:
+            if index >= length: break
+            b = ord(encoded[index]) - 63
+            index += 1
+            result |= (b & 0x1f) << shift
+            shift += 5
+            if b < 0x20: break
+        lng += ~(result >> 1) if (result & 1) else (result >> 1)
+        points.append({'lat': lat / 100000.0, 'lng': lng / 100000.0})
+    return points
+
+def decode_mapon_speed_string(encoded_str):
+    chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.'
+    points_count = len(encoded_str) // 4
+    data = []
+    for i in range(points_count):
+        pos = i * 4
+        try:
+            offset = chars.index(encoded_str[pos]) * 64 + chars.index(encoded_str[pos + 1])
+            speed = chars.index(encoded_str[pos + 2]) * 64 + chars.index(encoded_str[pos + 3])
+            data.append((offset, speed))
+        except Exception: pass
+    return data
+
+# ==========================================
+# UTILIDADES Y GEOCERCAS
 # ==========================================
 def calcular_distancia(lat1, lon1, lat2, lon2):
     R = 6371000 
@@ -147,7 +189,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <p>V12 (Gobernador Mapon y Ralentí Matemático)</p>
+                <p>Módulo GPS + Integración Inteligente CAN Bus (V12)</p>
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -495,9 +537,10 @@ def procesar_reporte_bg(task_id, params):
             sensors = res_temp.get('data', {}).get('units', [{}])[0].get('sensors', [])
             max_t = 0
             for sensor in sensors:
-                for t in sensor.get('temperatures', []):
-                    val = float(t.get('value', 0))
-                    if val > max_t: max_t = val
+                if str(sensor.get('no', '')) == '1':
+                    for t in sensor.get('temperatures', []):
+                        val = float(t.get('value', 0))
+                        if val > max_t: max_t = val
             can_data["max_temp"] = max_t
         except Exception: pass
 
@@ -506,6 +549,7 @@ def procesar_reporte_bg(task_id, params):
         
         tramos_reales = []
         eventos_ignicion = []
+        puntos_maestros_reales = []
 
         current_start = dt_inicio_req
         chunk_days = 2 
@@ -519,7 +563,7 @@ def procesar_reporte_bg(task_id, params):
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "routes"}
+            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,routes,polyline,speed"}
             req_ign_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc}
             
             try:
@@ -556,9 +600,7 @@ def procesar_reporte_bg(task_id, params):
                     if not dt_ini or not dt_fin: continue
                         
                     dist_km = float(item.get('distance', 0)) / 1000.0
-                    
-                    # EL GRAN DESCUBRIMIENTO: Extraer la velocidad máxima física del nodo raíz del tramo
-                    max_speed = float(item.get('max_speed', 110))
+                    max_speed = float(item.get('metrics', {}).get('max_speed', 110))
                     if max_speed <= 0: max_speed = 110
 
                     tramos_reales.append({
@@ -599,7 +641,7 @@ def procesar_reporte_bg(task_id, params):
         for ev in eventos_ignicion: minutos_a_descargar.append(ev['dt'])
         minutos_a_descargar = sorted(list(set(minutos_a_descargar)))
 
-        TASKS[task_id]['msg'] = f"Sincronizando puntos satelitales..."
+        TASKS[task_id]['msg'] = f"Sincronizando puntos satelitales (Gobernador)..."
 
         puntos_exitosos = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
@@ -636,14 +678,14 @@ def procesar_reporte_bg(task_id, params):
             current_speed = 0.0
             seg_transcurridos = 60 if i > 0 else 0
 
-            # FILTRO ANTI-PICOS Y GOBERNADOR (Con la max_speed oficial de Mapon)
+            # FILTRO ANTI-PICOS Y GOBERNADOR
             if en_ruta and punto and ign_on:
                 if last_dt_punto is not None:
                     dist_mts = calcular_distancia(last_lat, last_lng, curr_lat, curr_lng)
                     seg_diff = max((dt - last_dt_punto).total_seconds(), 1)
                     raw_speed = (dist_mts / seg_diff) * 3.6
-                    
                     max_oficial = float(tramo_actual.get('max_speed', 110)) if tramo_actual else 110
+                    if max_oficial <= 0: max_oficial = 110
                     current_speed = min(raw_speed, max_oficial)
 
             if current_speed < 3 or not ign_on: 
@@ -715,7 +757,6 @@ def procesar_reporte_bg(task_id, params):
                     tiempo_ral_reportado_seg += (consecutive_idles * 60)
                 consecutive_idles = 0
                 
-        # Si termina el día en ralentí
         if consecutive_idles >= min_ralenti:
             target_idx = idle_start_idx
             if filas_brutas[target_idx]['evento'] == 'Motor encendido' and target_idx + 1 < len(filas_brutas):
@@ -770,7 +811,7 @@ def procesar_reporte_bg(task_id, params):
         bd = Side(style='thin', color="000000")
         border_all = Border(left=bd, right=bd, top=bd, bottom=bd)
 
-        # ================= SECCIÓN GPS (Izquierda) =================
+        # ================= SECCIÓN GPS =================
         gps_title = ws.cell(row=5, column=1, value="INFORMACIÓN GPS")
         gps_title.font = Font(bold=True, color="1F497D")
         gps_title.fill = fill_gps
@@ -796,7 +837,7 @@ def procesar_reporte_bg(task_id, params):
         ws.cell(row=9, column=3, value="Motor Apagado (Sin GPS):").font = Font(bold=True)
         ws.cell(row=9, column=4, value=f"{muerto_hrs} hrs {muerto_mins} mins")
 
-        # ================= SECCIÓN CAN BUS (Derecha) =================
+        # ================= SECCIÓN CAN BUS =================
         can_title = ws.cell(row=5, column=6, value="INFORMACIÓN EXTRAÍDA DE LA UNIDAD (CAN BUS)")
         can_title.font = Font(bold=True, color="4F6228")
         can_title.fill = fill_can
@@ -811,7 +852,7 @@ def procesar_reporte_bg(task_id, params):
             ws.cell(row=8, column=7, value=f"{round(rendimiento_can, 2)} km/L").font = Font(color="008000", bold=True)
             ws.cell(row=9, column=6, value="Horómetro Interno:").font = Font(bold=True)
             ws.cell(row=9, column=7, value=f"{can_horas} hrs {can_mins} mins")
-            ws.cell(row=10, column=6, value="Temp. Max Alcanzada:").font = Font(bold=True)
+            ws.cell(row=10, column=6, value="Temperatura Motor Máxima:").font = Font(bold=True)
             ws.cell(row=10, column=7, value=f"{can_data['max_temp']} °C")
         else:
             ws.cell(row=6, column=6, value="Recorrido Tablero (Odo):").font = Font(bold=True)
@@ -822,7 +863,7 @@ def procesar_reporte_bg(task_id, params):
             ws.cell(row=8, column=7, value="0 km/L (Sin CAN)")
             ws.cell(row=9, column=6, value="Horómetro Interno:").font = Font(bold=True)
             ws.cell(row=9, column=7, value="0 hrs 0 mins (Sin CAN)")
-            ws.cell(row=10, column=6, value="Temp. Max Alcanzada:").font = Font(bold=True)
+            ws.cell(row=10, column=6, value="Temperatura Motor Máxima:").font = Font(bold=True)
             ws.cell(row=10, column=7, value="0 °C (Sin CAN)")
 
         ws.cell(row=3, column=6, value="Fecha Inicial:").font = Font(bold=True)
