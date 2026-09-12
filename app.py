@@ -182,7 +182,7 @@ HTML_INTERFACE = """
             <source src="{{ url_for('static', filename='video_kowi.mp4') }}" type="video/mp4">
         </video>
         <div class="loading-text">Generando Reporte Minuto a Minuto</div>
-        <div class="loading-subtext" id="overlay_status">Conectando con servidores...</div>
+        <div class="loading-subtext" id="overlay_status">⏳ Generando Reporte En Excel. Por favor, espere...</div>
     </div>
 
     <div class="card">
@@ -190,7 +190,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <!-- <p>Módulo GPS + Integración Inteligente CAN Bus (V13)</p> -->
+                <!-- Módulo GPS + Integración Inteligente CAN Bus -->
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -313,7 +313,7 @@ HTML_INTERFACE = """
             
             btn.disabled = true;
             overlay.style.display = 'flex';
-            overlayStatus.innerText = "⏳ Generando reporte en Excel. Por favor, espere...";
+            overlayStatus.innerText = "⏳ Generando Reporte En Excel. Por favor, espere...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -342,8 +342,7 @@ HTML_INTERFACE = """
                     const sData = await sRes.json();
 
                     if (sData.status === 'procesando') {
-                        // Mantenemos el texto estático para no confundir al usuario
-                        overlayStatus.innerText = "⏳ Generando reporte en Excel. Por favor, espere...";
+                        overlayStatus.innerText = "⏳ Generando Reporte En Excel. Por favor, espere...";
                     } else if (sData.status === 'completado') {
                         clearInterval(interval);
                         overlay.style.display = 'none';
@@ -357,7 +356,7 @@ HTML_INTERFACE = """
                         btn.disabled = false;
                         alert("Error en el reporte: " + sData.msg);
                     }
-                }, 3000); 
+                }, 1500); 
 
             } catch (e) {
                 overlay.style.display = 'none';
@@ -424,7 +423,7 @@ def api_geocercas_nube():
 @app.route('/iniciar_reporte')
 def iniciar_reporte():
     task_id = str(uuid.uuid4())
-    TASKS[task_id] = {'status': 'procesando', 'msg': 'Generando reporte en Excel. Por favor, espere...'}
+    TASKS[task_id] = {'status': 'procesando', 'msg': 'Generando Reporte En Excel. Por favor, espere...'}
     params = request.args.to_dict()
     thread = threading.Thread(target=procesar_reporte_bg, args=(task_id, params))
     thread.daemon = True
@@ -538,7 +537,6 @@ def procesar_reporte_bg(task_id, params):
             sensors = res_temp.get('data', {}).get('units', [{}])[0].get('sensors', [])
             max_t = 0
             for sensor in sensors:
-                # Nos aseguramos que sea el sensor número 1 (Temperatura del Motor según configuración)
                 if str(sensor.get('no', '')) == '1':
                     for t in sensor.get('temperatures', []):
                         val = float(t.get('value', 0))
@@ -562,7 +560,7 @@ def procesar_reporte_bg(task_id, params):
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,routes,polyline,speed"}
+            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,routes"}
             req_ign_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc}
             
             try:
@@ -641,7 +639,7 @@ def procesar_reporte_bg(task_id, params):
         minutos_a_descargar = sorted(list(set(minutos_a_descargar)))
 
         puntos_exitosos = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
             resultados = executor.map(fetch_exact_point, minutos_a_descargar)
             for res in resultados:
                 if res: puntos_exitosos.append(res)
@@ -791,14 +789,15 @@ def procesar_reporte_bg(task_id, params):
         ws = wb.active
         ws.title = "Histórico Ejecutivo"
 
-        # Inserción de Logo Kowi
+        # Inserción de Logo Kowi con control de errores
         try:
             logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'logo_kowi.png')
             if os.path.exists(logo_path):
                 img = ExcelImage(logo_path)
-                img.width = 160
-                img.height = 60
+                img.width = 140
+                img.height = 55
                 ws.add_image(img, 'A1')
+                ws.row_dimensions[1].height = 45 
         except Exception:
             pass
 
@@ -918,11 +917,10 @@ def procesar_reporte_bg(task_id, params):
         with os.fdopen(fd, 'wb') as f:
             wb.save(f)
             
-        TASKS[task_id]['file'] = path
         TASKS[task_id]['status'] = 'completado'
+        TASKS[task_id]['file'] = path
         
     except Exception as e:
-        import traceback
         TASKS[task_id]['status'] = 'error'
         TASKS[task_id]['msg'] = f"Falló el procesamiento interno: {str(e)}"
 
