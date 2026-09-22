@@ -9,7 +9,7 @@ import json
 import threading
 import uuid
 import tempfile
-import bisect
+import concurrent.futures
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
@@ -142,7 +142,7 @@ HTML_INTERFACE = """
             <source src="{{ url_for('static', filename='video_kowi.mp4') }}" type="video/mp4">
         </video>
         <div class="loading-text">Generando Reporte Minuto a Minuto</div>
-        <div class="loading-subtext" id="overlay_status">⏳ Generando Reporte En Excel. Por favor, espere...</div>
+        <div class="loading-subtext" id="overlay_status">⏳ Conectando con los servidores y descargando coordenadas...</div>
     </div>
 
     <div class="card">
@@ -209,7 +209,7 @@ HTML_INTERFACE = """
                 </div>
 
                 <div class="form-group">
-                    <label>Geocercas:</label>
+                    <label>Geocercas (Sincronizadas desde Mapon):</label>
                     <select id="geofence_select" multiple="multiple" style="width: 100%;">
                         <option value="">⏳ Descargando API...</option>
                     </select>
@@ -272,7 +272,7 @@ HTML_INTERFACE = """
             
             btn.disabled = true;
             overlay.style.display = 'flex';
-            overlayStatus.innerText = "⏳ Generando Reporte En Excel. Por favor, espere...";
+            overlayStatus.innerText = "⏳ Descargando coordenadas reales. Esto puede tomar unos segundos...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -301,7 +301,7 @@ HTML_INTERFACE = """
                     const sData = await sRes.json();
 
                     if (sData.status === 'procesando') {
-                        overlayStatus.innerText = "⏳ Generando Reporte En Excel. Por favor, espere...";
+                        overlayStatus.innerText = "⏳ " + (sData.msg || "Generando Reporte En Excel...");
                     } else if (sData.status === 'completado') {
                         clearInterval(interval);
                         overlay.style.display = 'none';
@@ -382,7 +382,7 @@ def api_geocercas_nube():
 @app.route('/iniciar_reporte')
 def iniciar_reporte():
     task_id = str(uuid.uuid4())
-    TASKS[task_id] = {'status': 'procesando', 'msg': 'Generando Reporte En Excel. Por favor, espere...'}
+    TASKS[task_id] = {'status': 'procesando', 'msg': 'Descargando datos...'}
     params = request.args.to_dict()
     thread = threading.Thread(target=procesar_reporte_bg, args=(task_id, params))
     thread.daemon = True
@@ -441,6 +441,21 @@ def procesar_reporte_bg(task_id, params):
                 try: return datetime.strptime(str(iso_str).replace('Z', '').split('.')[0], '%Y-%m-%dT%H:%M:%S') + timedelta(hours=TIMEZONE_OFFSET)
                 except Exception: return None
 
+        # ENDPOINT DE POSICIÓN EXACTA
+        def fetch_exact_point(dt):
+            utc_str = (dt - timedelta(hours=TIMEZONE_OFFSET)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            url = f"{BASE_URL}/unit_data/history_point.json?key={API_KEY}&unit_id={unit_id}&datetime={utc_str}&include[]=position"
+            try:
+                r = requests.get(url, timeout=6)
+                data = r.json()
+                units = data.get('data', {}).get('units', [])
+                if units:
+                    pos = units[0].get('position', {}).get('value', {})
+                    if pos and 'lat' in pos and 'lng' in pos:
+                        return {'dt': dt, 'lat': float(pos['lat']), 'lng': float(pos['lng'])}
+            except Exception: pass
+            return None
+
         dt_inicio_req = datetime.strptime(f"{f_in} {hora_inicio}", "%Y-%m-%d %H:%M:%S")
         dt_fin_req = datetime.strptime(f"{f_fin} {hora_fin}", "%Y-%m-%d %H:%M:%S")
         
@@ -490,7 +505,7 @@ def procesar_reporte_bg(task_id, params):
         except Exception: pass
 
         # ==============================================================
-        # 2. RUTAS, IGNICIONES, PARADAS Y EXTRACTOR "DECODED_ROUTE" NATIVO
+        # 2. RUTAS, IGNICIONES Y PARADAS
         # ==============================================================
         url_route = f"{BASE_URL}/route/list.json"
         url_ign = f"{BASE_URL}/unit_data/ignitions.json"
@@ -498,10 +513,9 @@ def procesar_reporte_bg(task_id, params):
         tramos_reales = []
         eventos_ignicion = []
         paradas_unicas = set() 
-        puntos_maestros_reales = []
 
         current_start = dt_inicio_req
-        chunk_days = 15 # Descarga masiva para evitar bloqueos
+        chunk_days = 15 # Hacemos descargas grandes para evitar bloqueos
         
         while current_start < dt_fin_req:
             current_end = current_start + timedelta(days=chunk_days)
@@ -510,8 +524,8 @@ def procesar_reporte_bg(task_id, params):
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            # EL SECRETO MAESTRO DE MAPON: include=decoded_route
-            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,routes,decoded_route"}
+            # Solo pedimos metrics y routes
+            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,routes"}
             req_ign_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc}
             
             try:
@@ -540,7 +554,6 @@ def procesar_reporte_bg(task_id, params):
                             dt_ini_str = obj.get('start', {}).get('time', '')
                             if dt_ini_str:
                                 paradas_unicas.add(dt_ini_str)
-                                
                         for k, v in obj.items():
                             if isinstance(v, (dict, list)): extraer_tramos(v)
                     elif isinstance(obj, list):
@@ -554,6 +567,8 @@ def procesar_reporte_bg(task_id, params):
                     if not dt_ini or not dt_fin: continue
                         
                     dist_km = float(item.get('distance', 0)) / 1000.0
+                    
+                    # Obtenemos max_speed real del viaje
                     max_speed = float(item.get('max_speed', 110))
                     if max_speed <= 0: max_speed = 110
 
@@ -562,25 +577,12 @@ def procesar_reporte_bg(task_id, params):
                         'max_speed': max_speed
                     })
 
-                    # EXTRACCIÓN MASIVA NATIVA DIRECTO DE MAPON (Sin decodificadores)
-                    puntos_nativos = item.get('decoded_route', {}).get('points', [])
-                    for pt in puntos_nativos:
-                        pt_time = parse_iso(pt.get('gmt'))
-                        if pt_time:
-                            puntos_maestros_reales.append({
-                                'dt': pt_time,
-                                'lat': float(pt.get('lat', 0)),
-                                'lng': float(pt.get('lng', 0)),
-                                'speed': float(pt.get('speed', 0))
-                            })
-
             except Exception: pass 
             current_start = current_end
 
         eventos_ignicion.sort(key=lambda x: x['dt'])
-        puntos_maestros_reales.sort(key=lambda x: x['dt'])
-        maestro_dts = [p['dt'] for p in puntos_maestros_reales]
-
+        
+        # Calcular Total Paradas Oficiales
         total_paradas = 0
         for p_str in paradas_unicas:
             p_dt = parse_iso(p_str)
@@ -588,19 +590,8 @@ def procesar_reporte_bg(task_id, params):
                 total_paradas += 1
 
         # ==============================================================
-        # 3. CONSTRUCCIÓN DE CUADRÍCULA ESTRICTA MINUTO A MINUTO (SEGURO)
+        # 3. CUADRÍCULA COMPRIMIDA (SALTA 10 MINUTOS SI ESTÁ APAGADO)
         # ==============================================================
-        cuadricula_maestra = []
-        c_time = dt_inicio_req
-        while c_time <= dt_fin_req:
-            cuadricula_maestra.append(c_time)
-            c_time += timedelta(minutes=1)
-
-        for ev in eventos_ignicion:
-            cuadricula_maestra.append(ev['dt'])
-            
-        cuadricula_maestra = sorted(list(set(cuadricula_maestra)))
-
         def is_ignition_on(dt):
             estado = False
             for ev in eventos_ignicion:
@@ -612,9 +603,43 @@ def procesar_reporte_bg(task_id, params):
                 if t['dt_ini'] <= dt <= t['dt_fin']: return True, t
             return False, None
 
+        cuadricula_base = []
+        c_time = dt_inicio_req
+        while c_time <= dt_fin_req:
+            cuadricula_base.append(c_time)
+            c_time += timedelta(minutes=1)
+
+        for ev in eventos_ignicion:
+            cuadricula_base.append(ev['dt'])
+            
+        cuadricula_base = sorted(list(set(cuadricula_base)))
+
+        cuadricula_maestra = []
+        for dt in cuadricula_base:
+            if is_ignition_on(dt):
+                cuadricula_maestra.append(dt)
+            else:
+                is_evento = any(e['dt'] == dt for e in eventos_ignicion)
+                # Conservamos el minuto solo si hay un evento de ignición, o si el minuto es divisible entre 10
+                if is_evento or dt == dt_inicio_req or dt == dt_fin_req or dt.minute % 10 == 0:
+                    cuadricula_maestra.append(dt)
+
+        cuadricula_maestra = sorted(list(set(cuadricula_maestra)))
+
         # ==============================================================
-        # 4. LLENADO EN MEMORIA (1 SEGUNDO DE PROCESAMIENTO)
+        # 4. DESCARGA CONCURRENTE EXCLUSIVA PARA LA CUADRÍCULA COMPRIMIDA
         # ==============================================================
+        TASKS[task_id]['msg'] = f"Descargando {len(cuadricula_maestra)} coordenadas exactas..."
+        
+        puntos_exitosos = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
+            resultados = executor.map(fetch_exact_point, cuadricula_maestra)
+            for res in resultados:
+                if res: puntos_exitosos.append(res)
+                
+        puntos_exitosos.sort(key=lambda x: x['dt'])
+        puntos_dict = {p['dt']: p for p in puntos_exitosos}
+
         filas_brutas = []
         tiempo_mov_seg = 0
         tiempo_exceso_geo_seg = 0
@@ -622,52 +647,46 @@ def procesar_reporte_bg(task_id, params):
         distancia_total_gps_km = sum([t['distancia'] for t in tramos_reales if t['tipo'] == 'route'])
         
         last_lat, last_lng = 27.19, -109.55
-        if puntos_maestros_reales:
-            last_lat, last_lng = puntos_maestros_reales[0]['lat'], puntos_maestros_reales[0]['lng']
-            
+        if puntos_exitosos: last_lat, last_lng = puntos_exitosos[0]['lat'], puntos_exitosos[0]['lng']
         last_dt_punto = None
+        
         last_geo_lat, last_geo_lng = None, None
         last_geo_name = "Fuera de geocerca"
 
+        # PASO A: Llenado de Filas y Gobernador Matemático
         for i, dt in enumerate(cuadricula_maestra):
             ign_on = is_ignition_on(dt)
             en_ruta, tramo_actual = is_in_route(dt)
             
-            curr_lat, curr_lng = last_lat, last_lng
-            current_speed = 0.0
-            seg_transcurridos = 60 if i > 0 else 0
-            punto_encontrado = False
+            punto = puntos_dict.get(dt)
+            if punto:
+                curr_lat, curr_lng = punto['lat'], punto['lng']
+            else:
+                curr_lat, curr_lng = last_lat, last_lng
 
-            if en_ruta and ign_on and puntos_maestros_reales:
-                idx = bisect.bisect_left(maestro_dts, dt)
-                closest_p = None
-                min_diff = float('inf')
-                
-                for check_idx in [idx-1, idx, idx+1]:
-                    if 0 <= check_idx < len(puntos_maestros_reales):
-                        diff = abs((puntos_maestros_reales[check_idx]['dt'] - dt).total_seconds())
-                        if diff < min_diff:
-                            min_diff = diff
-                            closest_p = puntos_maestros_reales[check_idx]
-                
-                if closest_p and min_diff <= 120:
-                    curr_lat = closest_p['lat']
-                    curr_lng = closest_p['lng']
-                    current_speed = float(closest_p['speed'])
-                    punto_encontrado = True
-                elif last_dt_punto is not None:
+            current_speed = 0.0
+            
+            # CÁLCULO DE TIEMPO REAL: Los segundos saltan de 60 en 60, o de 600 en 600 si estaba apagado.
+            if i > 0:
+                seg_transcurridos = (dt - cuadricula_maestra[i-1]).total_seconds()
+            else:
+                seg_transcurridos = 0
+
+            # FILTRO ANTI-PICOS CON GOBERNADOR
+            if en_ruta and punto and ign_on:
+                if last_dt_punto is not None:
                     dist_mts = calcular_distancia(last_lat, last_lng, curr_lat, curr_lng)
-                    seg_diff = max((dt - last_dt_punto).total_seconds(), 1)
-                    raw_speed = (dist_mts / seg_diff) * 3.6
+                    seg_diff_pts = max((dt - last_dt_punto).total_seconds(), 1)
+                    raw_speed = (dist_mts / seg_diff_pts) * 3.6
                     max_oficial = float(tramo_actual.get('max_speed', 110)) if tramo_actual else 110
-                    current_speed = min(raw_speed, max_oficial)
+                    current_speed = min(raw_speed, max_oficial) # NUNCA PASA DE LA PLATAFORMA
 
             if current_speed < 3 or not ign_on: 
                 current_speed = 0.0
 
             current_speed = round(current_speed, 1)
 
-            if punto_encontrado:
+            if punto:
                 last_lat, last_lng = curr_lat, curr_lng
                 last_dt_punto = dt
 
@@ -702,7 +721,8 @@ def procesar_reporte_bg(task_id, params):
                     if current_speed > limite_aplicable:
                         evento = f"Exceso en {geo_name}"
                         detalle = f"Vel: {current_speed} (Límite: {limite_aplicable})"
-                        tiempo_exceso_geo_seg += 60
+                        # El exceso se asume de 1 minuto continuo en movimiento
+                        tiempo_exceso_geo_seg += min(60, seg_transcurridos) 
                 elif current_speed > limite_velocidad_gral:
                     evento = "Exceso de velocidad"
                     detalle = f"Vel: {current_speed} (Límite: {limite_velocidad_gral})"
@@ -716,6 +736,7 @@ def procesar_reporte_bg(task_id, params):
         # ==============================================================
         # 5. MOTOR NATIVO DE RALENTÍ MATEMÁTICO
         # ==============================================================
+        TASKS[task_id]['msg'] = "Pintando el reporte en Excel..."
         tiempo_ral_reportado_seg = 0
         consecutive_idles = 0
         idle_start_idx = -1
@@ -777,7 +798,7 @@ def procesar_reporte_bg(task_id, params):
         ws = wb.active
         ws.title = "Histórico Ejecutivo"
 
-        # Inserción de Logo Kowi
+        # Inserción de Logo Kowi con control de errores
         try:
             logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'logo_kowi.png')
             if os.path.exists(logo_path):
