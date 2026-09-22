@@ -9,7 +9,6 @@ import json
 import threading
 import uuid
 import tempfile
-import concurrent.futures
 import bisect
 from datetime import datetime, timedelta
 
@@ -182,7 +181,7 @@ HTML_INTERFACE = """
             <source src="{{ url_for('static', filename='video_kowi.mp4') }}" type="video/mp4">
         </video>
         <div class="loading-text">Generando Reporte Minuto a Minuto</div>
-        <div class="loading-subtext" id="overlay_status">Conectando con servidores...</div>
+        <div class="loading-subtext" id="overlay_status">⏳ Generando Reporte En Excel. Por favor, espere...</div>
     </div>
 
     <div class="card">
@@ -190,7 +189,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <!-- <p>Módulo de Sincronización Estricta y CAN Bus</p> -->
+                <!-- Reporte Ultra Rápido (Memoria RAM) con Paradas -->
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -482,20 +481,6 @@ def procesar_reporte_bg(task_id, params):
                 try: return datetime.strptime(str(iso_str).replace('Z', '').split('.')[0], '%Y-%m-%dT%H:%M:%S') + timedelta(hours=TIMEZONE_OFFSET)
                 except Exception: return None
 
-        def fetch_exact_point(dt):
-            utc_str = (dt - timedelta(hours=TIMEZONE_OFFSET)).strftime('%Y-%m-%dT%H:%M:%SZ')
-            url = f"{BASE_URL}/unit_data/history_point.json?key={API_KEY}&unit_id={unit_id}&datetime={utc_str}&include[]=position"
-            try:
-                r = requests.get(url, timeout=6)
-                data = r.json()
-                units = data.get('data', {}).get('units', [])
-                if units:
-                    pos = units[0].get('position', {}).get('value', {})
-                    if pos and 'lat' in pos and 'lng' in pos:
-                        return {'dt': dt, 'lat': float(pos['lat']), 'lng': float(pos['lng'])}
-            except Exception: pass
-            return None
-
         dt_inicio_req = datetime.strptime(f"{f_in} {hora_inicio}", "%Y-%m-%d %H:%M:%S")
         dt_fin_req = datetime.strptime(f"{f_fin} {hora_fin}", "%Y-%m-%d %H:%M:%S")
         
@@ -537,7 +522,7 @@ def procesar_reporte_bg(task_id, params):
             sensors = res_temp.get('data', {}).get('units', [{}])[0].get('sensors', [])
             max_t = 0
             for sensor in sensors:
-                if str(sensor.get('no', '')) == '1':
+                if str(sensor.get('no', '')) == '1': 
                     for t in sensor.get('temperatures', []):
                         val = float(t.get('value', 0))
                         if val > max_t: max_t = val
@@ -545,7 +530,7 @@ def procesar_reporte_bg(task_id, params):
         except Exception: pass
 
         # ==============================================================
-        # 2. RUTAS, IGNICIONES Y PUNTOS SATELITALES
+        # 2. RUTAS, IGNICIONES, PARADAS Y DECODIFICACIÓN DE VELOCIDAD
         # ==============================================================
         url_route = f"{BASE_URL}/route/list.json"
         url_ign = f"{BASE_URL}/unit_data/ignitions.json"
@@ -553,7 +538,7 @@ def procesar_reporte_bg(task_id, params):
         tramos_reales = []
         eventos_ignicion = []
         puntos_maestros_reales = []
-        paradas_unicas = set() # NUEVO: Para guardar paradas del endpoint
+        paradas_unicas = set() # AQUÍ SE GUARDAN LAS PARADAS OFICIALES
 
         current_start = dt_inicio_req
         chunk_days = 2 
@@ -590,7 +575,7 @@ def procesar_reporte_bg(task_id, params):
                         tipo = str(obj.get('type', '')).lower()
                         if tipo == 'route': 
                             rutas_encontradas.append(obj)
-                        elif tipo == 'stop': # NUEVO: Guardamos el "start time" de cada parada oficial de Mapon
+                        elif tipo == 'stop': # RECOLECTOR DE PARADAS
                             dt_ini_str = obj.get('start', {}).get('time', '')
                             if dt_ini_str:
                                 paradas_unicas.add(dt_ini_str)
@@ -608,8 +593,6 @@ def procesar_reporte_bg(task_id, params):
                     if not dt_ini or not dt_fin: continue
                         
                     dist_km = float(item.get('distance', 0)) / 1000.0
-                    
-                    # Corrección del límite de velocidad en la raíz del objeto
                     max_speed = float(item.get('max_speed', 110))
                     if max_speed <= 0: max_speed = 110
 
@@ -617,8 +600,7 @@ def procesar_reporte_bg(task_id, params):
                         'dt_ini': dt_ini, 'dt_fin': dt_fin, 'distancia': dist_km, 'tipo': 'route',
                         'max_speed': max_speed
                     })
-                    
-                    # DECODIFICACIÓN DE VELOCIDAD SATELITAL EXACTA (Recuperada)
+
                     poly_str = item.get('polyline', '')
                     speed_str = item.get('speed', '')
                     
@@ -642,8 +624,8 @@ def procesar_reporte_bg(task_id, params):
         eventos_ignicion.sort(key=lambda x: x['dt'])
         puntos_maestros_reales.sort(key=lambda x: x['dt'])
         maestro_dts = [p['dt'] for p in puntos_maestros_reales]
-        
-        # Calcular Total Paradas Oficiales
+
+        # CALCULADORA DE PARADAS
         total_paradas = 0
         for p_str in paradas_unicas:
             p_dt = parse_iso(p_str)
@@ -675,19 +657,9 @@ def procesar_reporte_bg(task_id, params):
                 if t['dt_ini'] <= dt <= t['dt_fin']: return True, t
             return False, None
 
-        minutos_a_descargar = [dt for dt in cuadricula_maestra if is_ignition_on(dt) or is_in_route(dt)[0]]
-        for ev in eventos_ignicion: minutos_a_descargar.append(ev['dt'])
-        minutos_a_descargar = sorted(list(set(minutos_a_descargar)))
-
-        puntos_exitosos = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
-            resultados = executor.map(fetch_exact_point, minutos_a_descargar)
-            for res in resultados:
-                if res: puntos_exitosos.append(res)
-                
-        puntos_exitosos.sort(key=lambda x: x['dt'])
-        puntos_dict = {p['dt']: p for p in puntos_exitosos}
-
+        # ==============================================================
+        # MEGA-OPTIMIZACIÓN: LECTURA DIRECTA DE MEMORIA (Sin descargas)
+        # ==============================================================
         filas_brutas = []
         tiempo_mov_seg = 0
         tiempo_exceso_geo_seg = 0
@@ -695,57 +667,44 @@ def procesar_reporte_bg(task_id, params):
         distancia_total_gps_km = sum([t['distancia'] for t in tramos_reales if t['tipo'] == 'route'])
         
         last_lat, last_lng = 27.19, -109.55
-        if puntos_exitosos: last_lat, last_lng = puntos_exitosos[0]['lat'], puntos_exitosos[0]['lng']
+        if puntos_maestros_reales:
+            last_lat, last_lng = puntos_maestros_reales[0]['lat'], puntos_maestros_reales[0]['lng']
         last_dt_punto = None
 
-        # PASO A: Llenado de Filas
         for i, dt in enumerate(cuadricula_maestra):
             ign_on = is_ignition_on(dt)
             en_ruta, tramo_actual = is_in_route(dt)
             
-            punto = puntos_dict.get(dt)
-            if punto:
-                curr_lat, curr_lng = punto['lat'], punto['lng']
-            else:
-                curr_lat, curr_lng = last_lat, last_lng
-
+            curr_lat, curr_lng = last_lat, last_lng
             current_speed = 0.0
             seg_transcurridos = 60 if i > 0 else 0
+            punto_encontrado = False
 
-            # FILTRO ANTI-PICOS CON LECTURA DIRECTA DE LA COMPUTADORA DEL CAMIÓN
-            if en_ruta and punto and ign_on:
-                if len(puntos_maestros_reales) > 0:
-                    idx = bisect.bisect_left(maestro_dts, dt)
-                    closest_p = None
-                    min_diff = float('inf')
-                    for check_idx in [idx-1, idx, idx+1]:
-                        if 0 <= check_idx < len(puntos_maestros_reales):
-                            diff = abs((puntos_maestros_reales[check_idx]['dt'] - dt).total_seconds())
-                            if diff < min_diff:
-                                min_diff = diff
-                                closest_p = puntos_maestros_reales[check_idx]
-                    
-                    if closest_p and min_diff <= 90:
+            # EXTRACCIÓN DE VELOCIDAD SATELITAL DESDE MEMORIA (Ultra rápido)
+            if len(puntos_maestros_reales) > 0:
+                idx = bisect.bisect_left(maestro_dts, dt)
+                closest_p = None
+                min_diff = float('inf')
+                for check_idx in [idx-1, idx, idx+1]:
+                    if 0 <= check_idx < len(puntos_maestros_reales):
+                        diff = abs((puntos_maestros_reales[check_idx]['dt'] - dt).total_seconds())
+                        if diff < min_diff:
+                            min_diff = diff
+                            closest_p = puntos_maestros_reales[check_idx]
+                
+                if closest_p and min_diff <= 90:
+                    curr_lat = closest_p['lat']
+                    curr_lng = closest_p['lng']
+                    if en_ruta and ign_on:
                         current_speed = float(closest_p['speed'])
-                    elif last_dt_punto is not None:
-                        dist_mts = calcular_distancia(last_lat, last_lng, curr_lat, curr_lng)
-                        seg_diff = max((dt - last_dt_punto).total_seconds(), 1)
-                        raw_speed = (dist_mts / seg_diff) * 3.6
-                        max_oficial = float(tramo_actual.get('max_speed', 110)) if tramo_actual else 110
-                        current_speed = min(raw_speed, max_oficial)
-                elif last_dt_punto is not None:
-                    dist_mts = calcular_distancia(last_lat, last_lng, curr_lat, curr_lng)
-                    seg_diff = max((dt - last_dt_punto).total_seconds(), 1)
-                    raw_speed = (dist_mts / seg_diff) * 3.6
-                    max_oficial = float(tramo_actual.get('max_speed', 110)) if tramo_actual else 110
-                    current_speed = min(raw_speed, max_oficial)
+                    punto_encontrado = True
 
             if current_speed < 3 or not ign_on: 
                 current_speed = 0.0
 
             current_speed = round(current_speed, 1)
 
-            if punto:
+            if punto_encontrado:
                 last_lat, last_lng = curr_lat, curr_lng
                 last_dt_punto = dt
 
@@ -849,7 +808,7 @@ def procesar_reporte_bg(task_id, params):
         ws = wb.active
         ws.title = "Histórico Ejecutivo"
 
-        # Inserción de Logo Kowi con control de errores
+        # Inserción de Logo Kowi
         try:
             logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'logo_kowi.png')
             if os.path.exists(logo_path):
