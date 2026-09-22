@@ -9,7 +9,6 @@ import json
 import threading
 import uuid
 import tempfile
-import concurrent.futures
 import bisect
 from datetime import datetime, timedelta
 
@@ -55,19 +54,6 @@ def decode_polyline_2d(encoded):
         points.append({'lat': lat / 100000.0, 'lng': lng / 100000.0})
     return points
 
-def decode_mapon_speed_string(encoded_str):
-    chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.'
-    points_count = len(encoded_str) // 4
-    data = []
-    for i in range(points_count):
-        pos = i * 4
-        try:
-            offset = chars.index(encoded_str[pos]) * 64 + chars.index(encoded_str[pos + 1])
-            speed = chars.index(encoded_str[pos + 2]) * 64 + chars.index(encoded_str[pos + 3])
-            data.append((offset, speed))
-        except Exception: pass
-    return data
-
 # ==========================================
 # UTILIDADES Y GEOCERCAS
 # ==========================================
@@ -80,48 +66,35 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
 
-def cargar_geocercas_excel():
-    geocercas = []
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    for archivo in ['kowi_principales.xlsx', 'kowi principales.xlsx']:
-        ruta = os.path.join(base_dir, archivo)
-        if os.path.exists(ruta):
-            try:
-                wb = openpyxl.load_workbook(ruta, data_only=True)
-                ws = wb.active
-                headers = [str(cell.value).lower().strip() if cell.value else '' for cell in ws[1]]
-                idx_nom = next((i for i, h in enumerate(headers) if 'nombre' in h or 'zona' in h), -1)
-                idx_lat = next((i for i, h in enumerate(headers) if 'lat' in h), -1)
-                idx_lon = next((i for i, h in enumerate(headers) if 'lon' in h or 'lng' in h), -1)
-                
-                if idx_nom != -1 and idx_lat != -1 and idx_lon != -1:
-                    for i, row in enumerate(ws.iter_rows(min_row=2, values_only=True)):
-                        if row[idx_nom] and row[idx_lat] and row[idx_lon]:
-                            geocercas.append({'id': f"LOCAL_{i}", 'name': str(row[idx_nom]).strip(), 
-                                            'lat': float(str(row[idx_lat]).strip()), 'lng': float(str(row[idx_lon]).strip()), 'radius': 250})
-                return geocercas
-            except Exception: pass
-    return []
-
 def cargar_geocercas_api():
     geocercas = []
     try:
-        res = requests.get(f"{BASE_URL}/object/list.json", params={"key": API_KEY, "limit": 500}, timeout=15)
-        for geo in res.json().get('data', {}).get('items', []):
+        # El endpoint correcto proporcionado
+        res = requests.get(f"{BASE_URL}/object/list.json", params={"key": API_KEY, "limit": 1000}, timeout=15)
+        # CORRECCIÓN VITAL: Mapon devuelve 'objects', no 'items'
+        objetos = res.json().get('data', {}).get('objects', [])
+        
+        for geo in objetos:
             nombre = geo.get('name', f"Geocerca_{geo.get('id')}")
             wkt = str(geo.get('wkt', ''))
+            
+            # Mapon por defecto (sin wkt_lon_first) devuelve LAT LON
             if 'POINT' in wkt:
                 try:
-                    lng, lat = wkt.replace('POINT(', '').replace('POINT (', '').replace(')', '').strip().split(' ')
-                    geocercas.append({'id': str(geo.get('id')), 'name': nombre, 'lat': float(lat), 'lng': float(lng), 'radius': 250})
+                    lat_str, lng_str = wkt.replace('POINT(', '').replace('POINT (', '').replace(')', '').strip().split(' ')
+                    geocercas.append({'id': str(geo.get('id')), 'name': nombre, 'lat': float(lat_str), 'lng': float(lng_str), 'radius': 250})
                 except Exception: pass
             elif 'POLYGON' in wkt:
                 try:
-                    lng, lat = wkt.split('((')[1].split(',')[0].strip().split(' ')
-                    geocercas.append({'id': str(geo.get('id')), 'name': nombre, 'lat': float(lat), 'lng': float(lng), 'radius': 800})
+                    # Tomamos el primer punto del polígono como centro aproximado
+                    lat_str, lng_str = wkt.split('((')[1].split(',')[0].strip().split(' ')
+                    geocercas.append({'id': str(geo.get('id')), 'name': nombre, 'lat': float(lat_str), 'lng': float(lng_str), 'radius': 800})
                 except Exception: pass
-    except Exception: pass
-    return geocercas if geocercas else cargar_geocercas_excel()
+    except Exception as e: 
+        print(f"Error cargando geocercas API: {e}")
+        pass
+    
+    return geocercas
 
 # ==========================================
 # INTERFAZ WEB
@@ -182,7 +155,7 @@ HTML_INTERFACE = """
             <source src="{{ url_for('static', filename='video_kowi.mp4') }}" type="video/mp4">
         </video>
         <div class="loading-text">Generando Reporte Minuto a Minuto</div>
-        <div class="loading-subtext" id="overlay_status">⏳ Generando reporte en Excel. Por favor, espere...</div>
+        <div class="loading-subtext" id="overlay_status">⏳ Generando Reporte En Excel. Por favor, espere...</div>
     </div>
 
     <div class="card">
@@ -190,7 +163,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <!-- Reporte Estable con Paradas -->
+                <!-- Reporte Híbrido Rápido con Geocercas Nativas -->
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -313,7 +286,7 @@ HTML_INTERFACE = """
             
             btn.disabled = true;
             overlay.style.display = 'flex';
-            overlayStatus.innerText = "⏳ Generando reporte en Excel. Por favor, espere...";
+            overlayStatus.innerText = "⏳ Generando Reporte En Excel. Por favor, espere...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -342,7 +315,7 @@ HTML_INTERFACE = """
                     const sData = await sRes.json();
 
                     if (sData.status === 'procesando') {
-                        overlayStatus.innerText = "⏳ Generando reporte en Excel. Por favor, espere...";
+                        overlayStatus.innerText = "⏳ Generando Reporte En Excel. Por favor, espere...";
                     } else if (sData.status === 'completado') {
                         clearInterval(interval);
                         overlay.style.display = 'none';
@@ -356,7 +329,7 @@ HTML_INTERFACE = """
                         btn.disabled = false;
                         alert("Error en el reporte: " + sData.msg);
                     }
-                }, 3000); 
+                }, 1500); 
 
             } catch (e) {
                 overlay.style.display = 'none';
@@ -423,7 +396,7 @@ def api_geocercas_nube():
 @app.route('/iniciar_reporte')
 def iniciar_reporte():
     task_id = str(uuid.uuid4())
-    TASKS[task_id] = {'status': 'procesando', 'msg': 'Generando reporte en Excel. Por favor, espere...'}
+    TASKS[task_id] = {'status': 'procesando', 'msg': 'Generando Reporte En Excel. Por favor, espere...'}
     params = request.args.to_dict()
     thread = threading.Thread(target=procesar_reporte_bg, args=(task_id, params))
     thread.daemon = True
@@ -482,20 +455,6 @@ def procesar_reporte_bg(task_id, params):
                 try: return datetime.strptime(str(iso_str).replace('Z', '').split('.')[0], '%Y-%m-%dT%H:%M:%S') + timedelta(hours=TIMEZONE_OFFSET)
                 except Exception: return None
 
-        def fetch_exact_point(dt):
-            utc_str = (dt - timedelta(hours=TIMEZONE_OFFSET)).strftime('%Y-%m-%dT%H:%M:%SZ')
-            url = f"{BASE_URL}/unit_data/history_point.json?key={API_KEY}&unit_id={unit_id}&datetime={utc_str}&include[]=position"
-            try:
-                r = requests.get(url, timeout=6)
-                data = r.json()
-                units = data.get('data', {}).get('units', [])
-                if units:
-                    pos = units[0].get('position', {}).get('value', {})
-                    if pos and 'lat' in pos and 'lng' in pos:
-                        return {'dt': dt, 'lat': float(pos['lat']), 'lng': float(pos['lng'])}
-            except Exception: pass
-            return None
-
         dt_inicio_req = datetime.strptime(f"{f_in} {hora_inicio}", "%Y-%m-%d %H:%M:%S")
         dt_fin_req = datetime.strptime(f"{f_fin} {hora_fin}", "%Y-%m-%d %H:%M:%S")
         
@@ -537,7 +496,7 @@ def procesar_reporte_bg(task_id, params):
             sensors = res_temp.get('data', {}).get('units', [{}])[0].get('sensors', [])
             max_t = 0
             for sensor in sensors:
-                if str(sensor.get('no', '')) == '1':
+                if str(sensor.get('no', '')) == '1': 
                     for t in sensor.get('temperatures', []):
                         val = float(t.get('value', 0))
                         if val > max_t: max_t = val
@@ -553,6 +512,7 @@ def procesar_reporte_bg(task_id, params):
         tramos_reales = []
         eventos_ignicion = []
         paradas_unicas = set() 
+        puntos_maestros_reales = []
 
         current_start = dt_inicio_req
         chunk_days = 2 
@@ -564,7 +524,7 @@ def procesar_reporte_bg(task_id, params):
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,routes,polyline,speed"}
+            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,routes,polyline"}
             req_ign_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc}
             
             try:
@@ -593,6 +553,7 @@ def procesar_reporte_bg(task_id, params):
                             dt_ini_str = obj.get('start', {}).get('time', '')
                             if dt_ini_str:
                                 paradas_unicas.add(dt_ini_str)
+                                
                         for k, v in obj.items():
                             if isinstance(v, (dict, list)): extraer_tramos(v)
                     elif isinstance(obj, list):
@@ -607,7 +568,7 @@ def procesar_reporte_bg(task_id, params):
                         
                     dist_km = float(item.get('distance', 0)) / 1000.0
                     
-                    # EL PARCHE MAESTRO: Obtener max_speed directo de la raíz
+                    # Corrección del Gobernador Oficial de Mapon (ahora en la raíz)
                     max_speed = float(item.get('max_speed', 110))
                     if max_speed <= 0: max_speed = 110
 
@@ -615,12 +576,28 @@ def procesar_reporte_bg(task_id, params):
                         'dt_ini': dt_ini, 'dt_fin': dt_fin, 'distancia': dist_km, 'tipo': 'route',
                         'max_speed': max_speed
                     })
+
+                    # MEGA-OPTIMIZACIÓN: Interpolación en RAM
+                    poly_str = item.get('polyline', '')
+                    if poly_str:
+                        coords = decode_polyline_2d(poly_str)
+                        if len(coords) == 1:
+                            puntos_maestros_reales.append({'dt': dt_ini, 'lat': coords[0]['lat'], 'lng': coords[0]['lng']})
+                        elif len(coords) > 1:
+                            dur_sec = (dt_fin - dt_ini).total_seconds()
+                            step = dur_sec / max(1, len(coords) - 1)
+                            for idx, c in enumerate(coords):
+                                pt_time = dt_ini + timedelta(seconds=idx*step)
+                                puntos_maestros_reales.append({'dt': pt_time, 'lat': c['lat'], 'lng': c['lng']})
+
             except Exception: pass 
             current_start = current_end
 
         eventos_ignicion.sort(key=lambda x: x['dt'])
+        puntos_maestros_reales.sort(key=lambda x: x['dt'])
+        maestro_dts = [p['dt'] for p in puntos_maestros_reales]
         
-        # CÁLCULO DE PARADAS (Agregado sin peticiones extra)
+        # Calcular Total Paradas Oficiales
         total_paradas = 0
         for p_str in paradas_unicas:
             p_dt = parse_iso(p_str)
@@ -652,20 +629,9 @@ def procesar_reporte_bg(task_id, params):
                 if t['dt_ini'] <= dt <= t['dt_fin']: return True, t
             return False, None
 
-        minutos_a_descargar = [dt for dt in cuadricula_maestra if is_ignition_on(dt) or is_in_route(dt)[0]]
-        for ev in eventos_ignicion: minutos_a_descargar.append(ev['dt'])
-        minutos_a_descargar = sorted(list(set(minutos_a_descargar)))
-
-        # ACELERADOR SEGURO: 25 Hilos de descarga concurrente
-        puntos_exitosos = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
-            resultados = executor.map(fetch_exact_point, minutos_a_descargar)
-            for res in resultados:
-                if res: puntos_exitosos.append(res)
-                
-        puntos_exitosos.sort(key=lambda x: x['dt'])
-        puntos_dict = {p['dt']: p for p in puntos_exitosos}
-
+        # ==============================================================
+        # 4. LLENADO HÍBRIDO ULTRARRÁPIDO
+        # ==============================================================
         filas_brutas = []
         tiempo_mov_seg = 0
         tiempo_exceso_geo_seg = 0
@@ -673,38 +639,56 @@ def procesar_reporte_bg(task_id, params):
         distancia_total_gps_km = sum([t['distancia'] for t in tramos_reales if t['tipo'] == 'route'])
         
         last_lat, last_lng = 27.19, -109.55
-        if puntos_exitosos: last_lat, last_lng = puntos_exitosos[0]['lat'], puntos_exitosos[0]['lng']
+        if puntos_maestros_reales:
+            last_lat, last_lng = puntos_maestros_reales[0]['lat'], puntos_maestros_reales[0]['lng']
         last_dt_punto = None
 
-        # PASO A: Llenado de Filas y Cálculo Matemático Topado por el Gobernador
         for i, dt in enumerate(cuadricula_maestra):
             ign_on = is_ignition_on(dt)
             en_ruta, tramo_actual = is_in_route(dt)
             
-            punto = puntos_dict.get(dt)
-            if punto:
-                curr_lat, curr_lng = punto['lat'], punto['lng']
-            else:
-                curr_lat, curr_lng = last_lat, last_lng
+            curr_lat, curr_lng = last_lat, last_lng
+            punto_encontrado = False
+
+            if en_ruta and puntos_maestros_reales:
+                idx = bisect.bisect_left(maestro_dts, dt)
+                if idx == 0:
+                    curr_lat, curr_lng = puntos_maestros_reales[0]['lat'], puntos_maestros_reales[0]['lng']
+                    punto_encontrado = True
+                elif idx >= len(puntos_maestros_reales):
+                    curr_lat, curr_lng = puntos_maestros_reales[-1]['lat'], puntos_maestros_reales[-1]['lng']
+                    punto_encontrado = True
+                else:
+                    p1 = puntos_maestros_reales[idx-1]
+                    p2 = puntos_maestros_reales[idx]
+                    t1, t2 = p1['dt'], p2['dt']
+                    tot_sec = (t2 - t1).total_seconds()
+                    if tot_sec > 0:
+                        ratio = (dt - t1).total_seconds() / tot_sec
+                        curr_lat = p1['lat'] + (p2['lat'] - p1['lat']) * ratio
+                        curr_lng = p1['lng'] + (p2['lng'] - p1['lng']) * ratio
+                    else:
+                        curr_lat, curr_lng = p1['lat'], p1['lng']
+                    punto_encontrado = True
 
             current_speed = 0.0
             seg_transcurridos = 60 if i > 0 else 0
 
-            # FILTRO ANTI-PICOS Y GOBERNADOR
-            if en_ruta and punto and ign_on:
+            # FILTRO ANTI-PICOS CON GOBERNADOR EXACTO
+            if en_ruta and punto_encontrado and ign_on:
                 if last_dt_punto is not None:
                     dist_mts = calcular_distancia(last_lat, last_lng, curr_lat, curr_lng)
                     seg_diff = max((dt - last_dt_punto).total_seconds(), 1)
                     raw_speed = (dist_mts / seg_diff) * 3.6
                     max_oficial = float(tramo_actual.get('max_speed', 110)) if tramo_actual else 110
-                    current_speed = min(raw_speed, max_oficial)
+                    current_speed = min(raw_speed, max_oficial) # NUNCA PASA DE LA PLATAFORMA
 
             if current_speed < 3 or not ign_on: 
                 current_speed = 0.0
 
             current_speed = round(current_speed, 1)
 
-            if punto:
+            if punto_encontrado:
                 last_lat, last_lng = curr_lat, curr_lng
                 last_dt_punto = dt
 
@@ -745,7 +729,7 @@ def procesar_reporte_bg(task_id, params):
             })
 
         # ==============================================================
-        # 4. MOTOR NATIVO DE RALENTÍ MATEMÁTICO
+        # 5. MOTOR NATIVO DE RALENTÍ MATEMÁTICO
         # ==============================================================
         tiempo_ral_reportado_seg = 0
         consecutive_idles = 0
@@ -775,7 +759,7 @@ def procesar_reporte_bg(task_id, params):
             tiempo_ral_reportado_seg += (consecutive_idles * 60)
 
         # ==============================================================
-        # 5. DIBUJADO DEL EXCEL
+        # 6. DIBUJADO DEL EXCEL
         # ==============================================================
         def calc_hrs_mins(segundos): return int(segundos // 3600), int((segundos % 3600) // 60)
         mov_hrs, mov_mins = calc_hrs_mins(tiempo_mov_seg)
@@ -808,7 +792,7 @@ def procesar_reporte_bg(task_id, params):
         ws = wb.active
         ws.title = "Histórico Ejecutivo"
 
-        # Inserción de Logo Kowi
+        # Inserción de Logo Kowi con control de errores
         try:
             logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'logo_kowi.png')
             if os.path.exists(logo_path):
