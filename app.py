@@ -9,7 +9,6 @@ import json
 import threading
 import uuid
 import tempfile
-import concurrent.futures
 import bisect
 from datetime import datetime, timedelta
 
@@ -143,7 +142,7 @@ HTML_INTERFACE = """
             <source src="{{ url_for('static', filename='video_kowi.mp4') }}" type="video/mp4">
         </video>
         <div class="loading-text">Generando Reporte Minuto a Minuto</div>
-        <div class="loading-subtext" id="overlay_status">⏳ Inicializando...</div>
+        <div class="loading-subtext" id="overlay_status">⏳ Inicializando Motor de Extracción...</div>
     </div>
 
     <div class="card">
@@ -151,7 +150,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <!-- V21: Solución Definitiva (Contador en Vivo + Velocidad Calculada) -->
+                <!-- Extracción NATIVA decoded_route -->
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -274,7 +273,7 @@ HTML_INTERFACE = """
             
             btn.disabled = true;
             overlay.style.display = 'flex';
-            overlayStatus.innerText = "⏳ Analizando periodo seleccionado...";
+            overlayStatus.innerText = "⏳ Descargando motor de reproducción Mapon...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -384,7 +383,7 @@ def api_geocercas_nube():
 @app.route('/iniciar_reporte')
 def iniciar_reporte():
     task_id = str(uuid.uuid4())
-    TASKS[task_id] = {'status': 'procesando', 'msg': 'Inicializando descarga...'}
+    TASKS[task_id] = {'status': 'procesando', 'msg': 'Inicializando descarga de datos (CAN Bus)...'}
     params = request.args.to_dict()
     thread = threading.Thread(target=procesar_reporte_bg, args=(task_id, params))
     thread.daemon = True
@@ -443,21 +442,6 @@ def procesar_reporte_bg(task_id, params):
                 try: return datetime.strptime(str(iso_str).replace('Z', '').split('.')[0], '%Y-%m-%dT%H:%M:%S') + timedelta(hours=TIMEZONE_OFFSET)
                 except Exception: return None
 
-        # ENDPOINT DE POSICIÓN EXACTA (Tu versión original probada)
-        def fetch_exact_point(dt):
-            utc_str = (dt - timedelta(hours=TIMEZONE_OFFSET)).strftime('%Y-%m-%dT%H:%M:%SZ')
-            url = f"{BASE_URL}/unit_data/history_point.json?key={API_KEY}&unit_id={unit_id}&datetime={utc_str}&include[]=position"
-            try:
-                r = requests.get(url, timeout=10)
-                data = r.json()
-                units = data.get('data', {}).get('units', [])
-                if units:
-                    pos = units[0].get('position', {}).get('value', {})
-                    if pos and 'lat' in pos and 'lng' in pos:
-                        return {'dt': dt, 'lat': float(pos['lat']), 'lng': float(pos['lng'])}
-            except Exception: pass
-            return None
-
         dt_inicio_req = datetime.strptime(f"{f_in} {hora_inicio}", "%Y-%m-%d %H:%M:%S")
         dt_fin_req = datetime.strptime(f"{f_fin} {hora_fin}", "%Y-%m-%d %H:%M:%S")
         
@@ -467,7 +451,6 @@ def procesar_reporte_bg(task_id, params):
         # ==============================================================
         # 1. EXTRACCIÓN DE DATOS CAN BUS Y TEMPERATURA
         # ==============================================================
-        TASKS[task_id]['msg'] = 'Analizando parámetros de la unidad (CAN Bus)...'
         can_data = {
             "has_can": False,
             "dist_inicial": 0, "dist_final": 0,
@@ -508,18 +491,20 @@ def procesar_reporte_bg(task_id, params):
         except Exception: pass
 
         # ==============================================================
-        # 2. RUTAS, IGNICIONES Y PARADAS
+        # 2. EL SECRETO REVELADO: EL MOTOR DE "REPRODUCCIÓN" DE MAPON (DECODED_ROUTE)
         # ==============================================================
-        TASKS[task_id]['msg'] = 'Recopilando tramos y paradas históricas...'
+        TASKS[task_id]['msg'] = 'Extrayendo motor de repetición de ruta (Velocidades Reales)...'
+        
         url_route = f"{BASE_URL}/route/list.json"
         url_ign = f"{BASE_URL}/unit_data/ignitions.json"
         
         tramos_reales = []
         eventos_ignicion = []
         paradas_unicas = set() 
+        puntos_maestros_reales = []
 
         current_start = dt_inicio_req
-        chunk_days = 4 
+        chunk_days = 15 
         
         while current_start < dt_fin_req:
             current_end = current_start + timedelta(days=chunk_days)
@@ -528,7 +513,14 @@ def procesar_reporte_bg(task_id, params):
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,routes"}
+            # EL ARREGLO CORRECTO PARA QUE MAPON NO NOS IGNORE
+            req_params = {
+                "key": API_KEY, 
+                "unit_id": unit_id, 
+                "from": chunk_start_utc, 
+                "till": chunk_end_utc,
+                "include[]": ["metrics", "routes", "decoded_route"] # ESTA ES LA LLAVE MAESTRA
+            }
             req_ign_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc}
             
             try:
@@ -570,8 +562,6 @@ def procesar_reporte_bg(task_id, params):
                     if not dt_ini or not dt_fin: continue
                         
                     dist_km = float(item.get('distance', 0)) / 1000.0
-                    
-                    # Obtenemos max_speed real del viaje (Corregido de la V18)
                     max_speed = float(item.get('max_speed', 110))
                     if max_speed <= 0: max_speed = 110
 
@@ -580,11 +570,25 @@ def procesar_reporte_bg(task_id, params):
                         'max_speed': max_speed
                     })
 
+                    # AQUI OBTENEMOS EXACTAMENTE LO MISMO QUE EL REPRODUCTOR DE LA PÁGINA (LAT, LNG, SPEED)
+                    puntos_nativos = item.get('decoded_route', {}).get('points', [])
+                    for pt in puntos_nativos:
+                        pt_time = parse_iso(pt.get('gmt'))
+                        if pt_time:
+                            puntos_maestros_reales.append({
+                                'dt': pt_time,
+                                'lat': float(pt.get('lat', 0)),
+                                'lng': float(pt.get('lng', 0)),
+                                'speed': float(pt.get('speed', 0))
+                            })
+
             except Exception: pass 
             current_start = current_end
 
         eventos_ignicion.sort(key=lambda x: x['dt'])
-        
+        puntos_maestros_reales.sort(key=lambda x: x['dt'])
+        maestro_dts = [p['dt'] for p in puntos_maestros_reales]
+
         total_paradas = 0
         for p_str in paradas_unicas:
             p_dt = parse_iso(p_str)
@@ -622,37 +626,17 @@ def procesar_reporte_bg(task_id, params):
                 cuadricula_maestra.append(dt)
             else:
                 is_evento = any(e['dt'] == dt for e in eventos_ignicion)
-                # Conservamos el minuto solo si hay un evento de ignición, o si el minuto es divisible entre 10
+                # Conservamos el minuto solo si hay evento, es inicio/fin, o es divisible entre 10
                 if is_evento or dt == dt_inicio_req or dt == dt_fin_req or dt.minute % 10 == 0:
                     cuadricula_maestra.append(dt)
 
         cuadricula_maestra = sorted(list(set(cuadricula_maestra)))
 
-        # Filtramos solo los minutos donde la unidad está encendida o en ruta para descargar
-        minutos_a_descargar = [dt for dt in cuadricula_maestra if is_ignition_on(dt) or is_in_route(dt)[0]]
-        for ev in eventos_ignicion: minutos_a_descargar.append(ev['dt'])
-        minutos_a_descargar = sorted(list(set(minutos_a_descargar)))
-
         # ==============================================================
-        # 4. DESCARGA REAL DE PUNTOS CON CONTADOR EN VIVO (TU CÓDIGO ORIGINAL)
+        # 4. LLENADO DIRECTO EN MEMORIA (No más peticiones HTTP = Cero Cuelgues)
         # ==============================================================
-        total_pts = len(minutos_a_descargar)
-        TASKS[task_id]['msg'] = f"Iniciando descarga de {total_pts} puntos GPS..."
+        TASKS[task_id]['msg'] = "Pintando coordenadas y leyendo velocidades de Hardware..."
         
-        puntos_exitosos = []
-        completed = 0
-        with concurrent.futures.ThreadPoolExecutor(max_workers=35) as executor:
-            futures = {executor.submit(fetch_exact_point, dt): dt for dt in minutos_a_descargar}
-            for future in concurrent.futures.as_completed(futures):
-                res = future.result()
-                if res: puntos_exitosos.append(res)
-                completed += 1
-                if completed % 25 == 0:
-                    TASKS[task_id]['msg'] = f"Descargando GPS: {completed} de {total_pts}..."
-                
-        puntos_exitosos.sort(key=lambda x: x['dt'])
-        puntos_dict = {p['dt']: p for p in puntos_exitosos}
-
         filas_brutas = []
         tiempo_mov_seg = 0
         tiempo_exceso_geo_seg = 0
@@ -660,47 +644,64 @@ def procesar_reporte_bg(task_id, params):
         distancia_total_gps_km = sum([t['distancia'] for t in tramos_reales if t['tipo'] == 'route'])
         
         last_lat, last_lng = 27.19, -109.55
-        if puntos_exitosos: last_lat, last_lng = puntos_exitosos[0]['lat'], puntos_exitosos[0]['lng']
+        if puntos_maestros_reales:
+            last_lat, last_lng = puntos_maestros_reales[0]['lat'], puntos_maestros_reales[0]['lng']
+            
         last_dt_punto = None
-        
         last_geo_lat, last_geo_lng = None, None
         last_geo_name = "Fuera de geocerca"
 
-        TASKS[task_id]['msg'] = "Calculando métricas matemáticas..."
-        # PASO A: Llenado de Filas y Gobernador Matemático
         for i, dt in enumerate(cuadricula_maestra):
             ign_on = is_ignition_on(dt)
             en_ruta, tramo_actual = is_in_route(dt)
             
-            punto = puntos_dict.get(dt)
-            if punto:
-                curr_lat, curr_lng = punto['lat'], punto['lng']
-            else:
-                curr_lat, curr_lng = last_lat, last_lng
-
+            curr_lat, curr_lng = last_lat, last_lng
             current_speed = 0.0
             
-            # CÁLCULO DE TIEMPO REAL: Los segundos saltan de 60 en 60, o de 600 en 600 si estaba apagado.
             if i > 0:
                 seg_transcurridos = (dt - cuadricula_maestra[i-1]).total_seconds()
             else:
                 seg_transcurridos = 0
 
-            # CÁLCULO DE VELOCIDAD MATEMÁTICO (Topado a la carretera para que no marque 110)
-            if en_ruta and punto and ign_on:
-                if last_dt_punto is not None:
+            punto_encontrado = False
+
+            # BUSCADOR EXACTO EN MEMORIA: Conecta cada minuto con la velocidad real de Mapon
+            if en_ruta and puntos_maestros_reales:
+                idx = bisect.bisect_left(maestro_dts, dt)
+                closest_p = None
+                min_diff = float('inf')
+                
+                start_check = max(0, idx - 2)
+                end_check = min(len(puntos_maestros_reales), idx + 2)
+                
+                for check_idx in range(start_check, end_check):
+                    diff = abs((puntos_maestros_reales[check_idx]['dt'] - dt).total_seconds())
+                    if diff < min_diff:
+                        min_diff = diff
+                        closest_p = puntos_maestros_reales[check_idx]
+                
+                # Tolerancia estricta de 90 segundos para ser exactos
+                if closest_p and min_diff <= 90:
+                    curr_lat = closest_p['lat']
+                    curr_lng = closest_p['lng']
+                    if ign_on:
+                        current_speed = float(closest_p['speed']) # ¡ESTA ES LA VELOCIDAD EXACTA DE MAPON!
+                    punto_encontrado = True
+                    
+                # Respaldo de seguridad matemático por si el GPS del camión se desconectó unos minutos
+                elif last_dt_punto is not None and ign_on:
                     dist_mts = calcular_distancia(last_lat, last_lng, curr_lat, curr_lng)
                     seg_diff_pts = max((dt - last_dt_punto).total_seconds(), 1)
                     raw_speed = (dist_mts / seg_diff_pts) * 3.6
                     max_oficial = float(tramo_actual.get('max_speed', 110)) if tramo_actual else 110
-                    current_speed = min(raw_speed, max_oficial) # NUNCA PASA DE LA PLATAFORMA
+                    current_speed = min(raw_speed, max_oficial) 
 
             if current_speed < 3 or not ign_on: 
                 current_speed = 0.0
 
             current_speed = round(current_speed, 1)
 
-            if punto:
+            if punto_encontrado:
                 last_lat, last_lng = curr_lat, curr_lng
                 last_dt_punto = dt
 
@@ -709,7 +710,7 @@ def procesar_reporte_bg(task_id, params):
             elif not ign_on:
                 tiempo_apagado_seg += seg_transcurridos
 
-            # GEOCERCAS OPTIMIZADAS
+            # OPTIMIZACIÓN GIGANTE: Solo recalcula la geocerca si la coordenada cambió
             if curr_lat == last_geo_lat and curr_lng == last_geo_lng:
                 geo_name = last_geo_name
             else:
@@ -780,7 +781,7 @@ def procesar_reporte_bg(task_id, params):
         # ==============================================================
         # 6. DIBUJADO DEL EXCEL
         # ==============================================================
-        TASKS[task_id]['msg'] = "Pintando el reporte en Excel..."
+        TASKS[task_id]['msg'] = "Empaquetando reporte final en Excel..."
         def calc_hrs_mins(segundos): return int(segundos // 3600), int((segundos % 3600) // 60)
         mov_hrs, mov_mins = calc_hrs_mins(tiempo_mov_seg)
         ral_hrs, ral_mins = calc_hrs_mins(tiempo_ral_reportado_seg)
@@ -793,7 +794,6 @@ def procesar_reporte_bg(task_id, params):
         max_vel = max(vels_mov) if vels_mov else 0
         prom_vel = sum(vels_mov) / len(vels_mov) if vels_mov else 0
 
-        # Matemáticas CAN Bus
         can_dist_total = 0
         can_fuel_total = 0
         can_horas = 0
@@ -812,7 +812,6 @@ def procesar_reporte_bg(task_id, params):
         ws = wb.active
         ws.title = "Histórico Ejecutivo"
 
-        # Inserción de Logo Kowi con control de errores
         try:
             logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'logo_kowi.png')
             if os.path.exists(logo_path):
