@@ -54,6 +54,19 @@ def decode_polyline_2d(encoded):
         points.append({'lat': lat / 100000.0, 'lng': lng / 100000.0})
     return points
 
+def decode_mapon_speed_string(encoded_str):
+    chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.'
+    points_count = len(encoded_str) // 4
+    data = []
+    for i in range(points_count):
+        pos = i * 4
+        try:
+            offset = chars.index(encoded_str[pos]) * 64 + chars.index(encoded_str[pos + 1])
+            speed = chars.index(encoded_str[pos + 2]) * 64 + chars.index(encoded_str[pos + 3])
+            data.append((offset, speed))
+        except Exception: pass
+    return data
+
 # ==========================================
 # UTILIDADES Y GEOCERCAS
 # ==========================================
@@ -66,19 +79,39 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
 
+def cargar_geocercas_excel():
+    geocercas = []
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    for archivo in ['kowi_principales.xlsx', 'kowi principales.xlsx']:
+        ruta = os.path.join(base_dir, archivo)
+        if os.path.exists(ruta):
+            try:
+                wb = openpyxl.load_workbook(ruta, data_only=True)
+                ws = wb.active
+                headers = [str(cell.value).lower().strip() if cell.value else '' for cell in ws[1]]
+                idx_nom = next((i for i, h in enumerate(headers) if 'nombre' in h or 'zona' in h), -1)
+                idx_lat = next((i for i, h in enumerate(headers) if 'lat' in h), -1)
+                idx_lon = next((i for i, h in enumerate(headers) if 'lon' in h or 'lng' in h), -1)
+                
+                if idx_nom != -1 and idx_lat != -1 and idx_lon != -1:
+                    for i, row in enumerate(ws.iter_rows(min_row=2, values_only=True)):
+                        if row[idx_nom] and row[idx_lat] and row[idx_lon]:
+                            geocercas.append({'id': f"LOCAL_{i}", 'name': str(row[idx_nom]).strip(), 
+                                            'lat': float(str(row[idx_lat]).strip()), 'lng': float(str(row[idx_lon]).strip()), 'radius': 250})
+                return geocercas
+            except Exception: pass
+    return []
+
 def cargar_geocercas_api():
     geocercas = []
     try:
-        # El endpoint correcto proporcionado
         res = requests.get(f"{BASE_URL}/object/list.json", params={"key": API_KEY, "limit": 1000}, timeout=15)
-        # CORRECCIÓN VITAL: Mapon devuelve 'objects', no 'items'
         objetos = res.json().get('data', {}).get('objects', [])
         
         for geo in objetos:
             nombre = geo.get('name', f"Geocerca_{geo.get('id')}")
             wkt = str(geo.get('wkt', ''))
             
-            # Mapon por defecto (sin wkt_lon_first) devuelve LAT LON
             if 'POINT' in wkt:
                 try:
                     lat_str, lng_str = wkt.replace('POINT(', '').replace('POINT (', '').replace(')', '').strip().split(' ')
@@ -86,15 +119,11 @@ def cargar_geocercas_api():
                 except Exception: pass
             elif 'POLYGON' in wkt:
                 try:
-                    # Tomamos el primer punto del polígono como centro aproximado
                     lat_str, lng_str = wkt.split('((')[1].split(',')[0].strip().split(' ')
                     geocercas.append({'id': str(geo.get('id')), 'name': nombre, 'lat': float(lat_str), 'lng': float(lng_str), 'radius': 800})
                 except Exception: pass
-    except Exception as e: 
-        print(f"Error cargando geocercas API: {e}")
-        pass
-    
-    return geocercas
+    except Exception: pass
+    return geocercas if geocercas else cargar_geocercas_excel()
 
 # ==========================================
 # INTERFAZ WEB
@@ -163,7 +192,6 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <!-- Reporte Híbrido Rápido con Geocercas Nativas -->
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -223,7 +251,7 @@ HTML_INTERFACE = """
                 </div>
 
                 <div class="form-group">
-                    <label>Geocercas:</label>
+                    <label>Geocercas (Sincronizadas desde Mapon):</label>
                     <select id="geofence_select" multiple="multiple" style="width: 100%;">
                         <option value="">⏳ Descargando API...</option>
                     </select>
@@ -504,18 +532,20 @@ def procesar_reporte_bg(task_id, params):
         except Exception: pass
 
         # ==============================================================
-        # 2. RUTAS, IGNICIONES Y PARADAS
+        # 2. RUTAS, IGNICIONES Y DECODIFICACIÓN DE VELOCIDAD
         # ==============================================================
         url_route = f"{BASE_URL}/route/list.json"
         url_ign = f"{BASE_URL}/unit_data/ignitions.json"
         
         tramos_reales = []
         eventos_ignicion = []
-        paradas_unicas = set() 
         puntos_maestros_reales = []
+        paradas_unicas = set()
 
         current_start = dt_inicio_req
-        chunk_days = 2 
+        
+        # MEGA OPTIMIZACIÓN 1: Reducimos las peticiones a Mapon agrupando por 15 días.
+        chunk_days = 15 
         
         while current_start < dt_fin_req:
             current_end = current_start + timedelta(days=chunk_days)
@@ -524,7 +554,7 @@ def procesar_reporte_bg(task_id, params):
             chunk_start_utc = (current_start - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             chunk_end_utc = (current_end - timedelta(hours=TIMEZONE_OFFSET)).strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,routes,polyline"}
+            req_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc, "include": "metrics,routes,polyline,speed"}
             req_ign_params = {"key": API_KEY, "unit_id": unit_id, "from": chunk_start_utc, "till": chunk_end_utc}
             
             try:
@@ -553,7 +583,6 @@ def procesar_reporte_bg(task_id, params):
                             dt_ini_str = obj.get('start', {}).get('time', '')
                             if dt_ini_str:
                                 paradas_unicas.add(dt_ini_str)
-                                
                         for k, v in obj.items():
                             if isinstance(v, (dict, list)): extraer_tramos(v)
                     elif isinstance(obj, list):
@@ -567,8 +596,6 @@ def procesar_reporte_bg(task_id, params):
                     if not dt_ini or not dt_fin: continue
                         
                     dist_km = float(item.get('distance', 0)) / 1000.0
-                    
-                    # Corrección del Gobernador Oficial de Mapon (ahora en la raíz)
                     max_speed = float(item.get('max_speed', 110))
                     if max_speed <= 0: max_speed = 110
 
@@ -577,18 +604,22 @@ def procesar_reporte_bg(task_id, params):
                         'max_speed': max_speed
                     })
 
-                    # MEGA-OPTIMIZACIÓN: Interpolación en RAM
                     poly_str = item.get('polyline', '')
-                    if poly_str:
+                    speed_str = item.get('speed', '')
+                    
+                    if poly_str and speed_str:
                         coords = decode_polyline_2d(poly_str)
-                        if len(coords) == 1:
-                            puntos_maestros_reales.append({'dt': dt_ini, 'lat': coords[0]['lat'], 'lng': coords[0]['lng']})
-                        elif len(coords) > 1:
-                            dur_sec = (dt_fin - dt_ini).total_seconds()
-                            step = dur_sec / max(1, len(coords) - 1)
-                            for idx, c in enumerate(coords):
-                                pt_time = dt_ini + timedelta(seconds=idx*step)
-                                puntos_maestros_reales.append({'dt': pt_time, 'lat': c['lat'], 'lng': c['lng']})
+                        vel_offsets = decode_mapon_speed_string(speed_str)
+                        min_len = min(len(coords), len(vel_offsets))
+                        for idx in range(min_len):
+                            offset_seg, real_speed = vel_offsets[idx]
+                            pt_time = dt_ini + timedelta(seconds=offset_seg)
+                            puntos_maestros_reales.append({
+                                'dt': pt_time,
+                                'lat': coords[idx]['lat'],
+                                'lng': coords[idx]['lng'],
+                                'speed': float(real_speed) 
+                            })
 
             except Exception: pass 
             current_start = current_end
@@ -596,8 +627,7 @@ def procesar_reporte_bg(task_id, params):
         eventos_ignicion.sort(key=lambda x: x['dt'])
         puntos_maestros_reales.sort(key=lambda x: x['dt'])
         maestro_dts = [p['dt'] for p in puntos_maestros_reales]
-        
-        # Calcular Total Paradas Oficiales
+
         total_paradas = 0
         for p_str in paradas_unicas:
             p_dt = parse_iso(p_str)
@@ -629,9 +659,6 @@ def procesar_reporte_bg(task_id, params):
                 if t['dt_ini'] <= dt <= t['dt_fin']: return True, t
             return False, None
 
-        # ==============================================================
-        # 4. LLENADO HÍBRIDO ULTRARRÁPIDO
-        # ==============================================================
         filas_brutas = []
         tiempo_mov_seg = 0
         tiempo_exceso_geo_seg = 0
@@ -641,63 +668,68 @@ def procesar_reporte_bg(task_id, params):
         last_lat, last_lng = 27.19, -109.55
         if puntos_maestros_reales:
             last_lat, last_lng = puntos_maestros_reales[0]['lat'], puntos_maestros_reales[0]['lng']
+            
         last_dt_punto = None
+        
+        # MEGA OPTIMIZACIÓN 2: Evitamos calcular Geocercas cuando el camión está detenido
+        last_geo_lat, last_geo_lng = None, None
+        last_geo_id, last_geo_name = None, "Fuera de geocerca"
 
         for i, dt in enumerate(cuadricula_maestra):
             ign_on = is_ignition_on(dt)
             en_ruta, tramo_actual = is_in_route(dt)
             
             curr_lat, curr_lng = last_lat, last_lng
-            punto_encontrado = False
-
-            if en_ruta and puntos_maestros_reales:
-                idx = bisect.bisect_left(maestro_dts, dt)
-                if idx == 0:
-                    curr_lat, curr_lng = puntos_maestros_reales[0]['lat'], puntos_maestros_reales[0]['lng']
-                    punto_encontrado = True
-                elif idx >= len(puntos_maestros_reales):
-                    curr_lat, curr_lng = puntos_maestros_reales[-1]['lat'], puntos_maestros_reales[-1]['lng']
-                    punto_encontrado = True
-                else:
-                    p1 = puntos_maestros_reales[idx-1]
-                    p2 = puntos_maestros_reales[idx]
-                    t1, t2 = p1['dt'], p2['dt']
-                    tot_sec = (t2 - t1).total_seconds()
-                    if tot_sec > 0:
-                        ratio = (dt - t1).total_seconds() / tot_sec
-                        curr_lat = p1['lat'] + (p2['lat'] - p1['lat']) * ratio
-                        curr_lng = p1['lng'] + (p2['lng'] - p1['lng']) * ratio
-                    else:
-                        curr_lat, curr_lng = p1['lat'], p1['lng']
-                    punto_encontrado = True
-
             current_speed = 0.0
             seg_transcurridos = 60 if i > 0 else 0
 
-            # FILTRO ANTI-PICOS CON GOBERNADOR EXACTO
-            if en_ruta and punto_encontrado and ign_on:
-                if last_dt_punto is not None:
+            # EXTRACCIÓN DE VELOCIDAD DIRECTO DESDE MEMORIA
+            if en_ruta and ign_on and puntos_maestros_reales:
+                idx = bisect.bisect_left(maestro_dts, dt)
+                closest_p = None
+                min_diff = float('inf')
+                
+                start_check = max(0, idx - 2)
+                end_check = min(len(puntos_maestros_reales), idx + 2)
+                
+                for check_idx in range(start_check, end_check):
+                    diff = abs((puntos_maestros_reales[check_idx]['dt'] - dt).total_seconds())
+                    if diff < min_diff:
+                        min_diff = diff
+                        closest_p = puntos_maestros_reales[check_idx]
+                
+                if closest_p and min_diff <= 120:
+                    curr_lat = closest_p['lat']
+                    curr_lng = closest_p['lng']
+                    current_speed = float(closest_p['speed'])
+                elif last_dt_punto is not None:
                     dist_mts = calcular_distancia(last_lat, last_lng, curr_lat, curr_lng)
                     seg_diff = max((dt - last_dt_punto).total_seconds(), 1)
                     raw_speed = (dist_mts / seg_diff) * 3.6
                     max_oficial = float(tramo_actual.get('max_speed', 110)) if tramo_actual else 110
-                    current_speed = min(raw_speed, max_oficial) # NUNCA PASA DE LA PLATAFORMA
+                    current_speed = min(raw_speed, max_oficial)
 
             if current_speed < 3 or not ign_on: 
                 current_speed = 0.0
 
             current_speed = round(current_speed, 1)
 
-            if punto_encontrado:
-                last_lat, last_lng = curr_lat, curr_lng
-                last_dt_punto = dt
+            last_lat, last_lng = curr_lat, curr_lng
+            last_dt_punto = dt
 
             if current_speed > 0:
                 tiempo_mov_seg += seg_transcurridos
             elif not ign_on:
                 tiempo_apagado_seg += seg_transcurridos
 
-            geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng)
+            # Geocercas súper optimizadas
+            if curr_lat == last_geo_lat and curr_lng == last_geo_lng:
+                geo_name = last_geo_name
+            else:
+                geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng)
+                last_geo_lat, last_geo_lng = curr_lat, curr_lng
+                last_geo_id, last_geo_name = geo_id, geo_name
+
             evento = ""
             detalle = "-"
             
@@ -729,7 +761,7 @@ def procesar_reporte_bg(task_id, params):
             })
 
         # ==============================================================
-        # 5. MOTOR NATIVO DE RALENTÍ MATEMÁTICO
+        # 4. MOTOR NATIVO DE RALENTÍ MATEMÁTICO
         # ==============================================================
         tiempo_ral_reportado_seg = 0
         consecutive_idles = 0
@@ -759,7 +791,7 @@ def procesar_reporte_bg(task_id, params):
             tiempo_ral_reportado_seg += (consecutive_idles * 60)
 
         # ==============================================================
-        # 6. DIBUJADO DEL EXCEL
+        # 5. DIBUJADO DEL EXCEL
         # ==============================================================
         def calc_hrs_mins(segundos): return int(segundos // 3600), int((segundos % 3600) // 60)
         mov_hrs, mov_mins = calc_hrs_mins(tiempo_mov_seg)
@@ -839,7 +871,6 @@ def procesar_reporte_bg(task_id, params):
         ws.cell(row=9, column=3, value="Motor Apagado (Sin GPS):").font = Font(bold=True)
         ws.cell(row=9, column=4, value=f"{muerto_hrs} hrs {muerto_mins} mins")
 
-        # NUEVO: Número de Paradas Oficiales
         ws.cell(row=10, column=1, value="Número de Paradas:").font = Font(bold=True)
         ws.cell(row=10, column=2, value=f"{total_paradas}")
         ws.cell(row=10, column=3, value="")
@@ -893,6 +924,12 @@ def procesar_reporte_bg(task_id, params):
             cell.alignment = Alignment(horizontal="center", vertical="center")
             cell.border = border_all
 
+        # MEGA OPTIMIZACIÓN 3: Clonación de estilos para no ahogar la RAM
+        font_green = Font(color="008000", bold=True)
+        font_red = Font(color="FF0000", bold=True)
+        font_link = Font(color="0000FF", underline="single")
+        align_center = Alignment(horizontal="center")
+
         row_idx = 13
         for f in filas_brutas:
             ciudad = "Hermosillo" if "Hermosillo" in f['origen'] else ("Navojoa" if "Navojoa" in f['origen'] or "Pueblo Mayo" in f['origen'] else ("Guaymas" if "Guaymas" in f['origen'] else "Zona Operativa"))
@@ -906,13 +943,15 @@ def procesar_reporte_bg(task_id, params):
             ws.cell(row=row_idx, column=7, value=f['detalle'])
             
             geo_cell = ws.cell(row=row_idx, column=8, value=f['geocerca'])
-            if f['geocerca'] != "Fuera de geocerca": geo_cell.font = Font(color="008000", bold=True)
-            if "Exceso" in f['evento'] or "Motor" in f['evento'] or "Ralentí" in f['evento']: ws.cell(row=row_idx, column=6).font = Font(color="FF0000", bold=True)
+            if f['geocerca'] != "Fuera de geocerca": 
+                geo_cell.font = font_green
+            if "Exceso" in f['evento'] or "Motor" in f['evento'] or "Ralentí" in f['evento']: 
+                ws.cell(row=row_idx, column=6).font = font_red
             
             map_cell = ws.cell(row=row_idx, column=9, value="mapa")
             map_cell.hyperlink = f"https://www.google.com/maps?q={f['lat']},{f['lng']}"
-            map_cell.font = Font(color="0000FF", underline="single")
-            map_cell.alignment = Alignment(horizontal="center")
+            map_cell.font = font_link
+            map_cell.alignment = align_center
             
             ws.cell(row=row_idx, column=10, value=round(f['lng'], 6))
             ws.cell(row=row_idx, column=11, value=round(f['lat'], 6))
