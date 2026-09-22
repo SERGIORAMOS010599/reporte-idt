@@ -192,6 +192,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
+                <!-- V20: Algoritmo Dinámico de Tiempos Muertos -->
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -532,19 +533,19 @@ def procesar_reporte_bg(task_id, params):
         except Exception: pass
 
         # ==============================================================
-        # 2. RUTAS, IGNICIONES Y DECODIFICACIÓN DE VELOCIDAD
+        # 2. RUTAS, IGNICIONES Y PARADAS (CON EXTRACCIÓN MASIVA)
         # ==============================================================
         url_route = f"{BASE_URL}/route/list.json"
         url_ign = f"{BASE_URL}/unit_data/ignitions.json"
         
         tramos_reales = []
         eventos_ignicion = []
+        paradas_unicas = set() 
         puntos_maestros_reales = []
-        paradas_unicas = set()
 
         current_start = dt_inicio_req
         
-        # MEGA OPTIMIZACIÓN 1: Reducimos las peticiones a Mapon agrupando por 15 días.
+        # Bloques de 15 días (Descarga masiva en lugar de 2 días)
         chunk_days = 15 
         
         while current_start < dt_fin_req:
@@ -635,19 +636,8 @@ def procesar_reporte_bg(task_id, params):
                 total_paradas += 1
 
         # ==============================================================
-        # 3. CONSTRUCCIÓN DE CUADRÍCULA ESTRICTA MINUTO A MINUTO
+        # 3. LA MAGIA DE RAÚL: CUADRÍCULA COMPRIMIDA (10 MINUTOS SI ESTÁ APAGADO)
         # ==============================================================
-        cuadricula_maestra = []
-        c_time = dt_inicio_req
-        while c_time <= dt_fin_req:
-            cuadricula_maestra.append(c_time)
-            c_time += timedelta(minutes=1)
-
-        for ev in eventos_ignicion:
-            cuadricula_maestra.append(ev['dt'])
-            
-        cuadricula_maestra = sorted(list(set(cuadricula_maestra)))
-
         def is_ignition_on(dt):
             estado = False
             for ev in eventos_ignicion:
@@ -659,6 +649,32 @@ def procesar_reporte_bg(task_id, params):
                 if t['dt_ini'] <= dt <= t['dt_fin']: return True, t
             return False, None
 
+        cuadricula_base = []
+        c_time = dt_inicio_req
+        while c_time <= dt_fin_req:
+            cuadricula_base.append(c_time)
+            c_time += timedelta(minutes=1)
+
+        for ev in eventos_ignicion:
+            cuadricula_base.append(ev['dt'])
+            
+        cuadricula_base = sorted(list(set(cuadricula_base)))
+
+        cuadricula_maestra = []
+        for dt in cuadricula_base:
+            if is_ignition_on(dt):
+                cuadricula_maestra.append(dt)
+            else:
+                is_evento = any(e['dt'] == dt for e in eventos_ignicion)
+                # Conservamos el minuto solo si hay un evento de ignición, o si el minuto es divisible entre 10
+                if is_evento or dt == dt_inicio_req or dt == dt_fin_req or dt.minute % 10 == 0:
+                    cuadricula_maestra.append(dt)
+
+        cuadricula_maestra = sorted(list(set(cuadricula_maestra)))
+
+        # ==============================================================
+        # 4. LLENADO EN MEMORIA Y CÁLCULO DE TIEMPOS EXACTOS
+        # ==============================================================
         filas_brutas = []
         tiempo_mov_seg = 0
         tiempo_exceso_geo_seg = 0
@@ -670,10 +686,6 @@ def procesar_reporte_bg(task_id, params):
             last_lat, last_lng = puntos_maestros_reales[0]['lat'], puntos_maestros_reales[0]['lng']
             
         last_dt_punto = None
-        
-        # MEGA OPTIMIZACIÓN 2: Evitamos calcular Geocercas cuando el camión está detenido
-        last_geo_lat, last_geo_lng = None, None
-        last_geo_id, last_geo_name = None, "Fuera de geocerca"
 
         for i, dt in enumerate(cuadricula_maestra):
             ign_on = is_ignition_on(dt)
@@ -681,55 +693,57 @@ def procesar_reporte_bg(task_id, params):
             
             curr_lat, curr_lng = last_lat, last_lng
             current_speed = 0.0
-            seg_transcurridos = 60 if i > 0 else 0
+            
+            # CÁLCULO DE TIEMPO REAL: Los segundos ya no son siempre 60. Si el camión estaba apagado y saltó 10 min, sumará 600 seg.
+            if i > 0:
+                seg_transcurridos = (dt - cuadricula_maestra[i-1]).total_seconds()
+            else:
+                seg_transcurridos = 0
 
-            # EXTRACCIÓN DE VELOCIDAD DIRECTO DESDE MEMORIA
-            if en_ruta and ign_on and puntos_maestros_reales:
+            punto_encontrado = False
+
+            if en_ruta and puntos_maestros_reales:
                 idx = bisect.bisect_left(maestro_dts, dt)
                 closest_p = None
                 min_diff = float('inf')
                 
-                start_check = max(0, idx - 2)
-                end_check = min(len(puntos_maestros_reales), idx + 2)
-                
-                for check_idx in range(start_check, end_check):
-                    diff = abs((puntos_maestros_reales[check_idx]['dt'] - dt).total_seconds())
-                    if diff < min_diff:
-                        min_diff = diff
-                        closest_p = puntos_maestros_reales[check_idx]
+                # Buscamos el punto de velocidad exacto a menos de 120s
+                for check_idx in [idx-1, idx, idx+1]:
+                    if 0 <= check_idx < len(puntos_maestros_reales):
+                        diff = abs((puntos_maestros_reales[check_idx]['dt'] - dt).total_seconds())
+                        if diff < min_diff:
+                            min_diff = diff
+                            closest_p = puntos_maestros_reales[check_idx]
                 
                 if closest_p and min_diff <= 120:
                     curr_lat = closest_p['lat']
                     curr_lng = closest_p['lng']
-                    current_speed = float(closest_p['speed'])
-                elif last_dt_punto is not None:
+                    if ign_on:
+                        current_speed = float(closest_p['speed'])
+                    punto_encontrado = True
+                elif last_dt_punto is not None and ign_on:
                     dist_mts = calcular_distancia(last_lat, last_lng, curr_lat, curr_lng)
-                    seg_diff = max((dt - last_dt_punto).total_seconds(), 1)
-                    raw_speed = (dist_mts / seg_diff) * 3.6
+                    seg_diff_pts = max((dt - last_dt_punto).total_seconds(), 1)
+                    raw_speed = (dist_mts / seg_diff_pts) * 3.6
                     max_oficial = float(tramo_actual.get('max_speed', 110)) if tramo_actual else 110
                     current_speed = min(raw_speed, max_oficial)
+                    punto_encontrado = True
 
             if current_speed < 3 or not ign_on: 
                 current_speed = 0.0
 
             current_speed = round(current_speed, 1)
 
-            last_lat, last_lng = curr_lat, curr_lng
-            last_dt_punto = dt
+            if punto_encontrado:
+                last_lat, last_lng = curr_lat, curr_lng
+                last_dt_punto = dt
 
             if current_speed > 0:
                 tiempo_mov_seg += seg_transcurridos
             elif not ign_on:
                 tiempo_apagado_seg += seg_transcurridos
 
-            # Geocercas súper optimizadas
-            if curr_lat == last_geo_lat and curr_lng == last_geo_lng:
-                geo_name = last_geo_name
-            else:
-                geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng)
-                last_geo_lat, last_geo_lng = curr_lat, curr_lng
-                last_geo_id, last_geo_name = geo_id, geo_name
-
+            geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng)
             evento = ""
             detalle = "-"
             
@@ -749,7 +763,7 @@ def procesar_reporte_bg(task_id, params):
                     if current_speed > limite_aplicable:
                         evento = f"Exceso en {geo_name}"
                         detalle = f"Vel: {current_speed} (Límite: {limite_aplicable})"
-                        tiempo_exceso_geo_seg += 60
+                        tiempo_exceso_geo_seg += 60 # El exceso se asume de 1 minuto continuo en movimiento
                 elif current_speed > limite_velocidad_gral:
                     evento = "Exceso de velocidad"
                     detalle = f"Vel: {current_speed} (Límite: {limite_velocidad_gral})"
@@ -761,13 +775,14 @@ def procesar_reporte_bg(task_id, params):
             })
 
         # ==============================================================
-        # 4. MOTOR NATIVO DE RALENTÍ MATEMÁTICO
+        # 5. MOTOR NATIVO DE RALENTÍ MATEMÁTICO
         # ==============================================================
         tiempo_ral_reportado_seg = 0
         consecutive_idles = 0
         idle_start_idx = -1
         
         for idx, f in enumerate(filas_brutas):
+            # El ralentí solo cuenta cuando el motor está encendido, por lo que la cuadrícula va de 1 en 1 minuto.
             if f['velocidad'] == 0 and f['ign_on']:
                 if consecutive_idles == 0:
                     idle_start_idx = idx
@@ -791,7 +806,7 @@ def procesar_reporte_bg(task_id, params):
             tiempo_ral_reportado_seg += (consecutive_idles * 60)
 
         # ==============================================================
-        # 5. DIBUJADO DEL EXCEL
+        # 6. DIBUJADO DEL EXCEL
         # ==============================================================
         def calc_hrs_mins(segundos): return int(segundos // 3600), int((segundos % 3600) // 60)
         mov_hrs, mov_mins = calc_hrs_mins(tiempo_mov_seg)
@@ -824,7 +839,7 @@ def procesar_reporte_bg(task_id, params):
         ws = wb.active
         ws.title = "Histórico Ejecutivo"
 
-        # Inserción de Logo Kowi con control de errores
+        # Inserción de Logo Kowi
         try:
             logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'logo_kowi.png')
             if os.path.exists(logo_path):
@@ -924,7 +939,6 @@ def procesar_reporte_bg(task_id, params):
             cell.alignment = Alignment(horizontal="center", vertical="center")
             cell.border = border_all
 
-        # MEGA OPTIMIZACIÓN 3: Clonación de estilos para no ahogar la RAM
         font_green = Font(color="008000", bold=True)
         font_red = Font(color="FF0000", bold=True)
         font_link = Font(color="0000FF", underline="single")
