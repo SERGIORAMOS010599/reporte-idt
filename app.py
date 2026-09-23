@@ -27,7 +27,7 @@ TASKS = {}
 CACHE_GEOCERCAS = []
 
 # ==========================================
-# UTILIDADES Y GEOCERCAS
+# UTILIDADES, GEOCERCAS Y CIUDADES
 # ==========================================
 def calcular_distancia(lat1, lon1, lat2, lon2):
     R = 6371000 
@@ -37,6 +37,43 @@ def calcular_distancia(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2.0)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlon/2.0)**2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
+
+# GEOLOCALIZADOR OFFLINE (Ultra rápido, 0 peticiones)
+def obtener_ubicacion(lat, lng, geo_name):
+    ciudades = {
+        "Nogales": (31.3086, -110.9422),
+        "Magdalena": (30.6248, -110.9714),
+        "Santa Ana": (30.5406, -111.1213),
+        "Hermosillo": (29.0892, -110.9613),
+        "Guaymas": (27.9179, -110.9089),
+        "Empalme": (27.9665, -110.8165),
+        "Ciudad Obregón": (27.4828, -109.9304),
+        "Pueblo Mayo": (27.1922, -109.5534),
+        "Navojoa": (27.0728, -109.4437),
+        "Huatabampo": (26.8271, -109.6419),
+        "Los Mochis": (25.7905, -108.9858),
+        "Culiacán": (24.8091, -107.3940)
+    }
+    
+    ciudad_cercana = "En Tránsito (Carretera)"
+    dist_minima = 35000  # Radio de 35 km para considerar que está en la ciudad
+
+    if lat != 0 and lng != 0:
+        for ciudad, (c_lat, c_lng) in ciudades.items():
+            dist = calcular_distancia(lat, lng, c_lat, c_lng)
+            if dist < dist_minima:
+                dist_minima = dist
+                ciudad_cercana = ciudad
+
+    if geo_name and geo_name != "Fuera de geocerca":
+        direccion = f"Instalación: {geo_name}"
+    else:
+        if dist_minima < 35000:
+            direccion = f"Aproximadamente en {ciudad_cercana}"
+        else:
+            direccion = "Ruta Foránea"
+
+    return direccion, ciudad_cercana
 
 def cargar_geocercas_excel():
     geocercas = []
@@ -151,7 +188,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <!-- V22: Marcadores exactos de Paradas Oficiales -->
+                <!-- V23: Geolocalizador Inteligente Integrado -->
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -443,7 +480,6 @@ def procesar_reporte_bg(task_id, params):
                 try: return datetime.strptime(str(iso_str).replace('Z', '').split('.')[0], '%Y-%m-%dT%H:%M:%S') + timedelta(hours=TIMEZONE_OFFSET)
                 except Exception: return None
 
-        # ENDPOINT DE POSICIÓN EXACTA (Tu versión original)
         def fetch_exact_point(dt):
             utc_str = (dt - timedelta(hours=TIMEZONE_OFFSET)).strftime('%Y-%m-%dT%H:%M:%SZ')
             url = f"{BASE_URL}/unit_data/history_point.json?key={API_KEY}&unit_id={unit_id}&datetime={utc_str}&include[]=position"
@@ -570,7 +606,6 @@ def procesar_reporte_bg(task_id, params):
                     if not dt_ini or not dt_fin: continue
                         
                     dist_km = float(item.get('distance', 0)) / 1000.0
-                    
                     max_speed = float(item.get('max_speed', 110))
                     if max_speed <= 0: max_speed = 110
 
@@ -584,21 +619,18 @@ def procesar_reporte_bg(task_id, params):
 
         eventos_ignicion.sort(key=lambda x: x['dt'])
         
-        # PROCESAMIENTO CRONOLÓGICO DE PARADAS OFICIALES (Asignación de Índices)
         paradas_validas = []
         for p_str in paradas_unicas:
             p_dt = parse_iso(p_str)
             if p_dt and dt_inicio_req <= p_dt <= dt_fin_req:
                 paradas_validas.append(p_dt)
         
-        paradas_validas.sort() # Orden cronológico asegurado
+        paradas_validas.sort() 
         total_paradas = len(paradas_validas)
-        
-        # Creamos un diccionario para mapearlas rápidamente por fecha exacta
         dict_paradas = {p_dt: f"Parada {i+1} detectada" for i, p_dt in enumerate(paradas_validas)}
 
         # ==============================================================
-        # 3. CUADRÍCULA COMPRIMIDA (SALTA 10 MINUTOS SI ESTÁ APAGADO)
+        # 3. CUADRÍCULA COMPRIMIDA 
         # ==============================================================
         def is_ignition_on(dt):
             estado = False
@@ -620,7 +652,6 @@ def procesar_reporte_bg(task_id, params):
         for ev in eventos_ignicion:
             cuadricula_base.append(ev['dt'])
             
-        # Nos aseguramos que la hora exacta de la parada esté en la cuadrícula base
         for p_dt in paradas_validas:
             cuadricula_base.append(p_dt)
             
@@ -632,13 +663,12 @@ def procesar_reporte_bg(task_id, params):
                 cuadricula_maestra.append(dt)
             else:
                 is_evento = any(e['dt'] == dt for e in eventos_ignicion)
-                is_parada = dt in dict_paradas # BLINDAJE: Jamás omitir el minuto de una parada
+                is_parada = dt in dict_paradas 
                 if is_evento or is_parada or dt == dt_inicio_req or dt == dt_fin_req or dt.minute % 10 == 0:
                     cuadricula_maestra.append(dt)
 
         cuadricula_maestra = sorted(list(set(cuadricula_maestra)))
 
-        # Filtramos solo los minutos relevantes para descargar (Añadiendo las paradas)
         minutos_a_descargar = [dt for dt in cuadricula_maestra if is_ignition_on(dt) or is_in_route(dt)[0]]
         for ev in eventos_ignicion: minutos_a_descargar.append(ev['dt'])
         for p_dt in paradas_validas: minutos_a_descargar.append(p_dt)
@@ -677,8 +707,8 @@ def procesar_reporte_bg(task_id, params):
         last_geo_lat, last_geo_lng = None, None
         last_geo_name = "Fuera de geocerca"
 
-        TASKS[task_id]['msg'] = "Calculando métricas matemáticas..."
-        # PASO A: Llenado de Filas y Eventos (Integración de Paradas)
+        TASKS[task_id]['msg'] = "Calculando métricas y ubicaciones..."
+        # PASO A: Llenado de Filas
         for i, dt in enumerate(cuadricula_maestra):
             ign_on = is_ignition_on(dt)
             en_ruta, tramo_actual = is_in_route(dt)
@@ -696,7 +726,6 @@ def procesar_reporte_bg(task_id, params):
             else:
                 seg_transcurridos = 0
 
-            # GOBERNADOR MATEMÁTICO
             if en_ruta and punto and ign_on:
                 if last_dt_punto is not None:
                     dist_mts = calcular_distancia(last_lat, last_lng, curr_lat, curr_lng)
@@ -726,17 +755,19 @@ def procesar_reporte_bg(task_id, params):
                 last_geo_lat, last_geo_lng = curr_lat, curr_lng
                 last_geo_name = geo_name
 
+            # LLAMADA AL GEOLOCALIZADOR OFFLINE
+            origen_calculado, ciudad_calculada = obtener_ubicacion(curr_lat, curr_lng, geo_name)
+
             evento = ""
             detalle = "-"
             
             es_evento_motor = next((e for e in eventos_ignicion if e['dt'] == dt), None)
-            es_evento_parada = dict_paradas.get(dt) # Buscamos si este minuto es una Parada Oficial
+            es_evento_parada = dict_paradas.get(dt) 
             
-            # Prioridad y Fusión de Eventos
             if es_evento_motor:
                 evento = es_evento_motor['evento']
                 detalle = es_evento_motor['detalle']
-                if es_evento_parada: # Si el motor se apagó exactamente cuando detectó la parada
+                if es_evento_parada: 
                     evento = f"{es_evento_parada} / {evento}"
             elif es_evento_parada:
                 evento = es_evento_parada
@@ -758,7 +789,10 @@ def procesar_reporte_bg(task_id, params):
                     detalle = f"Vel: {current_speed} (Límite: {limite_velocidad_gral})"
 
             filas_brutas.append({
-                'fecha': dt, 'origen': 'Zona Operativa', 'velocidad': current_speed, 
+                'fecha': dt, 
+                'origen': origen_calculado, 
+                'ciudad': ciudad_calculada, 
+                'velocidad': current_speed, 
                 'evento': evento, 'detalle': detalle, 'lat': curr_lat, 'lng': curr_lng, 'geocerca': geo_name,
                 'ign_on': ign_on 
             })
@@ -781,7 +815,6 @@ def procesar_reporte_bg(task_id, params):
                     if filas_brutas[target_idx]['evento'] == 'Motor encendido' and target_idx + 1 < idx:
                         target_idx += 1
                         
-                    # Si ya había una Parada Oficial en esa fila, no la borramos, la fusionamos
                     viejo_evento = filas_brutas[target_idx]['evento']
                     if "Parada" in viejo_evento:
                         filas_brutas[target_idx]['evento'] = f"{viejo_evento} / Ralentí"
@@ -941,18 +974,16 @@ def procesar_reporte_bg(task_id, params):
 
         font_green = Font(color="008000", bold=True)
         font_red = Font(color="FF0000", bold=True)
-        font_blue = Font(color="0000FF", bold=True) # Destaque visual de Paradas
+        font_blue = Font(color="0000FF", bold=True)
         font_link = Font(color="0000FF", underline="single")
         align_center = Alignment(horizontal="center")
 
         row_idx = 13
         for f in filas_brutas:
-            ciudad = "Hermosillo" if "Hermosillo" in f['origen'] else ("Navojoa" if "Navojoa" in f['origen'] or "Pueblo Mayo" in f['origen'] else ("Guaymas" if "Guaymas" in f['origen'] else "Zona Operativa"))
-
             ws.cell(row=row_idx, column=1, value=str(unit_name))
             ws.cell(row=row_idx, column=2, value=f['fecha'].strftime('%Y-%m-%d %H:%M:%S'))
             ws.cell(row=row_idx, column=3, value=f['origen'])
-            ws.cell(row=row_idx, column=4, value=ciudad)
+            ws.cell(row=row_idx, column=4, value=f['ciudad'])
             ws.cell(row=row_idx, column=5, value=f['velocidad'])
             
             ev_cell = ws.cell(row=row_idx, column=6, value=f['evento'])
@@ -962,7 +993,6 @@ def procesar_reporte_bg(task_id, params):
             if f['geocerca'] != "Fuera de geocerca": 
                 geo_cell.font = font_green
                 
-            # Aplicación de colores según el Evento
             if "Parada" in f['evento']:
                 ev_cell.font = font_blue
             elif "Exceso" in f['evento'] or "Motor" in f['evento'] or "Ralentí" in f['evento']: 
