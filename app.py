@@ -212,7 +212,7 @@ HTML_INTERFACE = """
                 </div>
 
                 <div class="form-group">
-                    <label>Geocercas (Sincronizadas desde Mapon):</label>
+                    <label>Geocercas:</label>
                     <select id="geofence_select" multiple="multiple" style="width: 100%;">
                         <option value="">⏳ Descargando API...</option>
                     </select>
