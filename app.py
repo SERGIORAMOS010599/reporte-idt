@@ -84,7 +84,7 @@ def cargar_geocercas_api():
     except Exception: pass
     return geocercas if geocercas else cargar_geocercas_excel()
 
-# LLAMADA A MAPON SIN INVENTAR DATOS (Con reintentos tolerantes a bloqueos)
+# OBTENCIÓN DE DIRECCIÓN REAL DE MAPON
 def fetch_address_from_mapon(lat, lng):
     url = f"{BASE_URL}/address/get.json?key={API_KEY}&lat={lat}&lng={lng}"
     for intento in range(3):
@@ -95,11 +95,11 @@ def fetch_address_from_mapon(lat, lng):
                 if data and 'data' in data:
                     addr = data['data'].get('address', '')
                     if addr: return addr
-            elif r.status_code == 429: # Mapon dice "demasiadas peticiones"
-                time.sleep(1)
+            elif r.status_code == 429: 
+                time.sleep(1.5)
         except:
             time.sleep(1)
-    return "" # Si Mapon no sabe o bloquea, regresa vacío real.
+    return ""
 
 # ==========================================
 # INTERFAZ WEB
@@ -168,7 +168,6 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <!-- V29: Datos Mapon Reales y Eventos Estrictos -->
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -496,10 +495,23 @@ def procesar_reporte_bg(task_id, params):
                 can_data["engine_hrs_final"] = float(fin_unit.get('total_engine_hours', {}).get('value', 0))
         except Exception: pass
         
+        try:
+            url_temp = f"{BASE_URL}/unit_data/temperature.json"
+            res_temp = requests.get(url_temp, params={"key": API_KEY, "unit_id": unit_id, "from": utc_start_str, "till": utc_end_str}, timeout=15).json()
+            sensors = res_temp.get('data', {}).get('units', [{}])[0].get('sensors', [])
+            max_t = 0
+            for sensor in sensors:
+                if str(sensor.get('no', '')) == '1': 
+                    for t in sensor.get('temperatures', []):
+                        val = float(t.get('value', 0))
+                        if val > max_t: max_t = val
+            can_data["max_temp"] = max_t
+        except Exception: pass
+
         # ==============================================================
         # 2. RUTAS Y EVENTOS (Extracción Mapon real)
         # ==============================================================
-        TASKS[task_id]['msg'] = 'Extrayendo rutas y velocidades nativas de Mapon...'
+        TASKS[task_id]['msg'] = 'Extrayendo rutas nativas de Mapon...'
         
         url_route = f"{BASE_URL}/route/list.json"
         url_ign = f"{BASE_URL}/unit_data/ignitions.json"
@@ -611,7 +623,7 @@ def procesar_reporte_bg(task_id, params):
         
         paradas_validas.sort() 
         total_paradas = len(paradas_validas)
-        dict_paradas = {p_dt: f"Parada {i+1}" for i, p_dt in enumerate(paradas_validas)}
+        dict_paradas = {p_dt: f"Parada {i+1} detectada" for i, p_dt in enumerate(paradas_validas)}
 
         # ==============================================================
         # 3. CUADRÍCULA COMPRIMIDA
@@ -654,33 +666,35 @@ def procesar_reporte_bg(task_id, params):
         cuadricula_maestra = sorted(list(set(cuadricula_maestra)))
 
         # ==============================================================
-        # 4. GEOCODIFICACIÓN DINÁMICA DE CALLES EN MAPON
+        # 4. GEOCODIFICACIÓN DINÁMICA CADA 350 METROS (REAL MAPON)
         # ==============================================================
         TASKS[task_id]['msg'] = "Descargando calles reales desde Mapon. Esto puede tardar 1 o 2 minutos..."
         
         coords_to_fetch = []
         last_f_lat, last_f_lng = 0, 0
         
-        # Estrategia: Solo pedir a Mapon 1 calle nueva cada 800 metros para no ser bloqueados.
+        # Pide la calle a Mapon cada que el camión se mueve 350 metros
         for p in puntos_maestros_reales:
             c_lat, c_lng = p['lat'], p['lng']
-            if calcular_distancia(last_f_lat, last_f_lng, c_lat, c_lng) > 800:
+            if calcular_distancia(last_f_lat, last_f_lng, c_lat, c_lng) > 350:
                 coords_to_fetch.append((c_lat, c_lng))
                 last_f_lat, last_f_lng = c_lat, c_lng
 
         address_cache = {}
         if coords_to_fetch:
-            # Solo 2 hilos a la vez para no provocar a la API de Mapon
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            # Procesamiento concurrente balanceado para evitar el error 429
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                 futures = {executor.submit(fetch_address_from_mapon, c[0], c[1]): c for c in coords_to_fetch}
                 for future in concurrent.futures.as_completed(futures):
                     coord = futures[future]
-                    address_cache[coord] = future.result()
+                    res = future.result()
+                    if res:
+                        address_cache[coord] = res
 
         # ==============================================================
-        # 5. LLENADO Y APLICACIÓN ESTRICTA DE REGLAS DE KOWI
+        # 5. LLENADO Y REGLAS ESTRICTAS
         # ==============================================================
-        TASKS[task_id]['msg'] = "Aplicando filtros de Kowi..."
+        TASKS[task_id]['msg'] = "Aplicando formato estricto de Kowi..."
         filas_brutas = []
         tiempo_mov_seg = 0
         tiempo_exceso_geo_seg = 0
@@ -694,6 +708,9 @@ def procesar_reporte_bg(task_id, params):
         last_dt_punto = None
         last_geo_lat, last_geo_lng = None, None
         last_geo_name = "Fuera de geocerca"
+        
+        # Memoria arrastrada para asegurar que nunca haya un espacio en blanco
+        last_valid_address = "Calculando ubicación inicial..."
 
         for i, dt in enumerate(cuadricula_maestra):
             ign_on = is_ignition_on(dt)
@@ -758,18 +775,17 @@ def procesar_reporte_bg(task_id, params):
                 last_geo_lat, last_geo_lng = curr_lat, curr_lng
                 last_geo_name = geo_name
 
-            # OBTENCIÓN DINÁMICA Y HONESTA DE LA DIRECCIÓN
+            # DIRECCION REAL: Busca en caché
             addr_full = ""
             min_dist_cache = float('inf')
             
-            # 1. Buscamos en las calles descargadas recientemente
             for c_coord, c_addr in address_cache.items():
                 dist_cache = calcular_distancia(curr_lat, curr_lng, c_coord[0], c_coord[1])
-                if dist_cache < min_dist_cache and dist_cache < 1200: 
+                if dist_cache < min_dist_cache and dist_cache < 800: 
                     min_dist_cache = dist_cache
                     addr_full = c_addr
 
-            # 2. Si Mapon no mandó nada o la calle está vacía, usamos el tramo principal o parada
+            # Respaldo con la dirección del tramo general
             if not addr_full:
                 if en_ruta and tramo_actual:
                     addr_full = str(tramo_actual.get('address', ''))
@@ -778,22 +794,31 @@ def procesar_reporte_bg(task_id, params):
                         if p['dt_ini'] <= dt <= p['dt_fin']:
                             addr_full = str(p.get('address', ''))
                             break
+                            
+            # Memoria de Arrastre (Si no hay dato nuevo, usa la última calle válida, sin inventar nada)
+            if not addr_full or addr_full.strip() == "":
+                addr_full = last_valid_address
+            else:
+                last_valid_address = addr_full
 
-            # 3. Separación Ciudad y Calle real
             parts = [p.strip() for p in addr_full.split(',') if p.strip()]
             if len(parts) >= 3:
                 c = parts[-3]
-                ciudad_calculada = re.sub(r'^\d+\s*', '', c)
-            elif len(parts) == 2:
+                ciudad_calculada = re.sub(r'^\d+\s*', '', c).strip()
+            elif len(parts) >= 1:
                 ciudad_calculada = parts[0]
             else:
-                ciudad_calculada = "-"
-            
-            origen_calculado = addr_full if addr_full else "-"
+                ciudad_calculada = addr_full
+                
+            if not ciudad_calculada or ciudad_calculada == "-":
+                ciudad_calculada = addr_full
 
-            # REGLA ESTRICTA DE KOWI: Solo 4 Eventos. Las paradas van en Detalle.
+            # LA DIRECCIÓN CRUDA, SIN GUIONES
+            origen_calculado = addr_full
+
+            # EVENTOS KOWI ESTRICTOS (Solo los 4, y Parada en Detalle)
             evento = ""
-            detalle = "-"
+            detalle = ""
             
             es_evento_motor = next((e for e in eventos_ignicion if e['dt'] == dt), None)
             es_evento_parada = dict_paradas.get(dt) 
@@ -801,9 +826,9 @@ def procesar_reporte_bg(task_id, params):
             if es_evento_motor:
                 evento = "Motor encendido" if es_evento_motor['tipo'] == 'on' else "Motor apagado"
                 if es_evento_parada: 
-                    detalle = f"{es_evento_parada} (Inicio)"
+                    detalle = f"{es_evento_parada}"
             elif es_evento_parada:
-                # Si ocurrió una parada pero el motor no se apagó ahí mismo
+                evento = "Motor apagado"
                 detalle = f"{es_evento_parada}"
             elif current_speed > 0:
                 limite_aplicable = limite_velocidad_gral
@@ -813,13 +838,10 @@ def procesar_reporte_bg(task_id, params):
                             try: limite_aplicable = int(gdata['limit'])
                             except Exception: pass
                             break
-                    if current_speed > limite_aplicable:
-                        evento = "Exceso de velocidad"
-                        detalle = f"{current_speed} km/h (Límite: {limite_aplicable} km/h)"
-                        tiempo_exceso_geo_seg += min(60, seg_transcurridos) 
-                elif current_speed > limite_velocidad_gral:
+                if current_speed > limite_aplicable:
                     evento = "Exceso de velocidad"
-                    detalle = f"{current_speed} km/h (Límite: {limite_velocidad_gral} km/h)"
+                    detalle = f"{current_speed} km/h (Límite: {limite_aplicable} km/h)"
+                    tiempo_exceso_geo_seg += min(60, seg_transcurridos) 
 
             filas_brutas.append({
                 'fecha': dt, 
@@ -848,11 +870,10 @@ def procesar_reporte_bg(task_id, params):
                     if filas_brutas[target_idx]['evento'] == 'Motor encendido' and target_idx + 1 < idx:
                         target_idx += 1
                         
-                    # Aplicamos "Ralentí" estricto. Si había una parada en Detalle, la sumamos.
-                    viejo_detalle = filas_brutas[target_idx]['detalle']
                     filas_brutas[target_idx]['evento'] = 'Ralentí'
+                    viejo_detalle = filas_brutas[target_idx]['detalle']
                     
-                    if "Parada" in viejo_detalle:
+                    if viejo_detalle:
                         filas_brutas[target_idx]['detalle'] = f"{consecutive_idles} mins / {viejo_detalle}"
                     else:
                         filas_brutas[target_idx]['detalle'] = f"{consecutive_idles} mins"
@@ -865,10 +886,10 @@ def procesar_reporte_bg(task_id, params):
             if filas_brutas[target_idx]['evento'] == 'Motor encendido' and target_idx + 1 < len(filas_brutas):
                 target_idx += 1
                 
-            viejo_detalle = filas_brutas[target_idx]['detalle']
             filas_brutas[target_idx]['evento'] = 'Ralentí'
+            viejo_detalle = filas_brutas[target_idx]['detalle']
             
-            if "Parada" in viejo_detalle:
+            if viejo_detalle:
                 filas_brutas[target_idx]['detalle'] = f"{consecutive_idles} mins / {viejo_detalle}"
             else:
                 filas_brutas[target_idx]['detalle'] = f"{consecutive_idles} mins"
