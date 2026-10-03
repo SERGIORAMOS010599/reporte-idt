@@ -85,6 +85,18 @@ def cargar_geocercas_api():
     except Exception: pass
     return geocercas if geocercas else cargar_geocercas_excel()
 
+def fetch_address_from_mapon(lat, lng):
+    url = f"{BASE_URL}/address/get.json?key={API_KEY}&lat={lat}&lng={lng}"
+    try:
+        r = requests.get(url, timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            if data and 'data' in data:
+                addr = data['data'].get('address')
+                if addr: return addr
+    except: pass
+    return "Carretera / Ruta Local"
+
 # ==========================================
 # INTERFAZ WEB
 # ==========================================
@@ -152,7 +164,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <!-- V27: Direcciones Inteligentes y Paradas Restituidas -->
+                <!-- V28: Geocodificador Inteligente y Paradas de Kowi -->
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -406,16 +418,6 @@ def descargar_reporte():
         return send_file(file_path, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", as_attachment=True, download_name=f"Reporte_{unit_name}.xlsx")
     return "Reporte no disponible o ya fue descargado.", 404
 
-def fetch_address_from_mapon(lat, lng):
-    url = f"{BASE_URL}/address/get.json?key={API_KEY}&lat={lat}&lng={lng}"
-    try:
-        r = requests.get(url, timeout=5)
-        if r.status_code == 200:
-            addr = r.json().get('data', {}).get('address', '')
-            if addr: return addr
-    except: pass
-    return "Ruta en Movimiento"
-
 def procesar_reporte_bg(task_id, params):
     try:
         def normalizar_fecha(f): return f if f else '2026-08-09'
@@ -463,7 +465,7 @@ def procesar_reporte_bg(task_id, params):
         # ==============================================================
         # 1. EXTRACCIÓN DE DATOS CAN BUS Y TEMPERATURA
         # ==============================================================
-        TASKS[task_id]['msg'] = 'Analizando parámetros de la unidad...'
+        TASKS[task_id]['msg'] = 'Analizando parámetros de la unidad (CAN Bus)...'
         can_data = {
             "has_can": False,
             "dist_inicial": 0, "dist_final": 0,
@@ -504,14 +506,15 @@ def procesar_reporte_bg(task_id, params):
         except Exception: pass
 
         # ==============================================================
-        # 2. RUTAS, IGNICIONES Y EXTRACCIÓN DINÁMICA
+        # 2. RUTAS, IGNICIONES Y EXTRACCIÓN DINÁMICA DE DIRECCIONES
         # ==============================================================
-        TASKS[task_id]['msg'] = 'Descargando motor de rutas y velocidades de hardware...'
+        TASKS[task_id]['msg'] = 'Extrayendo motor de repetición y ubicaciones nativas...'
         
         url_route = f"{BASE_URL}/route/list.json"
         url_ign = f"{BASE_URL}/unit_data/ignitions.json"
         
         tramos_reales = []
+        paradas_historial = []
         eventos_ignicion = []
         paradas_unicas = set() 
         puntos_maestros_reales = []
@@ -561,6 +564,7 @@ def procesar_reporte_bg(task_id, params):
                             dt_ini_str = obj.get('start', {}).get('time', '')
                             if dt_ini_str:
                                 paradas_unicas.add(dt_ini_str)
+                            rutas_encontradas.append(obj)
                         for k, v in obj.items():
                             if isinstance(v, (dict, list)): extraer_tramos(v)
                     elif isinstance(obj, list):
@@ -569,29 +573,38 @@ def procesar_reporte_bg(task_id, params):
                 extraer_tramos(data)
                 
                 for item in rutas_encontradas:
+                    tipo = str(item.get('type', '')).lower()
                     dt_ini = parse_iso(item.get('start', {}).get('time', ''))
                     dt_fin = parse_iso(item.get('end', {}).get('time', ''))
                     if not dt_ini or not dt_fin: continue
-                        
-                    dist_km = float(item.get('distance', 0)) / 1000.0
-                    max_speed = float(item.get('max_speed', 110))
-                    if max_speed <= 0: max_speed = 110
 
-                    tramos_reales.append({
-                        'dt_ini': dt_ini, 'dt_fin': dt_fin, 'distancia': dist_km, 'tipo': 'route',
-                        'max_speed': max_speed
-                    })
+                    if tipo == 'route':
+                        dist_km = float(item.get('distance', 0)) / 1000.0
+                        max_speed = float(item.get('max_speed', 110))
+                        if max_speed <= 0: max_speed = 110
 
-                    puntos_nativos = item.get('decoded_route', {}).get('points', [])
-                    for pt in puntos_nativos:
-                        pt_time = parse_iso(pt.get('gmt'))
-                        if pt_time:
-                            puntos_maestros_reales.append({
-                                'dt': pt_time,
-                                'lat': float(pt.get('lat', 0)),
-                                'lng': float(pt.get('lng', 0)),
-                                'speed': float(pt.get('speed', 0))
-                            })
+                        tramos_reales.append({
+                            'dt_ini': dt_ini, 'dt_fin': dt_fin, 'distancia': dist_km, 'tipo': 'route',
+                            'max_speed': max_speed
+                        })
+
+                        puntos_nativos = item.get('decoded_route', {}).get('points', [])
+                        for pt in puntos_nativos:
+                            pt_time = parse_iso(pt.get('gmt'))
+                            if pt_time:
+                                puntos_maestros_reales.append({
+                                    'dt': pt_time,
+                                    'lat': float(pt.get('lat', 0)),
+                                    'lng': float(pt.get('lng', 0)),
+                                    'speed': float(pt.get('speed', 0))
+                                })
+                    elif tipo == 'stop':
+                        addr = str(item.get('start', {}).get('address', ''))
+                        if not addr: addr = str(item.get('address', ''))
+                        paradas_historial.append({
+                            'dt_ini': dt_ini, 'dt_fin': dt_fin, 'address': addr
+                        })
+
             except Exception: pass 
             current_start = current_end
 
@@ -607,7 +620,7 @@ def procesar_reporte_bg(task_id, params):
         
         paradas_validas.sort() 
         total_paradas = len(paradas_validas)
-        # Diccionario con el texto exacto de las Paradas restaurado
+        # Diccionario RESTAURADO para las Paradas Oficiales
         dict_paradas = {p_dt: f"Parada {i+1} detectada" for i, p_dt in enumerate(paradas_validas)}
 
         # ==============================================================
@@ -651,10 +664,35 @@ def procesar_reporte_bg(task_id, params):
         cuadricula_maestra = sorted(list(set(cuadricula_maestra)))
 
         # ==============================================================
-        # 4. GEOCODIFICADOR INTELIGENTE POR DESPLAZAMIENTO
+        # 4. GEOCODIFICADOR INTELIGENTE POR KILOMETRAJE (Evita bloqueos de Mapon)
         # ==============================================================
-        TASKS[task_id]['msg'] = "Mapeando ubicaciones exactas calle por calle..."
+        TASKS[task_id]['msg'] = "Geocodificando calles y tramos (Procesamiento Inteligente)..."
         
+        coords_to_fetch = []
+        last_f_lat, last_f_lng = 0, 0
+        
+        # Analiza toda la ruta, y añade a la lista solo 1 coordenada cada 800 metros de movimiento real
+        for p in puntos_maestros_reales:
+            c_lat, c_lng = p['lat'], p['lng']
+            if calcular_distancia(last_f_lat, last_f_lng, c_lat, c_lng) > 800:
+                coords_to_fetch.append((c_lat, c_lng))
+                last_f_lat, last_f_lng = c_lat, c_lng
+
+        address_cache = {}
+        if coords_to_fetch:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                futures = {executor.submit(fetch_address_from_mapon, c[0], c[1]): c for c in coords_to_fetch}
+                for future in concurrent.futures.as_completed(futures):
+                    coord = futures[future]
+                    try:
+                        address_cache[coord] = future.result()
+                    except:
+                        address_cache[coord] = "Carretera / Ruta Local"
+
+        # ==============================================================
+        # 5. LLENADO DIRECTO EN MEMORIA 
+        # ==============================================================
+        TASKS[task_id]['msg'] = "Generando Reporte de Eventos..."
         filas_brutas = []
         tiempo_mov_seg = 0
         tiempo_exceso_geo_seg = 0
@@ -666,30 +704,8 @@ def procesar_reporte_bg(task_id, params):
             last_lat, last_lng = puntos_maestros_reales[0]['lat'], puntos_maestros_reales[0]['lng']
             
         last_dt_punto = None
-        
-        # PRE-CÁLCULO PARA EL GEOCODIFICADOR EN CACHÉ (Acelera la descarga x100)
-        coords_to_fetch = set()
-        for dt in cuadricula_maestra:
-            idx = bisect.bisect_left(maestro_dts, dt)
-            start_check = max(0, idx - 2)
-            end_check = min(len(puntos_maestros_reales), idx + 2)
-            for check_idx in range(start_check, end_check):
-                diff = abs((puntos_maestros_reales[check_idx]['dt'] - dt).total_seconds())
-                if diff <= 90:
-                    c_lat = puntos_maestros_reales[check_idx]['lat']
-                    c_lng = puntos_maestros_reales[check_idx]['lng']
-                    coords_to_fetch.add((round(c_lat, 4), round(c_lng, 4)))
-        
-        address_cache = {}
-        if coords_to_fetch:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-                futures = {executor.submit(fetch_address_from_mapon, c[0], c[1]): c for c in coords_to_fetch}
-                for future in concurrent.futures.as_completed(futures):
-                    coord = futures[future]
-                    try:
-                        address_cache[coord] = future.result()
-                    except:
-                        address_cache[coord] = "Ruta en Movimiento"
+        last_geo_lat, last_geo_lng = None, None
+        last_geo_name = "Fuera de geocerca"
 
         for i, dt in enumerate(cuadricula_maestra):
             ign_on = is_ignition_on(dt)
@@ -747,11 +763,29 @@ def procesar_reporte_bg(task_id, params):
             elif not ign_on:
                 tiempo_apagado_seg += seg_transcurridos
 
-            geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng)
+            if curr_lat == last_geo_lat and curr_lng == last_geo_lng:
+                geo_name = last_geo_name
+            else:
+                geo_id, geo_name = obtener_geocerca(curr_lat, curr_lng)
+                last_geo_lat, last_geo_lng = curr_lat, curr_lng
+                last_geo_name = geo_name
 
-            # OBTENCIÓN DINÁMICA DE LA CALLE EXACTA
-            coord_round = (round(curr_lat, 4), round(curr_lng, 4))
-            addr_full = address_cache.get(coord_round, "Ruta en Movimiento")
+            # DIRECCION Y CIUDAD DINÁMICA DE LA CACHÉ
+            addr_full = "Carretera / Ruta Local"
+            min_dist_cache = float('inf')
+            
+            # Busca la dirección descargada más cercana (hasta 1.2 km de distancia)
+            for c_coord, c_addr in address_cache.items():
+                dist_cache = calcular_distancia(curr_lat, curr_lng, c_coord[0], c_coord[1])
+                if dist_cache < min_dist_cache and dist_cache < 1200: 
+                    min_dist_cache = dist_cache
+                    addr_full = c_addr
+
+            # Prioridad de dirección: si el camión está en una Parada Oficial conocida, tomamos esa exacta
+            for p in paradas_historial:
+                if p['dt_ini'] <= dt <= p['dt_fin']:
+                    addr_full = str(p.get('address', addr_full))
+                    break
 
             parts = [p.strip() for p in addr_full.split(',')]
             if len(parts) >= 3:
@@ -760,12 +794,12 @@ def procesar_reporte_bg(task_id, params):
             elif len(parts) == 2:
                 ciudad_calculada = parts[0]
             else:
-                ciudad_calculada = addr_full if addr_full != "Ruta en Movimiento" else "Carretera / Foránea"
+                ciudad_calculada = "Carretera / Foránea"
 
             # KOWI PIDIÓ LA DIRECCIÓN EXACTA TAL CUAL MAPON LA ARROJA
             origen_calculado = addr_full
 
-            # EVENTOS EXACTOS DE KOWI (Con las paradas integradas)
+            # EVENTOS ESTRICTOS DE KOWI (Motor apagado, Ralentí, Motor encendido, Exceso de velocidad + Paradas)
             evento = ""
             detalle = "-"
             
@@ -805,7 +839,7 @@ def procesar_reporte_bg(task_id, params):
             })
 
         # ==============================================================
-        # 5. MOTOR NATIVO DE RALENTÍ MATEMÁTICO
+        # 6. MOTOR NATIVO DE RALENTÍ MATEMÁTICO
         # ==============================================================
         tiempo_ral_reportado_seg = 0
         consecutive_idles = 0
@@ -847,7 +881,7 @@ def procesar_reporte_bg(task_id, params):
             tiempo_ral_reportado_seg += (consecutive_idles * 60)
 
         # ==============================================================
-        # 6. DIBUJADO DEL EXCEL
+        # 7. DIBUJADO DEL EXCEL
         # ==============================================================
         TASKS[task_id]['msg'] = "Empaquetando reporte final en Excel..."
         def calc_hrs_mins(segundos): return int(segundos // 3600), int((segundos % 3600) // 60)
