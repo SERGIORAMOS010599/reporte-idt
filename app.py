@@ -152,7 +152,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <!-- V25: Formato de Eventos y Direcciones Estricto Kowi -->
+                <!-- V26: Direcciones Completas Estrictas Kowi -->
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -444,6 +444,20 @@ def procesar_reporte_bg(task_id, params):
                 try: return datetime.strptime(str(iso_str).replace('Z', '').split('.')[0], '%Y-%m-%dT%H:%M:%S') + timedelta(hours=TIMEZONE_OFFSET)
                 except Exception: return None
 
+        def fetch_exact_point(dt):
+            utc_str = (dt - timedelta(hours=TIMEZONE_OFFSET)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            url = f"{BASE_URL}/unit_data/history_point.json?key={API_KEY}&unit_id={unit_id}&datetime={utc_str}&include[]=position"
+            try:
+                r = requests.get(url, timeout=10)
+                data = r.json()
+                units = data.get('data', {}).get('units', [])
+                if units:
+                    pos = units[0].get('position', {}).get('value', {})
+                    if pos and 'lat' in pos and 'lng' in pos:
+                        return {'dt': dt, 'lat': float(pos['lat']), 'lng': float(pos['lng'])}
+            except Exception: pass
+            return None
+
         dt_inicio_req = datetime.strptime(f"{f_in} {hora_inicio}", "%Y-%m-%d %H:%M:%S")
         dt_fin_req = datetime.strptime(f"{f_fin} {hora_fin}", "%Y-%m-%d %H:%M:%S")
         
@@ -733,28 +747,28 @@ def procesar_reporte_bg(task_id, params):
                 last_geo_lat, last_geo_lng = curr_lat, curr_lng
                 last_geo_name = geo_name
 
-            # DIRECCION Y CIUDAD DINÁMICA (CORREGIDA PARA EXTRACCIÓN REAL)
+            # DIRECCION Y CIUDAD DINÁMICA (CORREGIDA PARA EXTRAER EL TEXTO COMPLETO REAL)
             addr_full = "Desconocida"
             if en_ruta and tramo_actual:
-                addr_full = tramo_actual.get('address', 'En tránsito')
+                addr_full = str(tramo_actual.get('address', 'En tránsito'))
             else:
                 for p in paradas_historial:
                     if p['dt_ini'] <= dt <= p['dt_fin']:
-                        addr_full = p.get('address', 'Estacionado')
+                        addr_full = str(p.get('address', 'Estacionado'))
                         break
 
-            # Limpiador Regex para extraer Ciudad y Calle (Sin sobreescribir la Geocerca)
+            # Extractor exclusivo para la columna Ciudad
             parts = [p.strip() for p in addr_full.split(',')]
             if len(parts) >= 3:
                 c = parts[-3]
                 ciudad_calculada = re.sub(r'^\d+\s*', '', c)
-                origen_calculado = parts[0] # La calle exacta
             elif len(parts) == 2:
                 ciudad_calculada = parts[0]
-                origen_calculado = parts[0]
             else:
                 ciudad_calculada = addr_full if addr_full != "Desconocida" else "Carretera / Foránea"
-                origen_calculado = addr_full if addr_full != "Desconocida" else "Ruta en Movimiento"
+
+            # KOWI PIDIÓ LA DIRECCIÓN REAL COMPLETA SIN RECORTES (Dirección Column)
+            origen_calculado = addr_full if addr_full != "Desconocida" else "Ruta en Movimiento"
 
             # REGLAS DE EVENTOS ESTRICTAS DE KOWI (Solo los 4 permitidos)
             evento = ""
