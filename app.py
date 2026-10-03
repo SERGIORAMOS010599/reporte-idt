@@ -144,7 +144,7 @@ HTML_INTERFACE = """
             <source src="{{ url_for('static', filename='video_kowi.mp4') }}" type="video/mp4">
         </video>
         <div class="loading-text">Generando Reporte Minuto a Minuto</div>
-        <div class="loading-subtext" id="overlay_status">⏳ Inicializando Motor de Extracción...</div>
+        <div class="loading-subtext" id="overlay_status">⏳ Inicializando...</div>
     </div>
 
     <div class="card">
@@ -152,7 +152,7 @@ HTML_INTERFACE = """
             <img src="{{ url_for('static', filename='logo_kowi.png') }}" class="logo-img" alt="Kowi">
             <div class="header-text">
                 <h2>Histórico De Rutas Minuto a Minuto</h2>
-                <!-- V24: Módulo de Direcciones Inteligente (Nationwide) -->
+                <!-- V25: Formato de Eventos y Direcciones Estricto Kowi -->
             </div>
             <img src="{{ url_for('static', filename='logo_idt.png') }}" class="logo-img" alt="IDT Tecnologías">
         </div>
@@ -212,7 +212,7 @@ HTML_INTERFACE = """
                 </div>
 
                 <div class="form-group">
-                    <label>Geocercas:</label>
+                    <label>Geocercas (Sincronizadas desde Mapon):</label>
                     <select id="geofence_select" multiple="multiple" style="width: 100%;">
                         <option value="">⏳ Descargando API...</option>
                     </select>
@@ -275,7 +275,7 @@ HTML_INTERFACE = """
             
             btn.disabled = true;
             overlay.style.display = 'flex';
-            overlayStatus.innerText = "⏳ Descargando motor de reproducción Mapon...";
+            overlayStatus.innerText = "⏳ Analizando periodo seleccionado...";
 
             const geoLimits = {};
             $('.geo-limit').each(function() {
@@ -534,9 +534,9 @@ def procesar_reporte_bg(task_id, params):
                         on_dt = parse_iso(ign.get('on'))
                         off_dt = parse_iso(ign.get('off'))
                         if on_dt and dt_inicio_req <= on_dt <= dt_fin_req:
-                            eventos_ignicion.append({'dt': on_dt, 'evento': 'Motor encendido', 'tipo': 'on', 'detalle': 'Ignición activada'})
+                            eventos_ignicion.append({'dt': on_dt, 'evento': 'Motor encendido', 'tipo': 'on'})
                         if off_dt and dt_inicio_req <= off_dt <= dt_fin_req:
-                            eventos_ignicion.append({'dt': off_dt, 'evento': 'Motor apagado', 'tipo': 'off', 'detalle': 'Llave cerrada'})
+                            eventos_ignicion.append({'dt': off_dt, 'evento': 'Motor apagado', 'tipo': 'off'})
                 except Exception: pass
 
                 response = requests.get(url_route, params=req_params, timeout=45)
@@ -552,7 +552,7 @@ def procesar_reporte_bg(task_id, params):
                             dt_ini_str = obj.get('start', {}).get('time', '')
                             if dt_ini_str:
                                 paradas_unicas.add(dt_ini_str)
-                            rutas_encontradas.append(obj) # Guardamos también la parada completa para leer su dirección
+                            rutas_encontradas.append(obj)
                         for k, v in obj.items():
                             if isinstance(v, (dict, list)): extraer_tramos(v)
                     elif isinstance(obj, list):
@@ -610,7 +610,6 @@ def procesar_reporte_bg(task_id, params):
         
         paradas_validas.sort() 
         total_paradas = len(paradas_validas)
-        dict_paradas = {p_dt: f"Parada {i+1} detectada" for i, p_dt in enumerate(paradas_validas)}
 
         # ==============================================================
         # 3. CUADRÍCULA COMPRIMIDA (SALTA 10 MINUTOS SI ESTÁ APAGADO)
@@ -646,7 +645,7 @@ def procesar_reporte_bg(task_id, params):
                 cuadricula_maestra.append(dt)
             else:
                 is_evento = any(e['dt'] == dt for e in eventos_ignicion)
-                is_parada = dt in dict_paradas 
+                is_parada = dt in paradas_validas 
                 if is_evento or is_parada or dt == dt_inicio_req or dt == dt_fin_req or dt.minute % 10 == 0:
                     cuadricula_maestra.append(dt)
 
@@ -655,7 +654,7 @@ def procesar_reporte_bg(task_id, params):
         # ==============================================================
         # 4. LLENADO DIRECTO EN MEMORIA 
         # ==============================================================
-        TASKS[task_id]['msg'] = "Mapeando velocidades de Hardware y Direcciones Nacionales..."
+        TASKS[task_id]['msg'] = "Mapeando velocidades de Hardware y Direcciones Reales..."
         
         filas_brutas = []
         tiempo_mov_seg = 0
@@ -734,7 +733,7 @@ def procesar_reporte_bg(task_id, params):
                 last_geo_lat, last_geo_lng = curr_lat, curr_lng
                 last_geo_name = geo_name
 
-            # DIRECCION Y CIUDAD DINÁMICA (Cubre Toda la República Mexicana usando el texto de Mapon)
+            # DIRECCION Y CIUDAD DINÁMICA (CORREGIDA PARA EXTRACCIÓN REAL)
             addr_full = "Desconocida"
             if en_ruta and tramo_actual:
                 addr_full = tramo_actual.get('address', 'En tránsito')
@@ -744,36 +743,28 @@ def procesar_reporte_bg(task_id, params):
                         addr_full = p.get('address', 'Estacionado')
                         break
 
-            # Limpiador Regex para extraer la Ciudad
+            # Limpiador Regex para extraer Ciudad y Calle (Sin sobreescribir la Geocerca)
             parts = [p.strip() for p in addr_full.split(',')]
             if len(parts) >= 3:
                 c = parts[-3]
-                ciudad_calculada = re.sub(r'^\d+\s*', '', c) # Borra el código postal si viene al inicio
+                ciudad_calculada = re.sub(r'^\d+\s*', '', c)
+                origen_calculado = parts[0] # La calle exacta
             elif len(parts) == 2:
                 ciudad_calculada = parts[0]
+                origen_calculado = parts[0]
             else:
                 ciudad_calculada = addr_full if addr_full != "Desconocida" else "Carretera / Foránea"
+                origen_calculado = addr_full if addr_full != "Desconocida" else "Ruta en Movimiento"
 
-            # Dirección de Celda
-            if geo_name != "Fuera de geocerca":
-                origen_calculado = f"Instalación: {geo_name}"
-            else:
-                origen_calculado = parts[0] if parts and parts[0] != "Desconocida" else "Ruta en Movimiento"
-
+            # REGLAS DE EVENTOS ESTRICTAS DE KOWI (Solo los 4 permitidos)
             evento = ""
             detalle = "-"
             
             es_evento_motor = next((e for e in eventos_ignicion if e['dt'] == dt), None)
-            es_evento_parada = dict_paradas.get(dt) 
             
             if es_evento_motor:
-                evento = es_evento_motor['evento']
-                detalle = es_evento_motor['detalle']
-                if es_evento_parada: 
-                    evento = f"{es_evento_parada} / {evento}"
-            elif es_evento_parada:
-                evento = es_evento_parada
-                detalle = "Inicio de estacionamiento"
+                evento = "Motor encendido" if es_evento_motor['tipo'] == 'on' else "Motor apagado"
+                detalle = "-"
             elif current_speed > 0:
                 limite_aplicable = limite_velocidad_gral
                 if geo_name != "Fuera de geocerca":
@@ -783,12 +774,12 @@ def procesar_reporte_bg(task_id, params):
                             except Exception: pass
                             break
                     if current_speed > limite_aplicable:
-                        evento = f"Exceso en {geo_name}"
-                        detalle = f"Vel: {current_speed} (Límite: {limite_aplicable})"
+                        evento = "Exceso de velocidad"
+                        detalle = f"{current_speed} km/h (Límite: {limite_aplicable} km/h)"
                         tiempo_exceso_geo_seg += min(60, seg_transcurridos) 
                 elif current_speed > limite_velocidad_gral:
                     evento = "Exceso de velocidad"
-                    detalle = f"Vel: {current_speed} (Límite: {limite_velocidad_gral})"
+                    detalle = f"{current_speed} km/h (Límite: {limite_velocidad_gral} km/h)"
 
             filas_brutas.append({
                 'fecha': dt, 
@@ -817,13 +808,8 @@ def procesar_reporte_bg(task_id, params):
                     if filas_brutas[target_idx]['evento'] == 'Motor encendido' and target_idx + 1 < idx:
                         target_idx += 1
                         
-                    viejo_evento = filas_brutas[target_idx]['evento']
-                    if "Parada" in viejo_evento:
-                        filas_brutas[target_idx]['evento'] = f"{viejo_evento} / Ralentí"
-                    else:
-                        filas_brutas[target_idx]['evento'] = 'Ralentí'
-                        
-                    filas_brutas[target_idx]['detalle'] = f"Detenido por: {consecutive_idles} mins"
+                    filas_brutas[target_idx]['evento'] = 'Ralentí'
+                    filas_brutas[target_idx]['detalle'] = f"{consecutive_idles} mins"
                     tiempo_ral_reportado_seg += (consecutive_idles * 60)
                 consecutive_idles = 0
                 
@@ -832,13 +818,8 @@ def procesar_reporte_bg(task_id, params):
             if filas_brutas[target_idx]['evento'] == 'Motor encendido' and target_idx + 1 < len(filas_brutas):
                 target_idx += 1
                 
-            viejo_evento = filas_brutas[target_idx]['evento']
-            if "Parada" in viejo_evento:
-                filas_brutas[target_idx]['evento'] = f"{viejo_evento} / Ralentí"
-            else:
-                filas_brutas[target_idx]['evento'] = 'Ralentí'
-                
-            filas_brutas[target_idx]['detalle'] = f"Detenido por: {consecutive_idles} mins"
+            filas_brutas[target_idx]['evento'] = 'Ralentí'
+            filas_brutas[target_idx]['detalle'] = f"{consecutive_idles} mins"
             tiempo_ral_reportado_seg += (consecutive_idles * 60)
 
         # ==============================================================
@@ -976,7 +957,6 @@ def procesar_reporte_bg(task_id, params):
 
         font_green = Font(color="008000", bold=True)
         font_red = Font(color="FF0000", bold=True)
-        font_blue = Font(color="0000FF", bold=True)
         font_link = Font(color="0000FF", underline="single")
         align_center = Alignment(horizontal="center")
 
@@ -995,9 +975,7 @@ def procesar_reporte_bg(task_id, params):
             if f['geocerca'] != "Fuera de geocerca": 
                 geo_cell.font = font_green
                 
-            if "Parada" in f['evento']:
-                ev_cell.font = font_blue
-            elif "Exceso" in f['evento'] or "Motor" in f['evento'] or "Ralentí" in f['evento']: 
+            if "Exceso" in f['evento'] or "Motor" in f['evento'] or "Ralentí" in f['evento']: 
                 ev_cell.font = font_red
             
             map_cell = ws.cell(row=row_idx, column=9, value="mapa")
