@@ -468,7 +468,7 @@ def procesar_reporte_bg(task_id, params):
         # ==============================================================
         # 1. EXTRACCIÓN DE DATOS CAN BUS Y TEMPERATURA
         # ==============================================================
-        TASKS[task_id]['msg'] = 'Analizando parámetros de la unidad...'
+        TASKS[task_id]['msg'] = 'Analizando parámetros de la unidad (CAN Bus)...'
         can_data = {
             "has_can": False,
             "dist_inicial": 0, "dist_final": 0,
@@ -666,23 +666,21 @@ def procesar_reporte_bg(task_id, params):
         cuadricula_maestra = sorted(list(set(cuadricula_maestra)))
 
         # ==============================================================
-        # 4. GEOCODIFICACIÓN DINÁMICA CADA 350 METROS (REAL MAPON)
+        # 4. GEOCODIFICACIÓN DINÁMICA CADA 800 METROS (REAL MAPON)
         # ==============================================================
-        TASKS[task_id]['msg'] = "Descargando calles reales desde Mapon. Esto puede tardar 1 o 2 minutos..."
+        TASKS[task_id]['msg'] = "Descargando calles reales desde Mapon. Esto puede tardar unos segundos..."
         
         coords_to_fetch = []
         last_f_lat, last_f_lng = 0, 0
         
-        # Pide la calle a Mapon cada que el camión se mueve 350 metros
         for p in puntos_maestros_reales:
             c_lat, c_lng = p['lat'], p['lng']
-            if calcular_distancia(last_f_lat, last_f_lng, c_lat, c_lng) > 350:
+            if calcular_distancia(last_f_lat, last_f_lng, c_lat, c_lng) > 800:
                 coords_to_fetch.append((c_lat, c_lng))
                 last_f_lat, last_f_lng = c_lat, c_lng
 
         address_cache = {}
         if coords_to_fetch:
-            # Procesamiento concurrente balanceado para evitar el error 429
             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                 futures = {executor.submit(fetch_address_from_mapon, c[0], c[1]): c for c in coords_to_fetch}
                 for future in concurrent.futures.as_completed(futures):
@@ -692,7 +690,7 @@ def procesar_reporte_bg(task_id, params):
                         address_cache[coord] = res
 
         # ==============================================================
-        # 5. LLENADO Y REGLAS ESTRICTAS
+        # 5. LLENADO CON MEMORIA INTELIGENTE PARA ELIMINAR BLANCOS
         # ==============================================================
         TASKS[task_id]['msg'] = "Aplicando formato estricto de Kowi..."
         filas_brutas = []
@@ -709,8 +707,12 @@ def procesar_reporte_bg(task_id, params):
         last_geo_lat, last_geo_lng = None, None
         last_geo_name = "Fuera de geocerca"
         
-        # Memoria arrastrada para asegurar que nunca haya un espacio en blanco
-        last_valid_address = "Calculando ubicación inicial..."
+        # PRE-CARGA LA DIRECCIÓN INICIAL PARA QUE NUNCA SALGA EL TEXTO "CALCULANDO..."
+        last_valid_address = ""
+        if tramos_reales and tramos_reales[0].get('address'):
+            last_valid_address = str(tramos_reales[0]['address'])
+        elif paradas_historial and paradas_historial[0].get('address'):
+            last_valid_address = str(paradas_historial[0]['address'])
 
         for i, dt in enumerate(cuadricula_maestra):
             ign_on = is_ignition_on(dt)
@@ -775,17 +777,18 @@ def procesar_reporte_bg(task_id, params):
                 last_geo_lat, last_geo_lng = curr_lat, curr_lng
                 last_geo_name = geo_name
 
-            # DIRECCION REAL: Busca en caché
+            # DIRECCION REAL Y DINÁMICA
             addr_full = ""
             min_dist_cache = float('inf')
             
+            # 1. Búsqueda en el geocodificador dinámico
             for c_coord, c_addr in address_cache.items():
                 dist_cache = calcular_distancia(curr_lat, curr_lng, c_coord[0], c_coord[1])
-                if dist_cache < min_dist_cache and dist_cache < 800: 
+                if dist_cache < min_dist_cache and dist_cache < 1200: 
                     min_dist_cache = dist_cache
                     addr_full = c_addr
 
-            # Respaldo con la dirección del tramo general
+            # 2. Respaldo de seguridad con puntos generales de Mapon
             if not addr_full:
                 if en_ruta and tramo_actual:
                     addr_full = str(tramo_actual.get('address', ''))
@@ -795,7 +798,7 @@ def procesar_reporte_bg(task_id, params):
                             addr_full = str(p.get('address', ''))
                             break
                             
-            # Memoria de Arrastre (Si no hay dato nuevo, usa la última calle válida, sin inventar nada)
+            # 3. La memoria invencible: Si el satélite de Mapon falla, repetimos la última calle válida
             if not addr_full or addr_full.strip() == "":
                 addr_full = last_valid_address
             else:
@@ -813,10 +816,9 @@ def procesar_reporte_bg(task_id, params):
             if not ciudad_calculada or ciudad_calculada == "-":
                 ciudad_calculada = addr_full
 
-            # LA DIRECCIÓN CRUDA, SIN GUIONES
             origen_calculado = addr_full
 
-            # EVENTOS KOWI ESTRICTOS (Solo los 4, y Parada en Detalle)
+            # REGLAS ESTRICTAS: 4 Eventos puros.
             evento = ""
             detalle = ""
             
